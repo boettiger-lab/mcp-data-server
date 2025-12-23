@@ -1,0 +1,65 @@
+name: Release New Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 0.8.0)'
+        required: true
+        type: string
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      
+      - name: Install bumpver
+        run: uv tool install bumpver
+      
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Update version to ${{ inputs.version }}
+        run: |
+          uv tool run bumpver update --set-version ${{ inputs.version }}
+          echo "NEW_VERSION=${{ inputs.version }}" >> $GITHUB_ENV
+      
+      - name: Push changes
+        run: |
+          git push origin main
+          git push origin --tags
+      
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ env.NEW_VERSION }}" \
+            --title "v${{ env.NEW_VERSION }}" \
+            --generate-notes
+      
+  # Publish job will be triggered automatically by the tag push
+  call-publish:
+    needs: bump-version
+    uses: ./.github/workflows/publish-mcp.yml
+    secrets: inherit
+

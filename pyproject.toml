@@ -1,0 +1,27 @@
+[project]
+name = "mcp-server-motherduck"
+version = "0.8.0"
+description = "A MCP server for MotherDuck and local DuckDB"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+ "duckdb==1.4.1",
+ "tabulate>=0.9.0",
+ "click>=8.1.8",
+ "starlette>=0.46.1",
+ "uvicorn>=0.34.0",
+ "anyio>=4.8.0",
+ "mcp>=1.9.4",
+ "pytz>=2025.2"
+]
+
+[[project.authors]]
+name = "tdoehmen"
+email = "till@motherduck.com"
+
+[build-system]
+requires = [ "hatchling",]
+build-backend = "hatchling.build"
+
+[project.scripts]
+mcp-server-motherduck = "mcp_server_motherduck:main"

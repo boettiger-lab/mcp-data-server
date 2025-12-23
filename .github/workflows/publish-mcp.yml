@@ -1,0 +1,78 @@
+name: Publish to PyPI and MCP Registry
+
+on:
+  workflow_dispatch:  # Allows manual triggering from GitHub Actions UI
+  workflow_call:  # Allows triggering from other workflows
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v0.7.0
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for OIDC authentication
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+      
+      - name: Build package
+        run: uv build
+      
+      - name: Publish to PyPI
+        id: pypi-publish
+        continue-on-error: true
+        run: |
+          uv publish --token ${{ secrets.PYPI_TOKEN }} 2>&1 | tee publish_output.txt
+          exit_code=${PIPESTATUS[0]}
+          if [ $exit_code -eq 0 ]; then
+            echo "✅ Successfully published to PyPI"
+            echo "pypi_status=success" >> $GITHUB_OUTPUT
+          elif grep -q "already exists" publish_output.txt || grep -q "File already exists" publish_output.txt; then
+            echo "⚠️ Package version already exists on PyPI, skipping..."
+            echo "pypi_status=already_exists" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "❌ Failed to publish to PyPI"
+            echo "pypi_status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+      
+      - name: Setup Node.js (for schema validation)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install MCP Publisher
+        run: |
+          # Clone and build the MCP publisher
+          git clone https://github.com/modelcontextprotocol/registry publisher-repo
+          cd publisher-repo
+          make publisher
+          cp bin/mcp-publisher ../mcp-publisher
+          cd ..
+          chmod +x mcp-publisher
+      
+      - name: Login to MCP Registry
+        run: ./mcp-publisher login github-oidc
+      
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
