@@ -1,6 +1,6 @@
 # Wetlands MCP Server
 
-An MCP server specialized for analyzing wetlands datasets using DuckDB and MotherDuck. This server provides AI assistants and IDEs with the ability to query and analyze comprehensive wetlands data, including spatial information, temporal trends, and ecological metrics.
+An MCP server specialized for analyzing wetlands datasets using DuckDB. This server provides AI assistants and IDEs with the ability to query and analyze comprehensive wetlands data, including spatial information, temporal trends, and ecological metrics.
 
 This server is based on [MotherDuck's DuckDB MCP Server](https://github.com/motherduckdb/mcp-server-motherduck) and extends it with wetlands-specific prompts and context.
 
@@ -19,7 +19,7 @@ This server is based on [MotherDuck's DuckDB MCP Server](https://github.com/moth
 
 The server provides specialized prompts for wetlands data:
 
-- `wetlands-initial-prompt`: A prompt to initialize a connection and start analyzing wetlands datasets with contextual information about available data sources and common queries
+`src/wetlands_mcp_server/wetlands-data.md`
 
 ### Tools
 
@@ -75,7 +75,31 @@ uvx wetlands-mcp-server --query-timeout 300
 
 - `uv` installed, you can install it using `pip install uv` or `brew install uv`
 
-If you plan to use the MCP with Claude Desktop or any other MCP comptabile client, the client need to be installed.
+If you plan to use the MCP with Claude Desktop or any other MCP compatible client, the client needs to be installed.
+
+### Development Setup
+
+1. Clone the repository
+2. Create and activate a virtual environment:
+```bash
+uv venv
+source .venv/bin/activate  # On Linux/Mac
+```
+
+3. Install the package in development mode:
+```bash
+uv pip install -e .
+```
+
+4. Install the MCP Python SDK for testing:
+```bash
+uv pip install mcp
+```
+
+5. Run the test suite:
+```bash
+python3 test_server.py
+```
 
 ### Prerequisites for DuckDB
 
