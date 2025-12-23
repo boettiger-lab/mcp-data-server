@@ -9,7 +9,7 @@ from .database import DatabaseClient
 from .prompt import PROMPT_TEMPLATE
 
 
-logger = logging.getLogger("mcp_server_motherduck")
+logger = logging.getLogger("wetlands_mcp_server")
 
 
 def build_application(
@@ -22,8 +22,8 @@ def build_application(
     max_chars: int = 50000,
     query_timeout: int = -1,
 ):
-    logger.info("Starting MotherDuck MCP Server")
-    server = Server("mcp-server-motherduck")
+    logger.info("Starting Wetlands MCP Server")
+    server = Server("wetlands-mcp-server")
     db_client = DatabaseClient(
         db_path=db_path,
         motherduck_token=motherduck_token,

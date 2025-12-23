@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
-  "name": "io.github.motherduckdb/mcp-server-motherduck",
-  "description": "Fast analytics and data processing with DuckDB and MotherDuck",
+  "name": "io.github.boettiger-lab/wetlands-mcp-server",
+  "description": "MCP server for analyzing wetlands datasets with DuckDB and MotherDuck",
   "repository": {
-    "url": "https://github.com/motherduckdb/mcp-server-motherduck",
+    "url": "https://github.com/boettiger-lab/duckdb-wetlands",
     "source": "github"
   },
   "version": "0.8.0",
@@ -11,7 +11,7 @@
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
-      "identifier": "mcp-server-motherduck",
+      "identifier": "wetlands-mcp-server",
       "version": "0.8.0",
       "transport": {
         "type": "stdio"
@@ -22,7 +22,11 @@
           "name": "--transport",
           "description": "Transport type for MCP server",
           "default": "stdio",
-          "choices": ["stdio", "sse", "stream"],
+          "choices": [
+            "stdio",
+            "sse",
+            "stream"
+          ],
           "isRequired": false
         },
         {

@@ -1,7 +1,7 @@
 [project]
-name = "mcp-server-motherduck"
+name = "wetlands-mcp-server"
 version = "0.8.0"
-description = "A MCP server for MotherDuck and local DuckDB"
+description = "A MCP server for wetlands datasets using DuckDB and MotherDuck"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -24,4 +24,4 @@ requires = [ "hatchling",]
 build-backend = "hatchling.build"
 
 [project.scripts]
-mcp-server-motherduck = "mcp_server_motherduck:main"
+wetlands-mcp-server = "wetlands_mcp_server:main"
