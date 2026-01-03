@@ -52,7 +52,7 @@ spec:
             apt-get update && apt-get install -y git && \
             git clone https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
-            uv run mcp-data-server --port 8001 --host 127.0.0.1 --db-path :memory: --transport streamable_http --custom-prompt wetlands-data.md
+            uv run mcp-data-server --port 8001 --host 127.0.0.1 --db-path :memory: --transport stream --custom-prompt wetlands-data.md
         resources:
           requests:
             cpu: "4"

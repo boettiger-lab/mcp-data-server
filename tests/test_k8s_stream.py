@@ -123,10 +123,10 @@ async def test_query(session: ClientSession, query: str, description: str) -> bo
 async def main():
     """Run all test queries against the k8s endpoint."""
     # The k8s endpoint URL (adjust as needed)
-    endpoint_url = "https://wetlands-mcp.nrp-nautilus.io"
+    endpoint_url = "https://data-mcp.nrp-nautilus.io"
     
     print("="*60)
-    print("Wetlands MCP Server - K8s Streamable HTTP Test Suite")
+    print("MCP Data Server - K8s Streamable HTTP Test Suite")
     print(f"Testing endpoint: {endpoint_url}")
     print("="*60)
     
