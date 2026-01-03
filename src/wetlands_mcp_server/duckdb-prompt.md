@@ -1,23 +1,46 @@
 # DuckDB Query Guide
 
+## Query Template
 
+**EVERY query must start with this setup:**
+
+```sql
+SET THREADS=100; 
+SET preserve_insertion_order=false; 
+SET enable_object_cache=true; 
+SET temp_directory='/tmp';
+INSTALL httpfs; LOAD httpfs; 
+INSTALL h3 FROM community; LOAD h3;
+CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '');
+```
+
+**Why these settings?**
+
+- `THREADS=100` - Parallel S3 reads (I/O bound)
+- `preserve_insertion_order=false` - Faster aggregation
+- `enable_object_cache=true` - Reduces S3 requests
+- `httpfs` - Required for S3 access
+- `h3` - Required for H3 functions
+
+Note: `rook-ceph-rgw-nautiluss3.rook` is an internal endpoint that only your tool running on k8s can access.  The publicly accessible external endpoint is `s3-west.nrp-nautilus.io`, which requires `USE_SSL true` and `SET THREADS=2`.  Always use the internal endpoint to run queries.
 
 ## H3 Geospatial Indexing
 
-**All data uses H3 hexagons** (https://h3geo.org) - uniform hexagonal grid covering Earth
+**Most of these data uses H3 hexagons** (https://h3geo.org) - uniform hexagonal grid covering Earth
 
 ### Key Facts:
+
 - Each h8 hexagon = **73.7327598 hectares** (≈ 0.737 km²)
 - Always report AREAS, not hex counts
-- **Always use** `APPROX_COUNT_DISTINCT(h8)` when counting (avoids double-counting)
+- **Use** `APPROX_COUNT_DISTINCT(h8)` when counting hexes to compute areas -- this avoids double-counting and is reasonably fast enough.
 
 ### Area Conversion:
 ```sql
-SELECT APPROX_COUNT_DISTINCT(h8) * 73.7327598 as area_hectares FROM ...
 SELECT APPROX_COUNT_DISTINCT(h8) * 0.737327598 as area_km2 FROM ...
 ```
 
 ### Joining Different Resolutions:
+
 Some datasets use different H3 resolutions (h8 vs h0-h4). Use `h3_cell_to_parent()` to convert:
 
 ```sql
@@ -27,33 +50,20 @@ JOIN read_parquet('s3://public-inat/range-maps/hex/**') pos
     AND wetlands.h0 = pos.h0  -- Always include h0 for partition pruning!
 ```
 
-## Query Template
-
-**EVERY query must start with this setup:**
-
-```sql
-SET THREADS=100; SET preserve_insertion_order=false; SET enable_object_cache=true; SET temp_directory='/tmp';
-INSTALL httpfs; LOAD httpfs; INSTALL h3 FROM community; LOAD h3;
-CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '');
-CREATE OR REPLACE SECRET outputs (TYPE S3, ENDPOINT 'minio.carlboettiger.info', URL_STYLE 'path', SCOPE 's3://public-outputs');
-
--- Your query here
-SELECT ...
-```
-
-**Why these settings?**
-- `THREADS=100` - Parallel S3 reads (I/O bound)
-- `preserve_insertion_order=false` - Faster aggregation
-- `enable_object_cache=true` - Reduces S3 requests
-- `httpfs` - Required for S3 access
-- `h3` - Required for H3 functions
-- Two secrets: readonly data access + write access for outputs
-
 **Generating Output Files:**
+
 ```sql
-COPY (SELECT ...) TO 's3://public-outputs/wetlands/filename.csv' (FORMAT CSV, HEADER, OVERWRITE_OR_IGNORE);
+COPY (SELECT ...) TO 's3://public-output/unique-file-name.csv' (FORMAT CSV, HEADER, OVERWRITE_OR_IGNORE);
 ```
-Then provide download link: `https://minio.carlboettiger.info/public-outputs/wetlands/filename.csv`
+
+Then tell the user the *public https* address (note the use of the public, not private endpoint): it should have the format like: `https://s3-west.nrp-nautilus.io/public-output/unique-file-name.csv`  (adjust `unique-file-name.csv` part appropriately.)
+
+
+
+Note: s3://public-output has a 30-day expiration and 1 Gb object size limit. CORS headers will permit files to be placed here and rendered by other tools.
+
+
+
 
 ## Query Optimization Essentials
 
@@ -68,41 +78,13 @@ SELECT ... FROM filtered JOIN read_parquet('s3://public-wetlands/glwd/hex/**') w
 ON filtered.h8 = w.h8 AND filtered.h0 = w.h0
 ```
 
-### 2. Pre-filter Taxonomy
-```sql
--- Good: Filter to birds before joining position data
-WITH birds AS (
-  SELECT id, scientificName FROM read_parquet('s3://public-inat/taxonomy/...')
-  WHERE class = 'Aves'
-)
-SELECT ... FROM birds JOIN read_parquet('s3://public-inat/range-maps/hex/**') ...
-```
+### 2. ALWAYS Include h0 in Joins
 
-### 3. ALWAYS Include h0 in Joins
 ```sql
 -- Enables partition pruning → 5-20x faster
 JOIN table2 ON table1.h8 = table2.h8 AND table1.h0 = table2.h0
 ```
 
-## Example Query Pattern
-
-```sql
--- Setup (always include)
-SET THREADS=100; SET preserve_insertion_order=false; SET enable_object_cache=true; SET temp_directory='/tmp';
-INSTALL httpfs; LOAD httpfs; INSTALL h3 FROM community; LOAD h3;
-CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '');
-CREATE OR REPLACE SECRET outputs (TYPE S3, ENDPOINT 'minio.carlboettiger.info', URL_STYLE 'path', SCOPE 's3://public-outputs');
-
--- Example: Wetlands by category
-SELECT c.category, 
-       APPROX_COUNT_DISTINCT(w.h8) as hex_count,
-       ROUND(hex_count * 73.7327598, 2) as area_hectares
-FROM read_parquet('s3://public-wetlands/glwd/hex/**') w
-JOIN read_csv('s3://public-wetlands/glwd/category_codes.csv') c ON w.Z = c.Z
-WHERE w.Z > 0 
-GROUP BY c.category 
-ORDER BY area_hectares DESC;
-```
 
 ## DuckDB SQL Syntax Reference
 
