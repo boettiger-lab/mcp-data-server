@@ -10,7 +10,7 @@ push = false
 "pyproject.toml" = [
     'version = "{version}"',
 ]
-"src/wetlands_mcp_server/configs.py" = [
+"src/mcp_data_server/configs.py" = [
     'SERVER_VERSION = "{version}"',
 ]
 "server.json" = [

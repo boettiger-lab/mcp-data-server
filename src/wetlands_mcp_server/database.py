@@ -6,7 +6,7 @@ import logging
 import threading
 from .configs import SERVER_VERSION
 
-logger = logging.getLogger("wetlands_mcp_server")
+logger = logging.getLogger("mcp_data_server")
 
 
 class DatabaseClient:
@@ -51,7 +51,7 @@ class DatabaseClient:
                 conn = duckdb.connect(
                     self.db_path,
                     config={
-                        "custom_user_agent": f"wetlands-mcp-server/{SERVER_VERSION}"
+                        "custom_user_agent": f"mcp-data-server/{SERVER_VERSION}"
                     },
                     read_only=self._read_only,
                 )
@@ -135,7 +135,7 @@ class DatabaseClient:
 
         conn = duckdb.connect(
             self.db_path,
-            config={"custom_user_agent": f"wetlands-mcp-server/{SERVER_VERSION}"},
+            config={"custom_user_agent": f"mcp-data-server/{SERVER_VERSION}"},
             read_only=self._read_only,
         )
 
@@ -189,7 +189,7 @@ class DatabaseClient:
         if self.conn is None:
             conn = duckdb.connect(
                 self.db_path,
-                config={"custom_user_agent": f"wetlands-mcp-server/{SERVER_VERSION}"},
+                config={"custom_user_agent": f"mcp-data-server/{SERVER_VERSION}"},
                 read_only=self._read_only,
             )
         else:

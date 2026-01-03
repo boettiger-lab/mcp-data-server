@@ -42,6 +42,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: wetlands-mcp-server
+                name: mcp-data-server
                 port:
                   number: 8001

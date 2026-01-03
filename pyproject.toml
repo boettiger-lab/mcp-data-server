@@ -1,5 +1,5 @@
 [project]
-name = "wetlands-mcp-server"
+name = "mcp-data-server"
 version = "0.8.0"
 description = "A MCP server for wetlands datasets using DuckDB and MotherDuck"
 readme = "README.md"
@@ -24,4 +24,4 @@ requires = [ "hatchling",]
 build-backend = "hatchling.build"
 
 [project.scripts]
-wetlands-mcp-server = "wetlands_mcp_server:main"
+mcp-data-server = "mcp_data_server:main"

@@ -19,7 +19,7 @@ This server is based on [MotherDuck's DuckDB MCP Server](https://github.com/moth
 
 The server provides specialized prompts for wetlands data:
 
-`src/wetlands_mcp_server/wetlands-data.md`
+`src/mcp_data_server/wetlands-data.md`
 
 ### Tools
 
@@ -58,19 +58,19 @@ The MCP server supports the following parameters:
 
 ```bash
 # Connect to local DuckDB file in read-only mode
-uvx wetlands-mcp-server --db-path /path/to/local.db --read-only
+uvx mcp-data-server --db-path /path/to/local.db --read-only
 
 # Connect to local DuckDB file in read-only mode
-uvx wetlands-mcp-server --db-path /path/to/local.db --read-only
+uvx mcp-data-server --db-path /path/to/local.db --read-only
 
 # Customize result truncation limits for large wetlands queries
-uvx wetlands-mcp-server --max-rows 2048 --max-chars 100000
+uvx mcp-data-server --max-rows 2048 --max-chars 100000
 
 # Enable query timeout (5 minutes) for complex spatial queries
-uvx wetlands-mcp-server --query-timeout 300
+uvx mcp-data-server --query-timeout 300
 
 # Use a custom prompt file for different datasets
-uvx wetlands-mcp-server --custom-prompt /path/to/custom-prompt.md
+uvx mcp-data-server --custom-prompt /path/to/custom-prompt.md
 ```
 
 ## Getting Started
@@ -123,7 +123,7 @@ Optionally, you can add it to a file called `.vscode/mcp.json` in your workspace
     "wetlands": {
       "command": "uvx",
       "args": [
-        "wetlands-mcp-server"
+        "mcp-data-server"
       ]
     }
   }
@@ -135,10 +135,10 @@ Optionally, you can add it to a file called `.vscode/mcp.json` in your workspace
 Claude Code supports MCP servers through CLI commands or JSON configuration. Add the server using a JSON configuration:
 
 ```bash
-claude mcp add-json wetlands-mcp-server '{
+claude mcp add-json mcp-data-server '{
   "command": "uvx",
   "args": [
-    "wetlands-mcp-server",
+    "mcp-data-server",
     "--db-path"
   ]
 }'
@@ -160,7 +160,7 @@ The server can run in SSE mode in two ways:
 Run the server directly in SSE mode using the `--transport sse` flag:
 
 ```bash
-uvx wetlands-mcp-server --transport sse --port 8000 --db-path md: --motherduck-token <your_motherduck_token>
+uvx mcp-data-server --transport sse --port 8000 --db-path md: --motherduck-token <your_motherduck_token>
 ```
 
 This will start the server listening on the specified port (default 8000) and you can point your clients directly to this endpoint.
@@ -170,7 +170,7 @@ This will start the server listening on the specified port (default 8000) and yo
 Alternatively, you can run SSE mode using `supergateway`:
 
 ```bash
-npx -y supergateway --stdio "uvx wetlands-mcp-server --db-path md: --motherduck-token <your_motherduck_token>"
+npx -y supergateway --stdio "uvx mcp-data-server --db-path md: --motherduck-token <your_motherduck_token>"
 ```
 
 Both methods allow you to point your clients such as Claude Desktop, Cursor to the SSE endpoint.
@@ -182,13 +182,13 @@ To run the server from a local development environment, use the following config
 ```json
  {
   "mcpServers": {
-    "wetlands-mcp-server": {
+    "mcp-data-server": {
       "command": "uv",
       "args": [
         "--directory",
-        "/path/to/your/local/wetlands-mcp-server",
+        "/path/to/your/local/mcp-data-server",
         "run",
-        "wetlands-mcp-server",
+        "mcp-data-server",
         "--db-path",
         "md:",
         "--motherduck-token",
@@ -212,4 +212,4 @@ To run the server from a local development environment, use the following config
 This MCP server is licensed under the MIT License. This means you are free to use, modify, and distribute the software, subject to the terms and conditions of the MIT License. For more details, please see the LICENSE file in the project repository.
 
 ##
-mcp-name: io.github.boettiger-lab/wetlands-mcp-server
+mcp-name: io.github.boettiger-lab/mcp-data-server

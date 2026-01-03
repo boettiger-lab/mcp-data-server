@@ -1,9 +1,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: wetlands-mcp-server
+  name: mcp-data-server
   labels:
-    app: wetlands-mcp-server
+    app: mcp-data-server
 spec:
   replicas: 1
   strategy:
@@ -13,11 +13,11 @@ spec:
       maxSurge: 2
   selector:
     matchLabels:
-      app: wetlands-mcp-server
+      app: mcp-data-server
   template:
     metadata:
       labels:
-        app: wetlands-mcp-server
+        app: mcp-data-server
     spec:
       nodeSelector:
         kubernetes.io/hostname: stratus1.nrp-espm.berkeley.edu
@@ -44,15 +44,15 @@ spec:
             memory: "256Mi"
       
       # MCP server (backend, not exposed directly)
-      - name: wetlands-mcp-server
+      - name: mcp-data-server
         image: astral/uv:python3.12-bookworm-slim
         command: ["/bin/sh", "-c"]
         args:
           - |
             apt-get update && apt-get install -y git && \
-            git clone https://github.com/boettiger-lab/duckdb-wetlands.git /app && \
+            git clone https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
-            uv run wetlands-mcp-server --port 8001 --host 127.0.0.1 --db-path :memory: --transport streamable_http
+            uv run mcp-data-server --port 8001 --host 127.0.0.1 --db-path :memory: --transport streamable_http
         resources:
           requests:
             cpu: "4"
@@ -138,10 +138,10 @@ data:
 apiVersion: v1
 kind: Service
 metadata:
-  name: wetlands-mcp-server
+  name: mcp-data-server
 spec:
   selector:
-    app: wetlands-mcp-server
+    app: mcp-data-server
   ports:
     - protocol: TCP
       port: 8001

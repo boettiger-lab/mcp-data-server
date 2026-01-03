@@ -9,7 +9,7 @@ from .database import DatabaseClient
 from .prompt import get_full_prompt
 
 
-logger = logging.getLogger("wetlands_mcp_server")
+logger = logging.getLogger("mcp_data_server")
 
 
 def build_application(
@@ -23,10 +23,10 @@ def build_application(
     query_timeout: int = -1,
     custom_prompt_path: str | None = None,
 ):
-    logger.info("Starting Wetlands MCP Server")
+    logger.info("Starting MCP Data Server")
     if custom_prompt_path:
         logger.info(f"Using custom prompt from: {custom_prompt_path}")
-    server = Server("wetlands-mcp-server")
+    server = Server("mcp-data-server")
     
     # Generate the prompt template with custom prompt if provided
     prompt_template = get_full_prompt(custom_prompt_path)

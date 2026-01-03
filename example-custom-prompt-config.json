@@ -1,9 +1,9 @@
 {
     "mcpServers": {
-        "wetlands-mcp-server-custom": {
+        "mcp-data-server-custom": {
             "command": "uvx",
             "args": [
-                "wetlands-mcp-server",
+                "mcp-data-server",
                 "--db-path",
                 "md:",
                 "--custom-prompt",

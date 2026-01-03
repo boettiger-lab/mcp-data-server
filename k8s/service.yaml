@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: wetlands-mcp-server
+  name: mcp-data-server
 spec:
   selector:
-    app: wetlands-mcp-server
+    app: mcp-data-server
   sessionAffinity: ClientIP
   sessionAffinityConfig:
     clientIP:

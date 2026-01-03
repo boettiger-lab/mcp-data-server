@@ -6,9 +6,9 @@ from .configs import SERVER_VERSION, SERVER_LOCALHOST, UVICORN_LOGGING_CONFIG
 
 __version__ = SERVER_VERSION
 
-logger = logging.getLogger("wetlands_mcp_server")
+logger = logging.getLogger("mcp_data_server")
 logging.basicConfig(
-    level=logging.INFO, format="[wetlands] %(levelname)s - %(message)s"
+    level=logging.INFO, format="[mcp-data] %(levelname)s - %(message)s"
 )
 
 

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 def test_prompt_loading():
     """Test that prompt loading works correctly."""
     # Import the prompt module directly to avoid dependency issues
-    from wetlands_mcp_server.prompt import get_full_prompt
+    from mcp_data_server.prompt import get_full_prompt
     
     print("Testing prompt loading functionality...")
     print("-" * 60)

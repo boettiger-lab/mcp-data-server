@@ -122,7 +122,7 @@ LIMIT 5;
     # Server parameters
     server_params = StdioServerParameters(
         command="uv",
-        args=["run", "wetlands-mcp-server", "--db-path", ":memory:"],
+        args=["run", "mcp-data-server", "--db-path", ":memory:"],
         env=None
     )
     
