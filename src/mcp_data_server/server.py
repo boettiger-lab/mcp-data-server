@@ -30,6 +30,16 @@ def build_application(
     
     # Generate the prompt template with custom prompt if provided
     prompt_template = get_full_prompt(custom_prompt_path)
+    
+    # Set prompt metadata based on whether custom prompt is used
+    if custom_prompt_path:
+        prompt_name = "data-analyst-prompt"
+        prompt_description = "A prompt for analyzing data using DuckDB SQL queries"
+        prompt_result_description = "Data analyst prompt for querying databases"
+    else:
+        prompt_name = "data-descriptions-prompt"
+        prompt_description = "A prompt for analyzing global wetlands data including GLWD, protected areas, carbon storage, species ranges, and more using DuckDB"
+        prompt_result_description = "Wetlands data analyst prompt for querying global wetlands datasets"
     db_client = DatabaseClient(
         db_path=db_path,
         motherduck_token=motherduck_token,
@@ -70,8 +80,8 @@ def build_application(
         logger.info("Listing prompts")
         return [
             types.Prompt(
-                name="wetlands-data-analyst-prompt",
-                description="A prompt for analyzing global wetlands data including GLWD, protected areas, carbon storage, species ranges, and more using DuckDB",
+                name=prompt_name,
+                description=prompt_description,
             )
         ]
 
@@ -81,14 +91,14 @@ def build_application(
     ) -> types.GetPromptResult:
         """
         Generate a prompt by combining arguments with server state.
-        The prompt provides comprehensive wetlands data analysis capabilities.
+        The prompt provides data analysis capabilities using DuckDB.
         """
         logger.info(f"Getting prompt: {name}::{arguments}")
-        if name != "wetlands-data-analyst-prompt":
+        if name != prompt_name:
             raise ValueError(f"Unknown prompt: {name}")
 
         return types.GetPromptResult(
-            description="Wetlands data analyst prompt for querying global wetlands datasets",
+            description=prompt_result_description,
             messages=[
                 types.PromptMessage(
                     role="user",

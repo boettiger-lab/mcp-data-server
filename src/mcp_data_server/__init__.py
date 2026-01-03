@@ -73,7 +73,7 @@ logging.basicConfig(
 @click.option(
     "--custom-prompt",
     default=None,
-    help="Path to a custom prompt markdown file to use instead of the built-in wetlands-data.md. The file will be combined with duckdb-prompt.md to form the system prompt.",
+    help="Path to a custom prompt markdown file to use. The file will be combined with duckdb-prompt.md to form the system prompt.",
 )
 def main(
     port,

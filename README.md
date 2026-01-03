@@ -17,9 +17,7 @@ This server is based on [MotherDuck's DuckDB MCP Server](https://github.com/moth
 
 ### Prompts
 
-The server provides specialized prompts for wetlands data:
-
-`src/mcp_data_server/wetlands-data.md`
+The server accepts custom prompts with --custom-prompt argument.  
 
 ### Tools
 

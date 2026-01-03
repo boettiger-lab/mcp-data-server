@@ -16,10 +16,9 @@ def get_full_prompt(custom_prompt_path: str | None = None) -> str:
     
     Args:
         custom_prompt_path: Optional path to a custom prompt markdown file.
-                          If provided, this will be used instead of the built-in wetlands-data.md.
     
     Returns:
-        Combined prompt text from custom/wetlands context and DuckDB context.
+        Combined prompt text from custom context and DuckDB context.
     """
     # Load custom prompt if provided, otherwise use built-in wetlands context
     if custom_prompt_path:
@@ -34,6 +33,3 @@ def get_full_prompt(custom_prompt_path: str | None = None) -> str:
     duckdb_context = load_prompt_from_file('duckdb-prompt.md')
     
     return f"{context}\n\n{duckdb_context}"
-
-# For backwards compatibility, export PROMPT_TEMPLATE
-PROMPT_TEMPLATE = get_full_prompt()

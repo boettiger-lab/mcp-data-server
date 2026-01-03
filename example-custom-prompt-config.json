@@ -5,9 +5,9 @@
             "args": [
                 "mcp-data-server",
                 "--db-path",
-                "md:",
+                ":memory:",
                 "--custom-prompt",
-                "/home/cboettig/Documents/github/boettiger-lab/mcp-data-server/wetlands-data.md"
+                "custom-data-prompt.md"
             ]
         }
     }
