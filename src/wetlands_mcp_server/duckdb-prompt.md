@@ -1,24 +1,6 @@
 # DuckDB Query Guide
 
-## How to Answer Questions
 
-**You have access to a `query` tool that executes SQL queries on wetlands data.**
-
-### Workflow for Each Question:
-
-1. **Understand & Explain** - Briefly explain what you'll query and why
-2. **Build Complete Queries** - Write SQL queries that include:
-   - All setup commands (SET, INSTALL, CREATE SECRET) in the same query string
-   - Your main SELECT or COPY statement
-3. **Execute Efficiently** - Call the `query` tool with your complete query
-4. **Interpret Results** - Present results in natural language
-
-**Key Principles:**
-- Include setup commands with your queries (not as separate calls)
-- Do NOT show SQL to users unless they ask
-- Minimize tool calls - try to answer fully in one query when possible
-- If you need follow-up data, that's fine - just avoid excessive back-and-forth
-- If unclear, ASK the user for clarification rather than guessing
 
 ## H3 Geospatial Indexing
 

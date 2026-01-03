@@ -6,7 +6,7 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from .configs import SERVER_VERSION
 from .database import DatabaseClient
-from .prompt import PROMPT_TEMPLATE
+from .prompt import get_full_prompt
 
 
 logger = logging.getLogger("wetlands_mcp_server")
@@ -21,9 +21,15 @@ def build_application(
     max_rows: int = 1024,
     max_chars: int = 50000,
     query_timeout: int = -1,
+    custom_prompt_path: str | None = None,
 ):
     logger.info("Starting Wetlands MCP Server")
+    if custom_prompt_path:
+        logger.info(f"Using custom prompt from: {custom_prompt_path}")
     server = Server("wetlands-mcp-server")
+    
+    # Generate the prompt template with custom prompt if provided
+    prompt_template = get_full_prompt(custom_prompt_path)
     db_client = DatabaseClient(
         db_path=db_path,
         motherduck_token=motherduck_token,
@@ -86,7 +92,7 @@ def build_application(
             messages=[
                 types.PromptMessage(
                     role="user",
-                    content=types.TextContent(type="text", text=PROMPT_TEMPLATE),
+                    content=types.TextContent(type="text", text=prompt_template),
                 )
             ],
         )

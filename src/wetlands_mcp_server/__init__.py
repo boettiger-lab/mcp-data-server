@@ -70,6 +70,11 @@ logging.basicConfig(
     default=-1,
     help="(Default: `-1`) Query execution timeout in seconds. Set to -1 to disable timeout.",
 )
+@click.option(
+    "--custom-prompt",
+    default=None,
+    help="Path to a custom prompt markdown file to use instead of the built-in wetlands-data.md. The file will be combined with duckdb-prompt.md to form the system prompt.",
+)
 def main(
     port,
     host,
@@ -83,6 +88,7 @@ def main(
     max_rows,
     max_chars,
     query_timeout,
+    custom_prompt,
 ):
     """Main entry point for the package."""
 
@@ -103,6 +109,7 @@ def main(
         max_rows=max_rows,
         max_chars=max_chars,
         query_timeout=query_timeout,
+        custom_prompt_path=custom_prompt,
     )
 
     if transport == "sse":

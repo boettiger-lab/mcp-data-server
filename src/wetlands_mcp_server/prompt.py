@@ -11,12 +11,29 @@ def load_prompt_from_file(filename: str) -> str:
     with open(prompt_path, 'r', encoding='utf-8') as f:
         return f.read()
 
-def get_full_prompt() -> str:
-    """Get the complete system prompt by combining wetlands data and DuckDB contexts."""
-    wetlands_context = load_prompt_from_file('wetlands-data.md')
+def get_full_prompt(custom_prompt_path: str | None = None) -> str:
+    """Get the complete system prompt by combining contexts.
+    
+    Args:
+        custom_prompt_path: Optional path to a custom prompt markdown file.
+                          If provided, this will be used instead of the built-in wetlands-data.md.
+    
+    Returns:
+        Combined prompt text from custom/wetlands context and DuckDB context.
+    """
+    # Load custom prompt if provided, otherwise use built-in wetlands context
+    if custom_prompt_path:
+        custom_path = Path(custom_prompt_path)
+        if not custom_path.exists():
+            raise FileNotFoundError(f"Custom prompt file not found: {custom_prompt_path}")
+        with open(custom_path, 'r', encoding='utf-8') as f:
+            context = f.read()
+    else:
+        context = load_prompt_from_file('wetlands-data.md')
+    
     duckdb_context = load_prompt_from_file('duckdb-prompt.md')
     
-    return f"{wetlands_context}\n\n{duckdb_context}"
+    return f"{context}\n\n{duckdb_context}"
 
 # For backwards compatibility, export PROMPT_TEMPLATE
 PROMPT_TEMPLATE = get_full_prompt()

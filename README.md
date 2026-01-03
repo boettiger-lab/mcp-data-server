@@ -52,6 +52,7 @@ The MCP server supports the following parameters:
 | `--max-rows` | Integer | `1024` | Maximum number of rows to return from queries.                                                                                                                                                                    |
 | `--max-chars` | Integer | `50000` | Maximum number of characters in query results.                                                                                                                                                          |
 | `--query-timeout` | Integer | `-1` | Query execution timeout in seconds. Set to -1 to disable timeout (default).                                                                                                                                                          |
+| `--custom-prompt` | String | `None` | Path to a custom prompt markdown file. Use this to provide domain-specific context instead of the built-in wetlands data prompt. The custom prompt will be combined with the DuckDB prompt.                                           |
 
 ### Quick Usage Examples
 
@@ -67,6 +68,9 @@ uvx wetlands-mcp-server --max-rows 2048 --max-chars 100000
 
 # Enable query timeout (5 minutes) for complex spatial queries
 uvx wetlands-mcp-server --query-timeout 300
+
+# Use a custom prompt file for different datasets
+uvx wetlands-mcp-server --custom-prompt /path/to/custom-prompt.md
 ```
 
 ## Getting Started

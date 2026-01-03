@@ -1,0 +1,14 @@
+{
+    "mcpServers": {
+        "wetlands-mcp-server-custom": {
+            "command": "uvx",
+            "args": [
+                "wetlands-mcp-server",
+                "--db-path",
+                "md:",
+                "--custom-prompt",
+                "/home/cboettig/Documents/github/boettiger-lab/mcp-data-server/wetlands-data.md"
+            ]
+        }
+    }
+}

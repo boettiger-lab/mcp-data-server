@@ -52,7 +52,7 @@ spec:
             apt-get update && apt-get install -y git && \
             git clone https://github.com/boettiger-lab/duckdb-wetlands.git /app && \
             cd /app && \
-            uv run wetlands-mcp-server --port 8001 --host 127.0.0.1 --db-path :memory: --transport sse
+            uv run wetlands-mcp-server --port 8001 --host 127.0.0.1 --db-path :memory: --transport streamable_http
         resources:
           requests:
             cpu: "4"
@@ -105,11 +105,11 @@ data:
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
             
-            # SSE specific settings
+            # Streamable HTTP settings
             proxy_set_header Connection '';
             proxy_buffering off;
             proxy_cache off;
-            chunked_transfer_encoding off;
+            proxy_request_buffering off;
             
             # Increase timeouts for long-running queries (10 minutes)
             proxy_connect_timeout 600s;
