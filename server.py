@@ -10,7 +10,6 @@ from mcp.server.transport_security import TransportSecuritySettings
 # -------------------------------------------------------------------------
 # 1. INITIALIZATION
 # -------------------------------------------------------------------------
-# Disable DNS rebinding protection for compatibility with K8s ingress
 mcp = FastMCP(
     "DuckDB-S3-Geo-Isolated",
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)
@@ -20,7 +19,6 @@ mcp = FastMCP(
 # 2. CONFIGURATION & FILE LOADING
 # -------------------------------------------------------------------------
 def load_text_file(filename):
-    """Robust file loader that checks standard paths."""
     paths = [
         filename,
         os.path.join("/app", filename),
@@ -36,7 +34,6 @@ def parse_setup_sql(content):
     match = re.search(r"```sql\n(.*?)\n```", content, re.DOTALL)
     return match.group(1).strip() if match else ""
 
-# Load static configuration into memory
 SETUP_RAW = load_text_file("query-setup.md")
 SETUP_SQL = parse_setup_sql(SETUP_RAW)
 CATALOG_RAW = load_text_file("datasets.md")
@@ -45,21 +42,24 @@ H3_RAW = load_text_file("h3-guide.md")
 ROLE_RAW = load_text_file("assistant-role.md")
 
 # -------------------------------------------------------------------------
-# 3. CONTEXT DEFINITIONS
+# 3. CONTEXT INJECTION (PROMPT ENGINEERING)
 # -------------------------------------------------------------------------
-# Context to be injected into the Tool Description.
-# This ensures clients that don't support explicit Prompts/Resources
-# still receive the necessary schema and rules to function correctly.
+# We frame this as a "Strict Syntax Guide" rather than just "Context".
+# This forces the model to abandon its training on standard "SELECT * FROM table".
 TOOL_INJECTED_CONTEXT = f"""
 ---
-### ⚠️ CRITICAL INSTRUCTIONS (READ BEFORE GENERATING SQL)
-1. **AVAILABLE DATASETS (SCHEMA & S3 PATHS):**
+### ⚠️ CRITICAL SQL RULES (MUST FOLLOW)
+1. **NO TABLES EXIST:** The database is empty. You CANNOT write `FROM table_name`.
+2. **USE PARQUET PATHS:** You MUST use `FROM read_parquet('s3://...')` for ALL queries.
+3. **COPY PATHS EXACTLY:** Use the S3 paths listed in the Catalog below.
+
+### 📂 DATA CATALOG (Source of Truth)
 {CATALOG_RAW}
 
-2. **OPTIMIZATION RULES:**
+### ⚡ OPTIMIZATION RULES
 {OPTIM_RAW}
 
-3. **H3 SPATIAL MATH:**
+### 📐 H3 SPATIAL MATH
 {H3_RAW}
 ---
 """
@@ -69,10 +69,6 @@ TOOL_INJECTED_CONTEXT = f"""
 # -------------------------------------------------------------------------
 @contextmanager
 def get_isolated_db():
-    """
-    Creates a fresh, in-memory DuckDB connection for every request.
-    This ensures complete isolation between tool calls.
-    """
     conn = duckdb.connect(database=":memory:")
     try:
         if SETUP_SQL: conn.sql(SETUP_SQL)
@@ -81,7 +77,7 @@ def get_isolated_db():
         conn.close()
 
 # -------------------------------------------------------------------------
-# 5. MCP RESOURCES (Schema Browsing)
+# 5. MCP RESOURCES (Schema Browsing for Smart Clients)
 # -------------------------------------------------------------------------
 DATA_CATALOG = {}
 if CATALOG_RAW:
@@ -105,27 +101,23 @@ def get_dataset_details(name: str) -> str:
     return "Dataset not found."
 
 # -------------------------------------------------------------------------
-# 6. MCP PROMPTS (Personas)
+# 6. MCP PROMPTS (Personas for Smart Clients)
 # -------------------------------------------------------------------------
 @mcp.prompt("geospatial-analyst")
 def analyst_persona() -> str:
-    """Activates the Expert Analyst persona."""
     return f"""
     {ROLE_RAW}
-    
-    You have access to these datasets:
+    DATASETS:
     {CATALOG_RAW}
-    
-    Follow these rules:
+    RULES:
     {OPTIM_RAW}
-    {H3_RAW}
     """
 
 # -------------------------------------------------------------------------
-# 7. TOOL DEFINITIONS
+# 7. TOOL DEFINITION & MANUAL REGISTRATION
 # -------------------------------------------------------------------------
 def query(sql_query: str) -> str:
-    """Placeholder docstring (overwritten during registration)."""
+    """Placeholder (overwritten below)."""
     print(f"🔍 Executing: {sql_query}", file=sys.stderr)
     try:
         with get_isolated_db() as db:
@@ -139,24 +131,25 @@ def query(sql_query: str) -> str:
     except Exception as e:
         return f"SQL Error: {str(e)}"
 
-# -------------------------------------------------------------------------
-# 8. REGISTRATION & STARTUP
-# -------------------------------------------------------------------------
-# Inject context into the docstring before registration.
+# 💉 INJECTION: Force the strict rules into the tool description
 query.__doc__ = f"""
-Executes optimized DuckDB SQL queries on the geospatial lakehouse.
+Executes optimized DuckDB SQL. 
+STRICTLY FOLLOW THE RULES BELOW.
 
 {TOOL_INJECTED_CONTEXT}
 """
 
-# Manually register the tool with the modified docstring
+# ®️ REGISTER: Manually register the tool with the injected prompt
 mcp.tool()(query)
 
+# -------------------------------------------------------------------------
+# 8. SERVER START
+# -------------------------------------------------------------------------
 if __name__ == "__main__":
     app = mcp.streamable_http_app()
     app.router.redirect_slashes = False
     
-    print("🚀 Starting DuckDB MCP Server...", file=sys.stderr)
+    print("🚀 Starting DuckDB MCP Server (Strict Mode)...", file=sys.stderr)
     uvicorn.run(
         app, 
         host="0.0.0.0", 
@@ -164,4 +157,3 @@ if __name__ == "__main__":
         proxy_headers=True,
         forwarded_allow_ips="*"
     )
-    
