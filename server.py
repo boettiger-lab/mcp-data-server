@@ -96,4 +96,4 @@ def query(sql_query: str) -> str:
 if __name__ == "__main__":
     # Streamable HTTP uses a single endpoint (default: /mcp)
     # It supports both GET (handshake) and POST (messages) on the same URL.
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8000)
+    uvicorn.run(mcp.get_asgi_app(transport="streamable-http"), host="0.0.0.0", port=8000)
