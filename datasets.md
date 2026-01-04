@@ -13,10 +13,11 @@
 
 ## Environmental Data
 
-**2. Vulnerable Carbon** 
+**2. Vulnerable Carbon data**
 - Partitioned parquet files at `s3://public-carbon/hex/vulnerable-carbon/**`
 - Columns: `carbon`, `h8`, `h0`
 - Conservation International 2018 - carbon vulnerable to development
+
 
 **3. Nature's Contributions (NCP)** 
 - Partitioned parquet files at `s3://public-ncp/hex/ncp_biod_nathab/**`
