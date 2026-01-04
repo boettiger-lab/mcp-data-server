@@ -38,4 +38,10 @@ spec:
             cpu: 2
         ports:
         - containerPort: 8000
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 15  # Give 'uv' time to install deps
+          periodSeconds: 5
+          failureThreshold: 5
 

@@ -19,7 +19,8 @@ mcp = FastMCP(
 # 1. LOAD CONFIG (Read-Only Global State)
 # -------------------------------------------------------------------------
 def load_text_file(filename):
-    if not os.path.exists(filename): return ""
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"Required file not found: {filename}")
     with open(filename, 'r') as f: return f.read()
 
 def parse_setup_sql(content):
