@@ -1,5 +1,4 @@
-# GitHub Actions workflow for Python package
-name: Python package
+name: Tests
 
 on:
   push:
@@ -8,22 +7,23 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: [3.10, 3.11]
+    
     steps:
     - uses: actions/checkout@v4
-    - name: Set up Python ${{ matrix.python-version }}
+    
+    - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: '3.11'
+    
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pytest
-        pip install -e .
+        pip install pytest pytest-cov
+        pip install duckdb mcp fastmcp uvicorn pystac
+    
     - name: Run tests
       run: |
-        pytest tests
+        pytest tests/ -v --cov=. --cov-report=term-missing
