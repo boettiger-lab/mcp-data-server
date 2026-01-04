@@ -97,8 +97,43 @@ def query(sql_query: str) -> str:
     except Exception as e:
         return f"SQL Error: {str(e)}"
 
+
+
+@mcp.prompt("geospatial-analyst")
+def analyst_persona() -> str:
+    """
+    Loads the expert persona, H3 math rules, and query optimization guides.
+    Use this at the start of every chat to ensure correct SQL generation.
+    """
+    optim = load_file("query-optimization.md")
+    h3_guide = load_file("h3-guide.md")
+    
+    return f"""
+
+    You are an expert **Geospatial Analyst** specializing in H3-indexed data.
+    
+    YOUR CORE RESPONSIBILITIES:
+    1. Analyze natural language questions about geospatial data.
+    2. Write highly optimized DuckDB SQL queries using the rules below.
+    3. Interpret results with a focus on spatial accuracy.
+    
+    ---
+    
+    {optim}
+    
+    ---
+    
+    {h3_guide}
+
+    ---
+    
+    REMINDER:
+    - Always check `catalog://list` first to see available datasets.
+    - Never assume column names; check the catalog schema.
+    """
+
 # -------------------------------------------------------------------------
-# 5. SERVER ENTRY POINT (Streamable HTTP)
+# 6. SERVER ENTRY POINT (Streamable HTTP)
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
     # Streamable HTTP uses a single endpoint (default: /mcp)

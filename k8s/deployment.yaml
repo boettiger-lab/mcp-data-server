@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: duckdb-mcp
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: duckdb-mcp
@@ -28,7 +28,7 @@ spec:
             apt-get update && apt-get install -y git && \
             git clone https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
-            uv run --with "mcp" --with "duckdb" --with pandas --with uvicorn server.py
+            uv run --with "mcp" --with "duckdb" --with pandas --with uvicorn --with tabulate server.py
         resources:   
           requests:
             memory: 16Gi
