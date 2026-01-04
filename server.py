@@ -12,6 +12,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 # -------------------------------------------------------------------------
 mcp = FastMCP(
     "DuckDB-S3-Geo-Isolated",
+    stateless_http=True,
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)
 )
 

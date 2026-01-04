@@ -3,23 +3,17 @@ kind: Ingress
 metadata:
   name: mcp-server-duckdb-ingress
   annotations:
-    # CORS headers added manually via response-set-header
-    haproxy.org/response-set-header: |
-      Access-Control-Allow-Origin *
-      Access-Control-Allow-Methods "GET, POST, OPTIONS"
-      Access-Control-Allow-Headers "DNT, User-Agent, X-Requested-With, If-Modified-Since, Cache-Control, Content-Type, Range, Authorization"
-      Access-Control-Max-Age 600
+    # CORS configuration for HAProxy Ingress
+    haproxy-ingress.github.io/cors-enable: "true"
+    haproxy-ingress.github.io/cors-allow-origin: "*"
+    haproxy-ingress.github.io/cors-allow-methods: "GET, POST, OPTIONS"
+    haproxy-ingress.github.io/cors-allow-headers: "DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization"
+    haproxy-ingress.github.io/cors-allow-credentials: "true"
+    haproxy-ingress.github.io/cors-max-age: "86400"
     
-    # Also enable standard CORS
-    haproxy.org/cors-enable: "true"
-    haproxy.org/cors-allow-origin: "*"
-    haproxy.org/cors-allow-methods: "GET, POST, OPTIONS"
-    haproxy.org/cors-allow-headers: "*"
-    
-    # 6. CRITICAL: Timeout settings for long-running queries
-    # Server timeout: How long to wait for backend (MCP server) to respond
-    haproxy.org/timeout-server: "600s"  # 10 minutes for long DuckDB queries
-    haproxy.org/timeout-tunnel: "3600s"  # 1 hour for long-lived SSE connections
+    # Timeout settings for long-running queries
+    haproxy-ingress.github.io/timeout-server: "600s"  # 10 minutes for long DuckDB queries
+    haproxy-ingress.github.io/timeout-tunnel: "3600s"  # 1 hour for long-lived SSE connections
 
 spec:
   ingressClassName: haproxy
