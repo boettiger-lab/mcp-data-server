@@ -1,0 +1,39 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-server-duckdb-ingress
+  annotations:
+    # CORS headers added manually via response-set-header
+    haproxy.org/response-set-header: |
+      Access-Control-Allow-Origin *
+      Access-Control-Allow-Methods "GET, POST, OPTIONS"
+      Access-Control-Allow-Headers "DNT, User-Agent, X-Requested-With, If-Modified-Since, Cache-Control, Content-Type, Range, Authorization"
+      Access-Control-Max-Age 600
+    
+    # Also enable standard CORS
+    haproxy.org/cors-enable: "true"
+    haproxy.org/cors-allow-origin: "*"
+    haproxy.org/cors-allow-methods: "GET, POST, OPTIONS"
+    haproxy.org/cors-allow-headers: "*"
+    
+    # 6. CRITICAL: Timeout settings for long-running queries
+    # Server timeout: How long to wait for backend (MCP server) to respond
+    haproxy.org/timeout-server: "600s"  # 10 minutes for long DuckDB queries
+    haproxy.org/timeout-tunnel: "3600s"  # 1 hour for long-lived SSE connections
+
+spec:
+  ingressClassName: haproxy
+  tls:
+    - hosts:
+        - duckdb-mcp.nrp-nautilus.io
+  rules:
+    - host: duckdb-mcp.nrp-nautilus.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-server-duckdb
+                port:
+                  number: 8000

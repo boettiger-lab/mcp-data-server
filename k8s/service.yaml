@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server-duckdb
+spec:
+  selector:
+    app: duckdb-mcp  
+  ports:
+    - protocol: TCP
+      port: 8000        # The Service listens here
+      targetPort: 8000  # The Pod listens here

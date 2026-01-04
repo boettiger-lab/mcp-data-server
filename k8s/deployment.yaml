@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: duckdb-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: duckdb-mcp
+  template:
+    metadata:
+      labels:
+        app: duckdb-mcp
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: stratus1.nrp-espm.berkeley.edu
+      tolerations:
+      - key: "nautilus.io/issue"
+        operator: "Equal"
+        value: "1476"
+        effect: "NoSchedule"    
+      containers:
+      - name: server
+        image: astral/uv:python3.12-bookworm-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            apt-get update && apt-get install -y git && \
+            git clone https://github.com/boettiger-lab/mcp-data-server.git /app && \
+            cd /app && \
+            uv run --with "mcp" --with "duckdb" --with pandas --with uvicorn server.py
+        resources:   
+          requests:
+            memory: 16Gi
+            cpu: 2
+          limits: 
+            memory: 16Gi
+            cpu: 2
+        ports:
+        - containerPort: 8000
+        # The new spec binds to 0.0.0.0:8000 by default in FastMCP
+        readinessProbe:
+          httpGet:
+            path: /mcp  # FastMCP often still exposes /sse alias, or check /mcp
+            port: 8000
+          initialDelaySeconds: 5
+

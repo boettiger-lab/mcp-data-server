@@ -1,159 +1,99 @@
 import os
 import re
 import duckdb
-import pandas as pd
+import uvicorn
+from contextlib import contextmanager
 from mcp.server.fastmcp import FastMCP
 
-# Initialize the MCP Server
-mcp = FastMCP("DuckDB-S3-Geo")
+# Initialize MCP Server
+mcp = FastMCP("DuckDB-S3-Geo-Isolated")
 
 # -------------------------------------------------------------------------
-# 1. DATABASE INITIALIZATION (The Engine)
+# 1. LOAD CONFIG (Read-Only Global State)
 # -------------------------------------------------------------------------
-# We create a persistent connection that stays open as long as the script runs.
-con = duckdb.connect(database=":memory:")
+def load_text_file(filename):
+    if not os.path.exists(filename): return ""
+    with open(filename, 'r') as f: return f.read()
 
-def boot_database():
-    """
-    On startup, read query-setup.md and run the configuration SQL.
-    This ensures S3 and H3 are ready before the user asks a question.
-    """
-    setup_file = "query-setup.md"
-    if not os.path.exists(setup_file):
-        print(f"❌ CRITICAL: {setup_file} not found. Database not configured.")
-        return
+def parse_setup_sql(content):
+    match = re.search(r"```sql\n(.*?)\n```", content, re.DOTALL)
+    return match.group(1).strip() if match else ""
 
+SETUP_RAW = load_text_file("query-setup.md")
+SETUP_SQL = parse_setup_sql(SETUP_RAW)
+CATALOG_RAW = load_text_file("datasets.md")
+
+# -------------------------------------------------------------------------
+# 2. ISOLATION ENGINE
+# -------------------------------------------------------------------------
+@contextmanager
+def get_isolated_db():
+    """
+    Creates a FRESH DuckDB instance for every single request.
+    This guarantees User A never sees User B's data/views.
+    """
+    conn = duckdb.connect(database=":memory:")
     try:
-        with open(setup_file, 'r') as f:
-            content = f.read()
-        
-        # Regex to grab content between ```sql and ```
-        match = re.search(r"```sql\n(.*?)\n```", content, re.DOTALL)
-        if match:
-            setup_sql = match.group(1).strip()
-            # EXECUTE IMMEDIATELY
-            con.sql(setup_sql)
-            print("✅ Database configured (S3/H3 ready).")
-        else:
-            print("⚠️ No SQL block found in setup file.")
-    except Exception as e:
-        print(f"❌ Boot Error: {e}")
-
-# Run boot sequence immediately on script load
-boot_database()
+        # Fast setup (~5ms) - Secrets/Endpoints only
+        if SETUP_SQL:
+            conn.sql(SETUP_SQL)
+        yield conn
+    finally:
+        conn.close() # Wipes memory instantly
 
 # -------------------------------------------------------------------------
-# 2. CATALOG PARSING (The Map)
+# 3. RESOURCES (Data Catalog)
 # -------------------------------------------------------------------------
-# We parse datasets.md once at startup into a dictionary.
-
-def parse_catalog():
-    dataset_file = "datasets.md"
-    if not os.path.exists(dataset_file): return {}
-
-    with open(dataset_file, 'r') as f:
-        content = f.read()
-
+# (Catalog parsing logic omitted for brevity, same as previous version)
+def parse_catalog_to_dict():
     catalog = {}
-    
-    # Split by bold numbered headers (e.g., "**1. Global Lakes...")
-    # This captures the header + the body text following it
-    sections = re.split(r'(\*\*\d+\..*?\*\*)', content)
-    
-    # The first section is usually the intro/preamble
+    if not CATALOG_RAW: return {}
+    sections = re.split(r'(\*\*\d+\..*?\*\*)', CATALOG_RAW)
     catalog["_intro"] = sections[0].strip()
-
-    # Loop through the regex matches (Header, Body, Header, Body...)
     for i in range(1, len(sections), 2):
         header = sections[i]
         body = sections[i+1]
-        
-        # specific logic to parse your markdown structure
-        full_text = f"{header}\n{body.strip()}"
-        
-        # Create a search key: "vulnerable_carbon"
-        # Remove bold markers, numbers, dots, and convert to snake_case
-        clean_key = re.sub(r'[\*\d\.]', '', header).strip().lower().replace(' ', '_')
-        clean_key = clean_key.split('(')[0].strip().replace(' ', '_') # Handle "(GLWD)"
-        
-        catalog[clean_key] = full_text
-        
+        clean_key = re.sub(r'[\*\d\.]', '', header).strip().lower().split('(')[0].strip().replace(' ', '_')
+        catalog[clean_key] = f"{header}\n{body.strip()}"
     return catalog
 
-# Load catalog into memory immediately
-DATA_CATALOG = parse_catalog()
-
-# -------------------------------------------------------------------------
-# 3. RESOURCES (The Interface to the Map)
-# -------------------------------------------------------------------------
+DATA_CATALOG = parse_catalog_to_dict()
 
 @mcp.resource("catalog://list")
 def list_datasets() -> str:
-    """
-    Returns the list of available datasets and global instructions (H3, etc).
-    The LLM reads this first to know what data is available.
-    """
-    if not DATA_CATALOG:
-        return "No datasets available."
-    
-    # Start with the intro text (H3 instructions)
     output = [DATA_CATALOG.get("_intro", ""), "\n**Available Datasets:**"]
-    
-    # List the keys
     for key in DATA_CATALOG.keys():
         if key == "_intro": continue
         output.append(f"- {key}")
-        
-    output.append("\nTo see columns/schema, read: catalog://{dataset_name}")
     return "\n".join(output)
 
 @mcp.resource("catalog://{name}")
 def get_dataset_details(name: str) -> str:
-    """
-    Returns the specific schema, S3 path, and notes for a dataset.
-    """
-    # Exact match
-    if name in DATA_CATALOG:
-        return DATA_CATALOG[name]
-    
-    # Fuzzy match (if LLM guesses "carbon" instead of "vulnerable_carbon")
+    if name in DATA_CATALOG: return DATA_CATALOG[name]
     for key in DATA_CATALOG:
-        if name in key:
-            return DATA_CATALOG[key]
-            
-    return f"Dataset '{name}' not found. Check catalog://list."
+        if name in key: return DATA_CATALOG[key]
+    return "Not found."
 
 # -------------------------------------------------------------------------
-# 4. TOOLS (The Interface to the Engine)
+# 4. TOOLS (Execution)
 # -------------------------------------------------------------------------
-
 @mcp.tool()
 def query(sql_query: str) -> str:
-    """
-    Executes a SQL query.
-    - AUTOMATICALLY configured for S3 and H3 (no setup needed).
-    - Returns results as a Markdown table.
-    - LIMIT output to 50 rows.
-    """
+    """Run SQL in an isolated, ephemeral environment."""
     try:
-        # Run the query
-        # We explicitly cast to DataFrame to format as Markdown
-        # This handles both SELECT (returns data) and other commands gracefully
-        res = con.sql(sql_query)
-        
-        if res is None:
-            return "Command executed successfully."
-            
-        # Convert to DF and limit to prevent overflowing context
-        df = res.limit(50).df()
-        
-        if df.empty:
-            return "Query ran successfully but returned no results."
-            
-        return df.to_markdown(index=False)
-        
+        with get_isolated_db() as db:
+            result = db.sql(sql_query)
+            if result is None: return "Command executed successfully."
+            df = result.limit(50).df()
+            if df.empty: return "No results found."
+            return df.to_markdown(index=False)
     except Exception as e:
         return f"SQL Error: {str(e)}"
 
+# -------------------------------------------------------------------------
+# 5. SERVER ENTRY POINT (Streamable HTTP)
+# -------------------------------------------------------------------------
 if __name__ == "__main__":
-    mcp.run()
+    # Streamable HTTP uses a single endpoint (default: /mcp)
+    # It supports both GET (handshake) and POST (messages) on the same URL.
+    mcp.run(transport="streamable-http")
