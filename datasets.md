@@ -1,5 +1,6 @@
 # Available Datasets
 
+**IMPORTANT** You must read remote parquet datasets with read_parquet()
 
 ## Core Wetlands
 

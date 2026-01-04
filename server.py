@@ -82,8 +82,43 @@ def get_dataset_details(name: str) -> str:
         if name in key: return DATA_CATALOG[key]
     return "Not found."
 
+
 # -------------------------------------------------------------------------
-# 4. TOOLS (Execution)
+# 4. PROMPTS (The Bridge from Python to LLM)
+# -------------------------------------------------------------------------
+@mcp.prompt("geospatial-analyst")
+def analyst_persona() -> str:
+    """
+    Activates the Analyst Persona. 
+    INJECTS: H3 Rules, Optimization Guides, and Dataset Summary.
+    """
+    
+    # 1. Load the "Brains" (The context files you uploaded)
+    # We load them here dynamically or reuse global variables if they are static
+    h3_guide = load_text_file("h3-guide.md")
+    optim_guide = load_text_file("query-optimization.md")
+
+    # 2. Construct the System Message
+    return f"""
+    You are an expert Geospatial Analyst using DuckDB with H3 indexing.
+
+    ---
+    ### 1. AVAILABLE DATASETS (Catalog)
+    {list_datasets()} 
+    *(Use `catalog://{name}` to see the schema for a specific dataset)*
+
+    ---
+    ### 2. CRITICAL OPTIMIZATION RULES
+    {optim_guide}
+
+    ---
+    ### 3. H3 GEOSPATIAL MATH
+    {h3_guide}
+
+    """
+
+# -------------------------------------------------------------------------
+# 5. TOOLS (Execution)
 # -------------------------------------------------------------------------
 @mcp.tool()
 def query(sql_query: str) -> str:
