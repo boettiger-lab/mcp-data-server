@@ -52,17 +52,35 @@ def get_isolated_db():
 # -------------------------------------------------------------------------
 # 3. RESOURCES (Data Catalog)
 # -------------------------------------------------------------------------
-# (Catalog parsing logic omitted for brevity, same as previous version)
 def parse_catalog_to_dict():
+    """Parse datasets.md into a dict keyed by dataset name."""
     catalog = {}
-    if not CATALOG_RAW: return {}
-    sections = re.split(r'(\*\*\d+\..*?\*\*)', CATALOG_RAW)
+    if not CATALOG_RAW:
+        return {}
+    
+    # Split on numbered headers like **1. Name** or **10. Name (Abbreviation)**
+    sections = re.split(r'(\*\*\d+\.\s+[^*]+\*\*)', CATALOG_RAW)
+    
+    # Everything before first dataset is the intro
     catalog["_intro"] = sections[0].strip()
+    
+    # Process each dataset
     for i in range(1, len(sections), 2):
-        header = sections[i]
-        body = sections[i+1]
-        clean_key = re.sub(r'[\*\d\.]', '', header).strip().lower().split('(')[0].strip().replace(' ', '_')
+        if i + 1 >= len(sections):
+            break
+        
+        header = sections[i]  # e.g., **1. GLWD (Global Lakes and Wetlands)**
+        body = sections[i + 1]
+        
+        # Extract clean key from header
+        # Remove **, digits, dots, and parenthetical content
+        clean_text = re.sub(r'\*\*|\d+\.', '', header)  # Remove ** and number
+        clean_text = re.sub(r'\([^)]*\)', '', clean_text)  # Remove (parentheses)
+        clean_key = clean_text.strip().lower().replace(' ', '_').replace('-', '_')
+        
+        # Store full entry (header + body)
         catalog[clean_key] = f"{header}\n{body.strip()}"
+    
     return catalog
 
 DATA_CATALOG = parse_catalog_to_dict()
