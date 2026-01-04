@@ -4,10 +4,16 @@ import duckdb
 import uvicorn
 from contextlib import contextmanager
 from mcp.server.fastmcp import FastMCP
-from starlette.middleware.trustedhost import TrustedHostMiddleware
+from mcp.server.transport_security import TransportSecuritySettings
 
-# Initialize MCP Server
-mcp = FastMCP("DuckDB-S3-Geo-Isolated")
+# Initialize MCP Server with disabled DNS rebinding protection
+# (we're behind a k8s ingress with its own security)
+mcp = FastMCP(
+    "DuckDB-S3-Geo-Isolated",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
+)
 
 # -------------------------------------------------------------------------
 # 1. LOAD CONFIG (Read-Only Global State)
@@ -98,10 +104,6 @@ if __name__ == "__main__":
     # Streamable HTTP uses a single endpoint (default: /mcp)
     # It supports both GET (handshake) and POST (messages) on the same URL.
     app = mcp.streamable_http_app()
-    
-    # Disable host header validation for k8s ingress
-    # The app has built-in host validation that needs to be disabled
-    app.allowed_hosts = ["*"]
     
     uvicorn.run(
         app, 
