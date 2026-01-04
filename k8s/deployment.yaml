@@ -38,10 +38,4 @@ spec:
             cpu: 2
         ports:
         - containerPort: 8000
-        # The new spec binds to 0.0.0.0:8000 by default in FastMCP
-        readinessProbe:
-          httpGet:
-            path: /mcp  # FastMCP often still exposes /sse alias, or check /mcp
-            port: 8000
-          initialDelaySeconds: 5
 

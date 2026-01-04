@@ -1,17 +1,7 @@
 {
 	"servers": {
 		"duckdb-geo": {
-			"command": "uv",
-			"args": [
-				"run",
-				"--with",
-				"mcp",
-				"--with",
-				"duckdb",
-				"--with",
-				"pandas",
-				"server.py"
-			]
+			"url": "https://duckdb-mcp.nrp-nautilus.io/mcp"
 		}
 	}
 }
