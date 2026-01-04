@@ -97,4 +97,10 @@ if __name__ == "__main__":
     # Streamable HTTP uses a single endpoint (default: /mcp)
     # It supports both GET (handshake) and POST (messages) on the same URL.
     app = mcp.streamable_http_app()
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        proxy_headers=True,  # Trust X-Forwarded-* headers from proxy
+        forwarded_allow_ips="*"  # Allow any proxy IP (we're behind k8s ingress)
+    )
