@@ -99,8 +99,9 @@ if __name__ == "__main__":
     # It supports both GET (handshake) and POST (messages) on the same URL.
     app = mcp.streamable_http_app()
     
-    # Allow requests from ingress with any host header
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+    # Disable host header validation for k8s ingress
+    # The app has built-in host validation that needs to be disabled
+    app.allowed_hosts = ["*"]
     
     uvicorn.run(
         app, 
