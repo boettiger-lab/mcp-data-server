@@ -105,6 +105,9 @@ if __name__ == "__main__":
     # It supports both GET (handshake) and POST (messages) on the same URL.
     app = mcp.streamable_http_app()
     
+    # Disable automatic trailing slash redirects to avoid session issues
+    app.router.redirect_slashes = False
+    
     uvicorn.run(
         app, 
         host="0.0.0.0", 
