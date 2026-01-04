@@ -2,173 +2,178 @@ import os
 import re
 import duckdb
 import uvicorn
+import sys
 from contextlib import contextmanager
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-# Initialize MCP Server with disabled DNS rebinding protection
-# (we're behind a k8s ingress with its own security)
+# 1. INITIALIZE SERVER
+# Disable DNS rebinding protection because we run behind a K8s ingress
 mcp = FastMCP(
     "DuckDB-S3-Geo-Isolated",
-    transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=False
-    )
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)
 )
 
 # -------------------------------------------------------------------------
-# 1. LOAD CONFIG (Read-Only Global State)
+# 2. CONFIG & FILE LOADING (Robust)
 # -------------------------------------------------------------------------
 def load_text_file(filename):
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f"Required file not found: {filename}")
-    with open(filename, 'r') as f: return f.read()
+    """
+    Attempts to load a file from multiple common locations (Dev vs Prod).
+    """
+    paths = [
+        filename,                                     # Local dev
+        os.path.join("/app", filename),               # Standard Container
+        os.path.join(os.path.dirname(__file__), filename) # Relative to script
+    ]
+    
+    for p in paths:
+        if os.path.exists(p):
+            # print(f"✅ Loaded {filename} from {p}", file=sys.stderr) # Debug
+            with open(p, 'r') as f: return f.read()
+            
+    print(f"⚠️ Warning: Could not find {filename}. Checked: {paths}", file=sys.stderr)
+    return ""
 
 def parse_setup_sql(content):
+    """Extracts SQL from the markdown block in query-setup.md"""
     match = re.search(r"```sql\n(.*?)\n```", content, re.DOTALL)
     return match.group(1).strip() if match else ""
 
+# Load all configuration files into memory
 SETUP_RAW = load_text_file("query-setup.md")
 SETUP_SQL = parse_setup_sql(SETUP_RAW)
+
 CATALOG_RAW = load_text_file("datasets.md")
+OPTIM_RAW = load_text_file("query-optimization.md")
+H3_RAW = load_text_file("h3-guide.md")
 
 # -------------------------------------------------------------------------
-# 2. ISOLATION ENGINE
+# 3. CONTEXT INJECTION (For older clients that don't recognize resources)
+# -------------------------------------------------------------------------
+def get_catalog_summary():
+    """Generates a clean bullet list of available datasets for the LLM."""
+    if not CATALOG_RAW: return "No datasets found."
+    summary = []
+    # Regex extracts names like "**1. Vulnerable Carbon**"
+    matches = re.findall(r'\*\*\d+\.\s(.*?)\*\*', CATALOG_RAW)
+    for m in matches:
+        summary.append(f"- {m}")
+    return "\n".join(summary)
+
+# This is the Master Context that will be injected into the Tool Description
+# It forces the LLM to read this before it attempts to write any SQL.
+SYSTEM_CONTEXT = f"""
+---
+### ⚠️ CRITICAL KNOWLEDGE FOR THIS TOOL
+1. **AVAILABLE DATASETS:**
+{get_catalog_summary()}
+
+2. **OPTIMIZATION RULES:**
+{OPTIM_RAW}
+
+3. **H3 SPATIAL MATH:**
+{H3_RAW}
+---
+"""
+
+# -------------------------------------------------------------------------
+# 4. ISOLATION ENGINE
 # -------------------------------------------------------------------------
 @contextmanager
 def get_isolated_db():
     """
-    Creates a FRESH DuckDB instance for every single request.
-    This guarantees User A never sees User B's data/views.
+    Creates a fresh, in-memory DuckDB connection for every request.
+    This ensures no state leaks between users/queries.
     """
     conn = duckdb.connect(database=":memory:")
     try:
-        # Fast setup (~5ms) - Secrets/Endpoints only
-        if SETUP_SQL:
-            conn.sql(SETUP_SQL)
+        # Initialize secrets and settings (takes ~5ms)
+        if SETUP_SQL: conn.sql(SETUP_SQL)
         yield conn
     finally:
-        conn.close() # Wipes memory instantly
+        conn.close()
 
 # -------------------------------------------------------------------------
-# 3. RESOURCES (Data Catalog)
+# 5. RESOURCES (For Deep Lookups)
 # -------------------------------------------------------------------------
-def parse_catalog_to_dict():
-    """Parse datasets.md into a dict keyed by dataset name."""
-    catalog = {}
-    if not CATALOG_RAW:
-        return {}
-    
-    # Split on numbered headers like **1. Name** or **10. Name (Abbreviation)**
-    sections = re.split(r'(\*\*\d+\.\s+[^*]+\*\*)', CATALOG_RAW)
-    
-    # Everything before first dataset is the intro
-    catalog["_intro"] = sections[0].strip()
-    
-    # Process each dataset
+# We keep these for clients that support them, or for when the LLM
+# wants to inspect specific table schema details.
+
+DATA_CATALOG = {}
+if CATALOG_RAW:
+    # Split catalog into sections based on "**1. Name**" headers
+    sections = re.split(r'(\*\*\d+\..*?\*\*)', CATALOG_RAW)
+    DATA_CATALOG["_intro"] = sections[0].strip() if sections else ""
     for i in range(1, len(sections), 2):
-        if i + 1 >= len(sections):
-            break
-        
-        header = sections[i]  # e.g., **1. GLWD (Global Lakes and Wetlands)**
-        body = sections[i + 1]
-        
-        # Extract clean key from header
-        # Remove **, digits, dots, and parenthetical content
-        clean_text = re.sub(r'\*\*|\d+\.', '', header)  # Remove ** and number
-        clean_text = re.sub(r'\([^)]*\)', '', clean_text)  # Remove (parentheses)
-        clean_key = clean_text.strip().lower().replace(' ', '_').replace('-', '_')
-        
-        # Store full entry (header + body)
-        catalog[clean_key] = f"{header}\n{body.strip()}"
-    
-    return catalog
-
-DATA_CATALOG = parse_catalog_to_dict()
+        header = sections[i]
+        body = sections[i+1]
+        # Normalize key for lookup: "**1. Carbon**" -> "carbon"
+        clean_key = re.sub(r'[\*\d\.]', '', header).strip().lower().split('(')[0].strip().replace(' ', '_')
+        DATA_CATALOG[clean_key] = header + "\n" + body.strip()
 
 @mcp.resource("catalog://list")
 def list_datasets() -> str:
-    output = [DATA_CATALOG.get("_intro", ""), "\n**Available Datasets:**"]
-    for key in DATA_CATALOG.keys():
-        if key == "_intro": continue
-        output.append(f"- {key}")
-    return "\n".join(output)
+    """Returns the full raw catalog markdown."""
+    return CATALOG_RAW
 
 @mcp.resource("catalog://{name}")
 def get_dataset_details(name: str) -> str:
+    """Returns details for a specific dataset (fuzzy match)."""
+    # Exact match
     if name in DATA_CATALOG: return DATA_CATALOG[name]
-    for key in DATA_CATALOG:
-        if name in key: return DATA_CATALOG[key]
-    return "Not found."
-
-
-# -------------------------------------------------------------------------
-# 4. PROMPTS (The Bridge from Python to LLM)
-# -------------------------------------------------------------------------
-@mcp.prompt("geospatial-analyst")
-def analyst_persona() -> str:
-    """
-    Activates the Analyst Persona. 
-    INJECTS: H3 Rules, Optimization Guides, and Dataset Summary.
-    """
-    
-    # 1. Load the "Brains" (The context files you uploaded)
-    # We load them here dynamically or reuse global variables if they are static
-    h3_guide = load_text_file("h3-guide.md")
-    optim_guide = load_text_file("query-optimization.md")
-
-    # 2. Construct the System Message
-    return f"""
-    You are an expert Geospatial Analyst using DuckDB with H3 indexing.
-
-    ---
-    ### 1. AVAILABLE DATASETS (Catalog)
-    {list_datasets()} 
-    *(Use `catalog://{name}` to see the schema for a specific dataset)*
-
-    ---
-    ### 2. CRITICAL OPTIMIZATION RULES
-    {optim_guide}
-
-    ---
-    ### 3. H3 GEOSPATIAL MATH
-    {h3_guide}
-
-    """
+    # Fuzzy match
+    for key, val in DATA_CATALOG.items():
+        if name in key: return val
+    return "Dataset not found."
 
 # -------------------------------------------------------------------------
-# 5. TOOLS (Execution)
+# 6. TOOLS (With Dynamic Context Injection)
 # -------------------------------------------------------------------------
 @mcp.tool()
 def query(sql_query: str) -> str:
-    """Run SQL in an isolated, ephemeral environment."""
+    """
+    Executes optimized DuckDB SQL queries on the geospatial lakehouse.
+    
+    SYSTEM CONTEXT (READ BEFORE GENERATING SQL):
+    {context}
+    """
+    # Log to stderr (visible in K8s logs)
+    print(f"🔍 Executing: {sql_query}", file=sys.stderr)
+    
     try:
         with get_isolated_db() as db:
             result = db.sql(sql_query)
             if result is None: return "Command executed successfully."
+            
+            # Limit rows to prevent blowing up the chat context
             df = result.limit(50).df()
             if df.empty: return "No results found."
+            # Use tabulate for clean markdown tables
             return df.to_markdown(index=False)
     except Exception as e:
         return f"SQL Error: {str(e)}"
 
-
-
+# 🔥 For DUMB MCP clients: Inject the context into the docstring dynamically
+# This puts the dataset list & rules INSIDE the description the LLM reads.
+query.__doc__ = query.__doc__.format(context=SYSTEM_CONTEXT)
 
 # -------------------------------------------------------------------------
-# 6. SERVER ENTRY POINT (Streamable HTTP)
+# 7. SERVER ENTRY POINT
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Streamable HTTP uses a single endpoint (default: /mcp)
-    # It supports both GET (handshake) and POST (messages) on the same URL.
+    # Create the ASGI app
     app = mcp.streamable_http_app()
-    
-    # Disable automatic trailing slash redirects to avoid session issues
+    # Fix for some clients that mishandle trailing slashes
     app.router.redirect_slashes = False
+    
+    print("🚀 Starting DuckDB MCP Server on 0.0.0.0:8000...", file=sys.stderr)
+    print(f"ℹ️  Injected {len(DATA_CATALOG)} datasets into tool context.", file=sys.stderr)
     
     uvicorn.run(
         app, 
         host="0.0.0.0", 
         port=8000,
-        proxy_headers=True,  # Trust X-Forwarded-* headers from proxy
-        forwarded_allow_ips="*"  # Allow any proxy IP (we're behind k8s ingress)
+        proxy_headers=True,      # Trust X-Forwarded-* (Ingress)
+        forwarded_allow_ips="*"  # Allow all proxies
     )
