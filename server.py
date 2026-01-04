@@ -4,6 +4,7 @@ import duckdb
 import uvicorn
 from contextlib import contextmanager
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 # Initialize MCP Server
 mcp = FastMCP("DuckDB-S3-Geo-Isolated")
@@ -97,6 +98,10 @@ if __name__ == "__main__":
     # Streamable HTTP uses a single endpoint (default: /mcp)
     # It supports both GET (handshake) and POST (messages) on the same URL.
     app = mcp.streamable_http_app()
+    
+    # Allow requests from ingress with any host header
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+    
     uvicorn.run(
         app, 
         host="0.0.0.0", 
