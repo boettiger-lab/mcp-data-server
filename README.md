@@ -25,7 +25,7 @@ create a  `.vscode/mcp.json` like this: ([as in this repo](.vscode/mcp.json))
 Ask your chat client a question and it should answer by querying the database in SQL:
 
 
-![alt text](image.png)
+![alt text](docs/img/image.png)
 
 
 
