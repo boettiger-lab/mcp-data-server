@@ -1,0 +1,6 @@
+mcp
+duckdb
+pandas
+uvicorn
+tabulate
+pystac
