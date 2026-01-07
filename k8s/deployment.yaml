@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: duckdb-mcp
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: duckdb-mcp
@@ -12,13 +12,13 @@ spec:
       labels:
         app: duckdb-mcp
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: stratus1.nrp-espm.berkeley.edu
-      tolerations:
-      - key: "nautilus.io/issue"
-        operator: "Equal"
-        value: "1476"
-        effect: "NoSchedule"    
+#      nodeSelector:
+#        kubernetes.io/hostname: stratus1.nrp-espm.berkeley.edu
+#      tolerations:
+#      - key: "nautilus.io/issue"
+#        operator: "Equal"
+#        value: "1476"
+#        effect: "NoSchedule"    
       containers:
       - name: server
         image: astral/uv:python3.12-bookworm-slim
