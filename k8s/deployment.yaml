@@ -34,8 +34,8 @@ spec:
             memory: 16Gi
             cpu: 2
           limits: 
-            memory: 16Gi
-            cpu: 2
+            memory: 160Gi
+            cpu: 8
         ports:
         - containerPort: 8000
         readinessProbe:
