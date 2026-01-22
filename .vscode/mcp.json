@@ -1,10 +1,7 @@
 {
 	"servers": {
-		//	"duckdb-geo": {
-		//		"url": "https://duckdb-mcp.nrp-nautilus.io/mcp"
-		//	},
 		"duckdb-geo": {
-			"url": "http://localhost:8000/mcp"
-		},
+			"url": "https://duckdb-mcp.nrp-nautilus.io/mcp"
+		}
 	}
 }

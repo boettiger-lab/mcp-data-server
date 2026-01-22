@@ -1,0 +1,7 @@
+name: duckdb-geo
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: duckdb-geo
+    url: https://duckdb-mcp.nrp-nautilus.io/mcp
+

@@ -4,7 +4,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that p
 
 ## Quick Start
 
-Add the hosted MCP endpoint to your LLM client. 
+Add the hosted MCP endpoint to your LLM client, like so: 
 
 
 ### Using VSCode
@@ -22,7 +22,11 @@ create a  `.vscode/mcp.json` like this: ([as in this repo](.vscode/mcp.json))
 ```
 
  
-Ask your chat client a question and it should answer by querying the database in SQL:
+Now simply ask your chat client a question about the datasets and it should answer by querying the database in SQL:
+
+Examples:
+
+- What fraction of Australia is protected area?  
 
 
 ![alt text](docs/img/image.png)

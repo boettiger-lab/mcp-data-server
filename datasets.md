@@ -33,7 +33,7 @@
 **6. WDPA (Protected Areas)**
 - Partitioned parquet files at: `s3://public-wdpa/hex/**`
 - Columns: `NAME_ENG`, `DESIG_ENG`, `IUCN_CAT`, `STATUS`, `GIS_AREA` (km²), `ISO3`, `h8`, `h0`
-- **Note**: Overlapping areas → use `APPROX_COUNT_DISTINCT(h8)`
+- **CRITICAL**: Multiple protected areas can cover the same hex. MUST use `SELECT DISTINCT h8, h0` before joining to other datasets to avoid double-counting. Direct joins will overcount areas and attributes.
 - **IUCN**: Ia/Ib (Reserve), II (Park), III (Monument), IV (Habitat), V (Landscape), VI (Sustainable)
 
 **7. Ramsar Sites**

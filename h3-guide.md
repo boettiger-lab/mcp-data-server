@@ -25,6 +25,37 @@ JOIN read_parquet('s3://public-inat/range-maps/hex/**') pos
     AND wetlands.h0 = pos.h0  -- Always include h0 for partition pruning!
 ```
 
+## Avoiding Double-Counting in Overlapping Datasets
+
+**Critical:** Some datasets (WDPA, Ramsar, GLWD) have multiple records per hex. Joining directly will overcount.
+
+**❌ WRONG:** Joining WDPA directly multiplies rows
+```sql
+-- If 2 protected areas cover hex ABC, this counts carbon twice
+JOIN read_parquet('s3://public-wdpa/hex/**') w ON c.h8 = w.h8
+```
+
+**✅ CORRECT:** Deduplicate first with DISTINCT
+```sql
+protected_hexes AS (
+  SELECT DISTINCT h8, h0 FROM read_parquet('s3://public-wdpa/hex/**')
+),
+protected_carbon AS (
+  SELECT country, SUM(carbon) as protected
+  FROM countries c
+  JOIN protected_hexes p ON c.h8 = p.h8 AND c.h0 = p.h0
+  JOIN carbon_data USING (h8, h0)
+  GROUP BY country
+)
+```
+
+**Validation:** Protected percentages must be ≤ 100%. If you see >100%, you're double-counting.
+
+**Datasets requiring deduplication:**
+- WDPA (overlapping protected areas)
+- Ramsar (can overlap with WDPA)
+- GLWD (multiple wetland types per hex)
+
 ## Generating Output Files
 
 ```sql
