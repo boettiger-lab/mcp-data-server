@@ -90,10 +90,6 @@ if CATALOG_RAW:
         clean_key = re.sub(r'[\*\d\.]', '', header).strip().lower().split('(')[0].strip().replace(' ', '_')
         DATA_CATALOG[clean_key] = header + "\n" + body.strip()
 
-@mcp.resource("instructions://system")
-def system_instructions() -> str:
-    return ROLE_RAW
-
 @mcp.resource("catalog://list")
 def list_datasets() -> str:
     return CATALOG_RAW
@@ -110,13 +106,7 @@ def get_dataset_details(name: str) -> str:
 # -------------------------------------------------------------------------
 @mcp.prompt("geospatial-analyst")
 def analyst_persona() -> str:
-    return f"""
-    {ROLE_RAW}
-    DATASETS:
-    {CATALOG_RAW}
-    RULES:
-    {OPTIM_RAW}
-    """
+    return ROLE_RAW
 
 # -------------------------------------------------------------------------
 # 7. TOOL DEFINITION & MANUAL REGISTRATION
