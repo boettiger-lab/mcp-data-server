@@ -12,6 +12,7 @@ metadata:
     haproxy-ingress.github.io/cors-max-age: "86400"
     
     # Timeout settings for long-running queries
+    haproxy-ingress.github.io/timeout-client: "600s"  # 10 minutes - must match timeout-server
     haproxy-ingress.github.io/timeout-server: "600s"  # 10 minutes for long DuckDB queries
     haproxy-ingress.github.io/timeout-tunnel: "3600s"  # 1 hour for long-lived SSE connections
 
