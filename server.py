@@ -90,6 +90,10 @@ if CATALOG_RAW:
         clean_key = re.sub(r'[\*\d\.]', '', header).strip().lower().split('(')[0].strip().replace(' ', '_')
         DATA_CATALOG[clean_key] = header + "\n" + body.strip()
 
+@mcp.resource("instructions://system")
+def system_instructions() -> str:
+    return ROLE_RAW
+
 @mcp.resource("catalog://list")
 def list_datasets() -> str:
     return CATALOG_RAW
