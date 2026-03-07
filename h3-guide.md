@@ -25,9 +25,15 @@ JOIN read_parquet('s3://public-inat/range-maps/hex/**') pos
     AND wetlands.h0 = pos.h0  -- Always include h0 for partition pruning!
 ```
 
-## Avoiding Double-Counting in Overlapping Datasets
+## Multiple Rows per Hex: Two Different Problems
 
-**Critical:** Some datasets (WDPA, Ramsar, GLWD) have multiple records per hex. Joining directly will overcount.
+There are **two distinct reasons** a dataset can have multiple rows with the same `h8` value, and they require different fixes:
+
+---
+
+### Problem 1 — Overlapping polygons (vector datasets)
+
+Datasets like WDPA store one row per *feature* (protected area). Multiple protected areas can cover the same hex, producing duplicate `h8` values. Fix: **deduplicate with DISTINCT** before joining.
 
 **❌ WRONG:** Joining WDPA directly multiplies rows
 ```sql
@@ -49,12 +55,61 @@ protected_carbon AS (
 )
 ```
 
-**Validation:** Protected percentages must be ≤ 100%. If you see >100%, you're double-counting.
-
-**Datasets requiring deduplication:**
+**Datasets requiring DISTINCT deduplication:**
 - WDPA (overlapping protected areas)
 - Ramsar (can overlap with WDPA)
 - GLWD (multiple wetland types per hex)
+
+**Validation:** Protected percentages must be ≤ 100%. If you see >100%, you're double-counting.
+
+---
+
+### Problem 2 — Raster pixels (raster-derived datasets)
+
+Raster datasets are converted to hex by assigning each **pixel** its H3 cell — no aggregation is applied during processing. When the raster resolution is finer than the H3 resolution, many pixels map to the same hex cell, producing many rows with the same `h8`, all with different values.
+
+- At H3 resolution 8 (edge ~531m) with 30m pixels: ~300 pixel rows per hex
+- At H3 resolution 8 with 1km pixels: ~1 row per hex (ratio near 1)
+
+**DISTINCT does not help here** — you genuinely need to aggregate the values.
+
+**✅ CORRECT: Always GROUP BY and aggregate raster datasets**
+```sql
+-- Continuous values (carbon, biomass, etc.) → SUM or AVG
+SELECT h8, h0, SUM(carbon) as total_carbon
+FROM read_parquet('s3://public-carbon/.../hex/**')
+GROUP BY h8, h0
+
+-- Categorical values (land cover, etc.) → use MODE (most frequent class)
+SELECT h8, h0, MODE(Z) as dominant_class
+FROM read_parquet('s3://public-wetlands/glwd/hex/**')
+GROUP BY h8, h0
+```
+
+**Raster-derived datasets (always aggregate before joining):**
+- Vulnerable Carbon, Irrecoverable Carbon (SUM or AVG)
+- NCP (AVG)
+- GLWD / land cover (MODE for dominant class)
+
+---
+
+### Diagnostic: check rows-per-hex before writing queries
+
+When uncertain, run this check on a single h0 partition first:
+
+```sql
+SELECT
+  COUNT(*)                        AS total_rows,
+  APPROX_COUNT_DISTINCT(h8)       AS unique_hexes,
+  COUNT(*) * 1.0 / APPROX_COUNT_DISTINCT(h8) AS avg_rows_per_hex
+FROM read_parquet('s3://bucket/dataset/hex/h0=8001fffffffffff/data_0.parquet');
+```
+
+| avg_rows_per_hex | Meaning |
+|---|---|
+| ≈ 1 | One row per hex — no aggregation needed |
+| > 1, integer-ish | Overlapping polygons — use DISTINCT |
+| >> 1, non-integer | Raster pixels — use GROUP BY + SUM/AVG/MODE |
 
 ## Generating Output Files
 
