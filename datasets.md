@@ -7,8 +7,10 @@
 **1. GLWD (Global Lakes and Wetlands)**
 - Partitioned parquet files at `s3://public-wetlands/glwd/hex/**`
 - Columns: `Z` (type 0-33), `h8`, `h0`
-- **Critical**: One hex can have multiple Z values. Always use `APPROX_COUNT_DISTINCT(h8)` for area
+- **Raster-derived**: multiple pixel rows per hex, each with a wetland type code. For dominant class use `MODE(Z)`; for presence/absence use `COUNT(DISTINCT Z) > 0`. Always use `APPROX_COUNT_DISTINCT(h8)` for area.
 - **Categories CSV**: `s3://public-wetlands/glwd/category_codes.csv` (Z, name, description, category)
+  - Open Water (1-7), Lacustrine (8-9), Riverine (10-15), Palustrine (16-19)
+  - Ephemeral (20-21), Peatlands (22-27), Coastal (28-33)
   - Open Water (1-7), Lacustrine (8-9), Riverine (10-15), Palustrine (16-19)
   - Ephemeral (20-21), Peatlands (22-27), Coastal (28-33)
 
@@ -16,10 +18,12 @@
 - Partitioned parquet files at `s3://public-carbon/hex/vulnerable-carbon/**`
 - Columns: `carbon`, `h8`, `h0`
 - Conservation International 2018 - carbon vulnerable to development
+- **Raster-derived**: multiple pixel rows per hex — always `GROUP BY h8, h0` and use `SUM(carbon)` or `AVG(carbon)`
 
 **3. NCP (Nature Contributions to People)**
 - Partitioned parquet files at `s3://public-ncp/hex/ncp_biod_nathab/**`
 - Columns: `ncp` (0-1 score), `h8`, `h0`
+- **Raster-derived**: multiple pixel rows per hex — always `GROUP BY h8, h0` and use `AVG(ncp)`
 
 **4. Countries**
 - Parquet files at `s3://public-overturemaps/hex/countries.parquet`
