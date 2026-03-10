@@ -1,6 +1,8 @@
 # H3 Geospatial Indexing
 
-**Most of these data uses H3 hexagons** (https://h3geo.org) - uniform hexagonal grid covering Earth
+**Most datasets have H3 hex versions.** Always use them for spatial operations instead of GeoParquet geometry columns.
+
+**H3 hex joins replace geometry functions.** Do NOT use `ST_Intersects`, `ST_Contains`, `ST_Area`, or `ST_Within` — these require scanning full polygon geometries and are orders of magnitude slower. Instead, join datasets on their shared H3 index (`h8`, `h0`) to compute overlaps, areas, and containment. If two datasets use different H3 resolutions, convert with `h3_cell_to_parent()`.
 
 ## Key Facts
 
