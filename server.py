@@ -6,6 +6,7 @@ import sys
 from contextlib import contextmanager
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from stac import STAC_DATASETS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get
 
 # -------------------------------------------------------------------------
 # 1. INITIALIZATION
@@ -37,7 +38,7 @@ def parse_setup_sql(content):
 
 SETUP_RAW = load_text_file("query-setup.md")
 SETUP_SQL = parse_setup_sql(SETUP_RAW)
-CATALOG_RAW = load_text_file("datasets.md")
+GUIDE_RAW = load_text_file("datasets.md")
 OPTIM_RAW = load_text_file("query-optimization.md")
 H3_RAW = load_text_file("h3-guide.md")
 ROLE_RAW = load_text_file("assistant-role.md")
@@ -45,17 +46,15 @@ ROLE_RAW = load_text_file("assistant-role.md")
 # -------------------------------------------------------------------------
 # 3. CONTEXT INJECTION (PROMPT ENGINEERING)
 # -------------------------------------------------------------------------
-# We frame this as a "Strict Syntax Guide" rather than just "Context".
-# This forces the model to abandon its training on standard "SELECT * FROM table".
 TOOL_INJECTED_CONTEXT = f"""
 ---
 ### ⚠️ CRITICAL SQL RULES (MUST FOLLOW)
 1. **NO TABLES EXIST:** The database is empty. You CANNOT write `FROM table_name`.
 2. **USE PARQUET PATHS:** You MUST use `FROM read_parquet('s3://...')` for ALL queries.
-3. **COPY PATHS EXACTLY:** Use the S3 paths listed in the Catalog below.
+3. **DISCOVER PATHS:** Use `list_datasets` and `get_dataset` tools to find S3 paths and column schemas.
 
-### 📂 DATA CATALOG (Source of Truth)
-{CATALOG_RAW}
+### 📂 SQL DATA GUIDE
+{GUIDE_RAW}
 
 ### ⚡ OPTIMIZATION RULES
 {OPTIM_RAW}
@@ -78,38 +77,40 @@ def get_isolated_db():
         conn.close()
 
 # -------------------------------------------------------------------------
-# 5. MCP RESOURCES (Schema Browsing for Smart Clients)
+# 5. MCP RESOURCES (Schema Browsing)
 # -------------------------------------------------------------------------
-DATA_CATALOG = {}
-if CATALOG_RAW:
-    sections = re.split(r'(\*\*\d+\..*?\*\*)', CATALOG_RAW)
-    DATA_CATALOG["_intro"] = sections[0].strip() if sections else ""
-    for i in range(1, len(sections), 2):
-        header = sections[i]
-        body = sections[i+1]
-        clean_key = re.sub(r'[\*\d\.]', '', header).strip().lower().split('(')[0].strip().replace(' ', '_')
-        DATA_CATALOG[clean_key] = header + "\n" + body.strip()
-
 @mcp.resource("catalog://list")
-def list_datasets() -> str:
-    return CATALOG_RAW
+def catalog_list() -> str:
+    return _stac_list()
 
-@mcp.resource("catalog://{name}")
-def get_dataset_details(name: str) -> str:
-    if name in DATA_CATALOG: return DATA_CATALOG[name]
-    for key, val in DATA_CATALOG.items():
-        if name in key: return val
-    return "Dataset not found."
+@mcp.resource("catalog://{dataset_id}")
+def catalog_dataset(dataset_id: str) -> str:
+    return _stac_get(dataset_id)
 
 # -------------------------------------------------------------------------
-# 6. MCP PROMPTS (Personas for Smart Clients)
+# 6. MCP TOOLS — Dataset Discovery
+# -------------------------------------------------------------------------
+@mcp.tool()
+def list_datasets() -> str:
+    """List all available datasets with their collection IDs and titles.
+    Call this first to discover what data is available before writing SQL queries."""
+    return _stac_list()
+
+@mcp.tool()
+def get_dataset(dataset_id: str) -> str:
+    """Get detailed metadata for a dataset: S3 parquet paths, column schemas, and descriptions.
+    Use the collection ID from list_datasets."""
+    return _stac_get(dataset_id)
+
+# -------------------------------------------------------------------------
+# 7. MCP PROMPTS (Personas for Smart Clients)
 # -------------------------------------------------------------------------
 @mcp.prompt("geospatial-analyst")
 def analyst_persona() -> str:
     return ROLE_RAW
 
 # -------------------------------------------------------------------------
-# 7. TOOL DEFINITION & MANUAL REGISTRATION
+# 8. TOOL DEFINITION — SQL Query
 # -------------------------------------------------------------------------
 def query(sql_query: str) -> str:
     """Placeholder (overwritten below)."""
@@ -118,36 +119,36 @@ def query(sql_query: str) -> str:
         with get_isolated_db() as db:
             result = db.sql(sql_query)
             if result is None: return "Command executed successfully."
-            
+
             df = result.limit(50).df()
             if df.empty: return "No results found."
             return df.to_markdown(index=False)
-            
+
     except Exception as e:
         return f"SQL Error: {str(e)}"
 
-# 💉 INJECTION: Force the strict rules into the tool description
 query.__doc__ = f"""
-Executes optimized DuckDB SQL. 
+Executes optimized DuckDB SQL.
 STRICTLY FOLLOW THE RULES BELOW.
 
 {TOOL_INJECTED_CONTEXT}
 """
 
-# ®️ REGISTER: Manually register the tool with the injected prompt
 mcp.tool()(query)
 
 # -------------------------------------------------------------------------
-# 8. SERVER START
+# 9. SERVER START
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
     app = mcp.streamable_http_app()
     app.router.redirect_slashes = False
-    
-    print("🚀 Starting DuckDB MCP Server (Strict Mode)...", file=sys.stderr)
+
+    print("🚀 Starting DuckDB MCP Server...", file=sys.stderr)
+    print(f"📂 STAC catalog: {STAC_CATALOG_URL}", file=sys.stderr)
+    print(f"📊 Datasets loaded: {len(STAC_DATASETS)}", file=sys.stderr)
     uvicorn.run(
-        app, 
-        host="0.0.0.0", 
+        app,
+        host="0.0.0.0",
         port=8000,
         proxy_headers=True,
         forwarded_allow_ips="*"

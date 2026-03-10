@@ -1,90 +1,155 @@
-import pystac
-from mcp.server.fastmcp import FastMCP
-
-# ------------------------------------------------------------------
-# 1. DYNAMIC DATASETS (STAC Integration)
-# ------------------------------------------------------------------
-STAC_API_URL = "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
-
-# Create MCP instance for decorators (will be used when imported by server.py)
-mcp = FastMCP("STAC-Catalog")
-
-def fetch_stac_collections():
-    """
-    Connects to the STAC catalog and returns a simplified dict of datasets.
-    This replaces the static 'datasets.md' parsing.
-    """
-    try:
-        # Load the Catalog (Root)
-        cat = pystac.Catalog.from_file(STAC_API_URL)
-        
-        datasets = {}
-        # Iterate over child collections
-        for child in cat.get_children():
-            # Get providers info
-            providers = child.providers or []
-            producer = next((p.name for p in providers if 'producer' in (p.roles or [])), 'Unknown')
-            
-            # Get available formats
-            formats = child.summaries.get_list('formats') if child.summaries else []
-            formats_str = ', '.join(formats) if formats else 'N/A'
-            
-            # Get documentation links
-            docs = [link for link in child.links if link.rel == 'documentation']
-            docs_str = docs[0].href if docs else 'N/A'
-            
-            # Get license
-            license_info = child.license or 'N/A'
-            
-            # Get assets (data URLs)
-            assets_info = []
-            if child.assets:
-                for asset_key, asset in child.assets.items():
-                    # Convert HTTPS URLs to S3 URLs for partitioned parquet (directories)
-                    href = asset.href
-                    # Check if it's a directory path (doesn't end in a file extension) and not PMTiles/COG
-                    if (href.startswith('https://s3-west.nrp-nautilus.io/') and 
-                        not href.endswith('.parquet') and 
-                        not href.endswith('.pmtiles') and
-                        not href.endswith('.tif') and
-                        not href.endswith('.tiff')):
-                        # Convert https://s3-west.nrp-nautilus.io/bucket/path/ to s3://bucket/path/
-                        href = href.replace('https://s3-west.nrp-nautilus.io/', 's3://')
-                    
-                    asset_desc = f"  • {asset.title}: {href}"
-                    if hasattr(asset, 'description') and asset.description:
-                        asset_desc += f"\n    ({asset.description})"
-                    assets_info.append(asset_desc)
-            
-            assets_str = '\n'.join(assets_info) if assets_info else '  (No direct assets)'
-            
-            # Extract useful metadata for the LLM
-            info = f"""**Dataset:** {child.title}
-**ID:** {child.id}
-**Description:** {child.description}
-**Producer:** {producer}
-**Formats:** {formats_str}
-**License:** {license_info}
-**Documentation:** {docs_str}
-
-**Available Assets:**
-{assets_str}
 """
-            datasets[child.id] = info
-            
+STAC catalog integration — fetches dataset metadata at startup and exposes
+it as MCP resources for client discovery.
+
+The STAC catalog describes harmonized, cloud-native datasets that are
+co-located with this MCP server on the same Kubernetes cluster, enabling
+high-speed internal reads via the Ceph S3 endpoint.
+"""
+
+import os
+import sys
+import pystac
+
+
+STAC_CATALOG_URL = os.environ.get(
+    "STAC_CATALOG_URL",
+    "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json",
+)
+
+
+def _href_to_s3(href: str) -> str:
+    """Convert an HTTPS S3 URL to an s3:// path for DuckDB read_parquet()."""
+    if href.startswith("https://s3-west.nrp-nautilus.io/"):
+        return href.replace("https://s3-west.nrp-nautilus.io/", "s3://")
+    return href
+
+
+def _extract_parquet_assets(col) -> list[str]:
+    """Extract parquet/hex asset lines from a collection's assets."""
+    assets = []
+    for asset_id, asset in (col.assets or {}).items():
+        href = asset.href
+        atype = asset.media_type or ""
+        title = asset.title or asset_id
+
+        if "parquet" in atype or href.endswith(".parquet") or href.endswith("/") or "/hex/" in href:
+            # Skip PMTiles and COGs that might match loosely
+            if "pmtiles" in atype or href.endswith(".pmtiles"):
+                continue
+            if "tif" in atype or href.endswith(".tif") or href.endswith(".tiff"):
+                continue
+            s3 = _href_to_s3(href)
+            if s3.endswith("/"):
+                s3 = s3.rstrip("/") + "/**"
+            assets.append(f"  - {title}: `read_parquet('{s3}')`")
+    return assets
+
+
+def _extract_columns(col) -> list[str]:
+    """Extract table:columns as markdown lines."""
+    table_cols = col.extra_fields.get("table:columns", [])
+    if not table_cols:
+        return []
+
+    display_cols = [
+        c for c in table_cols
+        if c.get("name", "").lower() not in ("geometry", "geom", "bbox")
+    ]
+    h3_cols = [c for c in display_cols if c.get("name", "") in ("h0", "h8", "h9", "h10", "h11")]
+    other_cols = [c for c in display_cols if c not in h3_cols][:20]
+
+    lines = []
+    if other_cols:
+        lines.append("\nKey columns:")
+        for c in other_cols:
+            desc = f" — {c['description']}" if c.get("description") else ""
+            lines.append(f"  - `{c['name']}` ({c.get('type', '?')}){desc}")
+    if h3_cols:
+        lines.append(f"  - H3 index columns: {', '.join(c['name'] for c in h3_cols)}")
+    return lines
+
+
+def _format_collection(col) -> str:
+    """Build a compact markdown summary of one STAC collection.
+
+    If the collection has direct children (e.g. wyoming-wildlife-lands has
+    per-species sub-collections), expand one level to find assets and
+    column schemas that aren't on the parent. Does NOT recurse further.
+    """
+    lines = []
+    lines.append(f"**{col.title or col.id}**")
+    lines.append(f"Collection ID: `{col.id}`")
+    if col.description:
+        lines.append(col.description)
+
+    # Collect parquet assets from this level
+    parquet_assets = _extract_parquet_assets(col)
+
+    # Column schema from this level
+    col_lines = _extract_columns(col)
+
+    # Check for sub-children — some collections (wyoming-wildlife-lands,
+    # pad-us, census) group sub-datasets as child collections, each with
+    # their own assets and column schemas.
+    sub_children = list(col.get_children())
+    if sub_children:
+        lines.append(f"\n**Sub-datasets ({len(sub_children)}):**\n")
+        for sc in sub_children:
+            sc_title = sc.title or sc.id
+            sc_parquet = _extract_parquet_assets(sc)
+            if sc_parquet:
+                lines.append(f"*{sc_title}* (`{sc.id}`):")
+                lines.extend(sc_parquet)
+            # Use sub-child columns if parent has none
+            if not col_lines:
+                col_lines = _extract_columns(sc)
+    elif parquet_assets:
+        lines.append("\nSQL data (use with `query` tool):")
+        lines.extend(parquet_assets)
+
+    if col_lines:
+        lines.extend(col_lines)
+
+    return "\n".join(lines)
+
+
+def fetch_stac_catalog() -> dict[str, str]:
+    """Fetch the STAC catalog and return {collection_id: markdown_summary}."""
+    try:
+        cat = pystac.Catalog.from_file(STAC_CATALOG_URL)
+        datasets = {}
+        for child in cat.get_children():
+            datasets[child.id] = _format_collection(child)
+        print(f"📂 Loaded {len(datasets)} collections from STAC: {STAC_CATALOG_URL}", file=sys.stderr)
         return datasets
     except Exception as e:
-        return {"error": f"Failed to load STAC: {e}"}
+        print(f"⚠️ Failed to load STAC catalog: {e}", file=sys.stderr)
+        return {}
+
 
 # Load once at startup
-DATA_CATALOG = fetch_stac_collections()
+STAC_DATASETS = fetch_stac_catalog()
 
-@mcp.resource("catalog://list")
+
 def list_datasets() -> str:
-    """Lists all datasets found in the STAC catalog."""
-    return "\n".join([f"- {k}" for k in DATA_CATALOG.keys()])
+    """List all available datasets from the STAC catalog."""
+    if not STAC_DATASETS:
+        return f"No datasets loaded. STAC catalog: {STAC_CATALOG_URL}"
+    lines = [f"# Available Datasets ({len(STAC_DATASETS)} collections)\n"]
+    lines.append(f"STAC catalog: `{STAC_CATALOG_URL}`\n")
+    for cid, summary in STAC_DATASETS.items():
+        first_line = summary.split("\n")[0]
+        lines.append(f"- **{cid}**: {first_line}")
+    return "\n".join(lines)
 
-@mcp.resource("catalog://{dataset_id}")
-def get_dataset_schema(dataset_id: str) -> str:
-    """Returns the STAC metadata for a specific dataset."""
-    return DATA_CATALOG.get(dataset_id, "Dataset not found.")
+
+def get_dataset(dataset_id: str) -> str:
+    """Get detailed metadata for a specific dataset."""
+    if dataset_id in STAC_DATASETS:
+        return STAC_DATASETS[dataset_id]
+    # Fuzzy match
+    for key, val in STAC_DATASETS.items():
+        if dataset_id.lower() in key.lower():
+            return val
+    return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."

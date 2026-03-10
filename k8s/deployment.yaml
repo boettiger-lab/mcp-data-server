@@ -28,7 +28,10 @@ spec:
             apt-get update && apt-get install -y git && \
             git clone https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
-            uv run --with "mcp" --with "duckdb" --with pandas --with uvicorn --with tabulate server.py
+            uv run --with "mcp" --with "duckdb" --with pandas --with uvicorn --with tabulate --with pystac server.py
+        env:
+        - name: STAC_CATALOG_URL
+          value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
         resources:   
           requests:
             memory: 16Gi
