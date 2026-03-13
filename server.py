@@ -8,6 +8,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from stac import STAC_DATASETS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get
 
+DATA_CATALOG = STAC_DATASETS
+
 # -------------------------------------------------------------------------
 # 1. INITIALIZATION
 # -------------------------------------------------------------------------
@@ -100,6 +102,9 @@ def list_datasets() -> str:
 def get_dataset(dataset_id: str) -> str:
     """Get detailed metadata for a dataset: S3 parquet paths, column schemas, and descriptions.
     Use the collection ID from list_datasets."""
+    return _stac_get(dataset_id)
+
+def get_dataset_details(dataset_id: str) -> str:
     return _stac_get(dataset_id)
 
 # -------------------------------------------------------------------------

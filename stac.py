@@ -132,6 +132,69 @@ def fetch_stac_catalog() -> dict[str, str]:
 STAC_DATASETS = fetch_stac_catalog()
 
 
+def fetch_stac_collections(catalog_url: str = None) -> dict[str, str]:
+    """Fetch STAC catalog and return {collection_id: metadata_string}.
+
+    Returns {collection_id: formatted_string} on success, or
+    {"error": "Failed to load STAC catalog: <message>"} on failure.
+    """
+    url = catalog_url or STAC_CATALOG_URL
+    try:
+        cat = pystac.Catalog.from_file(url)
+        datasets = {}
+        for col in cat.get_children():
+            lines = []
+            lines.append(f"**{col.title or col.id}**")
+            lines.append(f"Collection ID: {col.id}")
+            if col.description:
+                lines.append(col.description)
+
+            # Producer from providers
+            producer = "Unknown"
+            for p in (col.providers or []):
+                if hasattr(p, "roles") and p.roles and "producer" in p.roles:
+                    producer = p.name
+                    break
+            lines.append(f"Producer: {producer}")
+
+            # Formats from summaries
+            formats = "N/A"
+            if col.summaries:
+                fmt_list = col.summaries.get_list("platform")
+                if fmt_list:
+                    formats = ", ".join(fmt_list)
+            lines.append(f"Formats: {formats}")
+
+            # License
+            license_str = getattr(col, "license", None) or "N/A"
+            lines.append(f"License: {license_str}")
+
+            # Documentation links
+            doc_links = [lnk.href for lnk in (col.links or []) if lnk.rel == "documentation"]
+            lines.append(f"Documentation: {', '.join(doc_links) if doc_links else 'N/A'}")
+
+            # Assets
+            for asset_id, asset in (col.assets or {}).items():
+                href = asset.href
+                title = asset.title or asset_id
+                if href.endswith("/"):
+                    href = _href_to_s3(href)
+                desc = asset.description
+                line = f"{title}: {href}"
+                if desc:
+                    line += f"\n{desc}"
+                lines.append(line)
+
+            datasets[col.id] = "\n".join(lines)
+        return datasets
+    except Exception as e:
+        return {"error": f"Failed to load STAC catalog: {e}"}
+
+
+# Load once at startup (simple format for external consumers)
+DATA_CATALOG = fetch_stac_collections()
+
+
 def list_datasets() -> str:
     """List all available datasets from the STAC catalog."""
     if not STAC_DATASETS:
