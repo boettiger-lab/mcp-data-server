@@ -3,10 +3,24 @@ import re
 import duckdb
 import uvicorn
 import sys
+import anyio
 from contextlib import contextmanager
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.session import BaseSession
 from stac import STAC_DATASETS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get
+
+# Workaround for https://github.com/boettiger-lab/mcp-data-server/issues/5
+# send_notification crashes with ClosedResourceError when the client disconnects
+# (e.g. after a ~60s client-side timeout) while a query is still running.
+# The MCP library should catch this in send_notification; patch it until upstream fixes it.
+_orig_send_notification = BaseSession.send_notification
+async def _resilient_send_notification(self, notification, related_request_id=None):
+    try:
+        await _orig_send_notification(self, notification, related_request_id)
+    except anyio.ClosedResourceError:
+        pass
+BaseSession.send_notification = _resilient_send_notification
 
 DATA_CATALOG = STAC_DATASETS
 
