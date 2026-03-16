@@ -25,8 +25,29 @@ def _href_to_s3(href: str) -> str:
     return href
 
 
+def _format_columns(table_cols: list) -> list[str]:
+    """Format a list of table:columns dicts into markdown lines."""
+    if not table_cols:
+        return []
+    display_cols = [
+        c for c in table_cols
+        if c.get("name", "").lower() not in ("geometry", "geom", "bbox")
+    ]
+    h3_cols = [c for c in display_cols if c.get("name", "") in ("h0", "h8", "h9", "h10", "h11")]
+    other_cols = [c for c in display_cols if c not in h3_cols][:20]
+
+    lines = []
+    if other_cols:
+        for c in other_cols:
+            desc = f" — {c['description']}" if c.get("description") else ""
+            lines.append(f"    - `{c['name']}` ({c.get('type', '?')}){desc}")
+    if h3_cols:
+        lines.append(f"    - H3 index columns: {', '.join(c['name'] for c in h3_cols)}")
+    return lines
+
+
 def _extract_parquet_assets(col) -> list[str]:
-    """Extract parquet/hex asset lines from a collection's assets."""
+    """Extract parquet/hex asset lines (with inline column schemas) from a collection's assets."""
     assets = []
     for asset_id, asset in (col.assets or {}).items():
         href = asset.href
@@ -43,30 +64,22 @@ def _extract_parquet_assets(col) -> list[str]:
             if s3.endswith("/"):
                 s3 = s3.rstrip("/") + "/**"
             assets.append(f"  - {title}: `read_parquet('{s3}')`")
+            # Inline per-asset column schema if present
+            asset_cols = asset.extra_fields.get("table:columns", [])
+            col_lines = _format_columns(asset_cols)
+            if col_lines:
+                assets.extend(col_lines)
     return assets
 
 
 def _extract_columns(col) -> list[str]:
-    """Extract table:columns as markdown lines."""
+    """Extract table:columns as markdown lines from collection-level extra_fields."""
     table_cols = col.extra_fields.get("table:columns", [])
     if not table_cols:
         return []
 
-    display_cols = [
-        c for c in table_cols
-        if c.get("name", "").lower() not in ("geometry", "geom", "bbox")
-    ]
-    h3_cols = [c for c in display_cols if c.get("name", "") in ("h0", "h8", "h9", "h10", "h11")]
-    other_cols = [c for c in display_cols if c not in h3_cols][:20]
-
-    lines = []
-    if other_cols:
-        lines.append("\nKey columns:")
-        for c in other_cols:
-            desc = f" — {c['description']}" if c.get("description") else ""
-            lines.append(f"  - `{c['name']}` ({c.get('type', '?')}){desc}")
-    if h3_cols:
-        lines.append(f"  - H3 index columns: {', '.join(c['name'] for c in h3_cols)}")
+    lines = ["\nKey columns:"]
+    lines.extend(_format_columns(table_cols))
     return lines
 
 
