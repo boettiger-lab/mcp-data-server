@@ -63,9 +63,7 @@ def _extract_parquet_assets(col) -> list[str]:
             s3 = _href_to_s3(href)
             if s3.endswith("/"):
                 s3 = s3.rstrip("/") + "/**"
-            size_gib = asset.extra_fields.get("duckdb:size_gib")
-            size_note = f" ({size_gib} GiB)" if size_gib is not None else ""
-            assets.append(f"  - {title}{size_note}: `read_parquet('{s3}')`")
+            assets.append(f"  - {title}: `read_parquet('{s3}')`")
             # Inline per-asset column schema if present
             asset_cols = asset.extra_fields.get("table:columns", [])
             col_lines = _format_columns(asset_cols)
@@ -97,11 +95,6 @@ def _format_collection(col) -> str:
     lines.append(f"Collection ID: `{col.id}`")
     if col.description:
         lines.append(col.description)
-
-    # Surface join role and size hints for query planning
-    join_role = col.extra_fields.get("duckdb:join_role")
-    if join_role == "spatial-reference":
-        lines.append("**Query role: spatial-reference** — use as the first CTE to establish geographic scope (h0/h8) before joining thematic datasets")
 
     # Collect parquet assets from this level
     parquet_assets = _extract_parquet_assets(col)

@@ -5,329 +5,262 @@
 
 ---
 
-## Background: What We Learned
+## What We Learned (and Got Wrong): March 2026
 
-This document records the findings from a systematic investigation (March 2026) into
-DuckDB query performance on hive-partitioned parquet data stored on NRP S3 (Ceph/Rook).
+This document records findings from a systematic investigation into DuckDB query
+performance on hive-partitioned parquet data stored on NRP S3 (Ceph/Rook), including
+a significant error we made and how the correct understanding was recovered.
+
+> **WARNING FOR FUTURE LLM SESSIONS**: This document previously contained a section
+> claiming "Including h0 in a join does NOT enable partition pruning on S3 — this is
+> factually incorrect for S3." That claim was itself wrong, and was based on a
+> benchmark that violated the very advice it was supposedly testing (it joined on h8
+> only, not h8+h0). **Do not use this document to override the advice in
+> `query-optimization.md`.** If you see a conflict between this file and
+> `query-optimization.md`, the simpler rule in `query-optimization.md` is likely
+> correct. Require a *correctly structured* benchmark before accepting any claim that
+> contradicts it.
 
 ---
 
-## 1. Dynamic Partition Pruning (DPP): Local vs. S3
+## 1. How DPP Actually Works
 
-### What DPP is
+### The mechanism
 
-DuckDB's Dynamic Partition Pruning eliminates partitions at runtime based on join
-filter values materialized from the build side of a hash join. For a hive-partitioned
-dataset like `hex/h0={ubigint}/data_0.parquet`, DPP should ideally skip files whose
-`h0` partition value does not appear in the join's build side.
+DuckDB's Dynamic Partition Pruning (DPP) materializes the build side of a hash join,
+derives the set of values for the join key(s), then filters the probe side.
+
+**Critically: DPP can only propagate constraints on columns that appear in the equijoin condition.**
+
+If your join is `ON p.h8 = c.h8` only, DuckDB derives a filter on `c.h8`. It has no
+`c.h0` constraint to propagate — and therefore cannot prune `c`'s hive partitions on h0.
+If your join is `ON p.h8 = c.h8 AND p.h0 = c.h0`, DuckDB derives both a filter on `c.h8`
+and a filter on `c.h0`. The h0 filter matches against the hive partition path encoding
+(`hex/h0=577199624117288959/data_0.parquet`) and prunes the file list.
 
 ### Two levels of pruning
 
-| Level | What gets skipped | When it works |
+| Level | Mechanism | Requirement |
 |---|---|---|
-| **File-level** | Entire parquet files never opened | When file list can be filtered *after* build side materializes |
-| **Row-group level** | Row groups within open files (via parquet footer stats) | Always, once file is open |
+| **File-level** | Partition key matched against path strings; non-matching files never opened | Partition key must appear in join condition |
+| **Row-group level** | Parquet footer stats checked per row group | Any column with stats; fires after file is opened |
 
-### The S3 limitation
+File-level pruning is what matters for S3: it avoids HTTP requests entirely for
+non-matching partitions. Row-group pruning still requires opening each file for a
+footer read (one HTTP round trip per file on S3).
 
-For local files, DuckDB 1.5.0 achieves **file-level DPP** (PR #19888, merged Dec 2025).
-The file list is enumerated from the filesystem, then filtered at execution time once
-the build side is materialized. Result: only matching partition files are opened.
+### S3 vs local — the real distinction
 
-For S3, this does **not** work. The S3 file list is enumerated at **planning time** via
-`S3 LIST`. By execution time (when the build side is materialized and filter values are
-known), the file list is locked in. All files get opened for parquet footer reads.
+The relevant difference is not "DPP works locally but not on S3." It is:
 
-**Benchmarked (DuckDB 1.5.0, apples-to-apples on same carbon-2024 data):**
+- **Footer reads are free locally** (disk seek, microseconds).
+- **Footer reads are expensive on S3** (HTTP round trip, ~100ms each).
 
-| Storage | Files opened | HTTP GETs | Data scanned | Time |
-|---|---|---|---|---|
-| Local disk | 1 / 94 | n/a | ~105 MB | 1.13s |
-| NRP S3 | 94 / 94 | 3,714 | 902 MiB | 4.53s |
+If your query has h0 in the join condition, DPP prunes the file list before any reads,
+and performance is good on both local and S3.
 
-Both queries use the same join structure: a small reference table drives a join on `h8`
-with `h0` as the partition key. Locally, DPP fires and prunes 93/94 files. On S3, DPP
-operates at row-group level only — all 94 files are opened, all footers are fetched.
+If your query lacks h0 in the join condition, DPP can only use row-group stats — which
+requires opening every file for a footer read. Locally this is nearly free (94 × ~10ms =
+~1s). On S3 it is very expensive (94 × ~100ms × N requests/file = many seconds or minutes).
 
-### Why the partition key design matters
+### Benchmark (corrected, DuckDB 1.5.0, public S3 endpoint)
 
-Our parquet files store `h0` **both** in the directory path (`h0={value}/`) **and** as
-a column inside each file. DuckDB uses the **in-file column** for DPP (row-group stats),
-not the path. This means even with file-level DPP available (local), if the column is
-in the file, DuckDB can still do file-level DPP by matching derived filter values against
-the known path values. But on S3, the path matching happens too late.
+```
+# Query A: JOIN ON p.h8 = c.h8 AND p.h0 = c.h0  (correct — h0 in join)
+Total Files Read: 1,  #GET: 737,  in: 109 MiB,  38s
 
-If `h0` were stored **only** in the path (not in the file), DuckDB could potentially
-use path-string matching for file-level pruning on S3 too — but this is not the current
-behavior and would require a DuckDB change.
+# Query B: JOIN ON p.h8 = c.h8  (incorrect — no h0 in join)
+Total Files Read: 94, #GET: 6717, in: 1.3 GiB,  407s
 
-### Open DuckDB issue
+# Query C: JOIN ON p.h8 = c.h8 + WHERE c.h0 = H0  (static literal workaround)
+Total Files Read: 1,  #GET: 546,  in: 109 MiB,  29s
+```
 
-See `duckdb-s3-dpp-issue.md` for a draft issue report requesting that DuckDB use
-hive partition path encoding for file-level DPP on S3, matching derived filter values
-against path strings before making any HTTP requests.
+Query A (join DPP) and Query C (static literal) are semantically equivalent and both
+perform well. Query C is ~9s faster because the static filter prunes at planning time,
+before the build side is materialized. Query A requires materializing parks first, then
+applying the DPP filter — slightly more round trips. For most queries the difference
+is minor.
 
 ---
 
-## 2. Cardinality Estimation Bug (DuckDB 1.5.0)
+## 2. The Error We Made
 
-### The bug
+### What we reported (incorrectly)
+
+We claimed that "DPP does not work at file level on S3" based on a benchmark that showed:
+
+```
+Local disk: 1 / 94 files, 1.13s
+NRP S3:    94 / 94 files, 4.53s
+```
+
+We concluded this was a DuckDB limitation and filed an upstream feature request.
+
+### What actually happened
+
+Both benchmarks joined on `h8` only — there was no `h0` in the join condition.
+With no h0 equijoin, DuckDB has nothing to propagate for file-level pruning.
+
+- **Locally**: DPP applied row-group level pruning. Footer reads are cheap (~10ms each).
+  EXPLAIN reported "1 file" — meaning 1 file had matching rows after row-group filtering.
+  The other 93 files were opened for footers but nothing was read from them fully.
+- **On S3**: DPP applied the same row-group level pruning. But footer reads cost ~100ms
+  each via HTTP. EXPLAIN reported "94 files" — every file had HTTP requests made to it
+  (for footer reads), even though only 1 contained matching data after filtering.
+
+The "1 file / 94 files" discrepancy was a measurement artifact: locally, EXPLAIN
+reported files with actual data reads; on S3, it reported files with any HTTP contact
+(including footer-only reads that found no matching rows). The underlying DPP mechanism
+was identical. The cost difference was purely about footer read latency.
+
+### Why the mistake persisted
+
+1. The workaround (static `WHERE c.h0 = H0`) did fix performance — so we had no
+   pressure to re-examine the root cause.
+2. The working benchmark (Test 6 in benchmark-job.yaml) already joined on
+   `p.h8 = c.h8 AND p.h0 = c.h0` and performed well — but we attributed its success
+   to the "regions driver pattern" rather than to having h0 in the join condition.
+3. The wrong mental model ("S3 DPP is broken") was written up as design notes and
+   reinforced across multiple sessions.
+4. No one asked the simple question: "what if we just add h0 to the join?"
+
+### How it was caught
+
+A DuckDB maintainer reviewed our upstream issue report and immediately noted that
+Queries A and B were not semantically equivalent (different join conditions). Adding
+`AND p.h0 = c.h0` to the join fixed the behavior in one test.
+
+---
+
+## 3. The Cardinality Estimation Bug (still valid)
 
 DuckDB 1.5.0 uses only the **first parquet file** to estimate total dataset cardinality
-for glob scans (`read_parquet('s3://bucket/hex/**')`). The first file (sorted by S3 LIST
-response) may be a tiny ocean-hex partition with very few rows. This leads to wildly
-inaccurate cardinality estimates — sometimes 100x off — which causes the optimizer to
-choose the wrong join order.
+for glob scans. The first file (sorted by S3 LIST response) may be a tiny partition
+with very few rows, leading to 100x cardinality underestimates and wrong join order.
 
-**Observed effect:** A query joining PADUS (~1.46M rows for CA NPs) with carbon-2024
-(~2.1B rows total, but filtered to 1 h0 partition) was estimated as PADUS ~447M rows.
-The optimizer chose carbon as the hash build side (estimated small) → actual 2.1B-row
-hash table → OOM at 16 GiB and 32 GiB.
+**Observed effect:** PADUS joined with carbon, optimizer estimated PADUS at ~447M rows,
+chose carbon as build side → 2.1B-row hash table → OOM at 16 GiB and 32 GiB.
 
-### The fix
+**Fix:** PR #21374 (merged 2026-03-14, not yet released) uses file sizes from the S3
+LIST response to estimate per-file row counts proportionally — much better estimates
+with no extra HTTP requests.
 
-PR #21374 (merged 2026-03-14, not yet in a release as of writing) fixes this by using
-**file sizes from the S3 LIST response** (already available during glob expansion) to
-estimate per-file row counts via `bytes_per_row` derived from the first file, applied
-proportionally to all other file sizes. This gives much better estimates without extra
-HTTP requests.
-
-### Implications for query design
-
-Until PR #21374 ships in a release, any query that:
-1. Scans a large partitioned dataset with a glob
-2. Applies non-partition filters that reduce cardinality significantly
-3. Joins to another large dataset
-
-...is at risk of wrong join order and OOM. The two-step approach (Section 4) sidesteps
-this entirely.
+**Until PR #21374 ships:** use the two-step or regions-driver pattern (Section 4) which
+establishes h0 scope before the large join, reducing effective cardinality.
 
 ---
 
-## 3. Benchmark Summary
+## 4. The Driving CTE Pattern
 
-All benchmarks run on NRP k8s cluster, DuckDB 1.5.0, `biodiversity` namespace.
-Datasets: PADUS-4.1 (7 GiB, 21 h0 files), carbon-2024 (9.9 GiB, 94 h0 files).
-Query: sum carbon in CA National Parks.
+Even with correct DPP (h0 in join), the **driving CTE still matters** for two reasons:
 
-| Test | Approach | Result |
-|---|---|---|
-| PADUS scan alone (CA NP filter) | `WHERE State_Nm='CA' AND Des_Tp='NP'` | 2.29s |
-| PADUS h0 lookup | Distinct h0 from above | 2.02s → `577199624117288959` |
-| Default join | PADUS → carbon, no h0 hint | OOM (cardinality bug → wrong join order) |
-| Forced join order | MATERIALIZED CTE | OOM (correct order but no file-level DPP → 9.9 GiB in memory) |
-| **Two-step (static h0 literal)** | Pre-compute h0, embed as literal | **6.91s ✓** |
-| **Regions JOIN style** | Overture regions drives h0 discovery | **6.62s ✓** |
-| **Two-step from regions** | Regions → static h0 IN list → both joins | **5.54s ✓** |
+1. **Cardinality estimation bug (Section 3)**: a large driving dataset with a
+   non-geographic filter (e.g., PADUS filtered by `Des_Tp = 'NP'`) requires scanning
+   all partitions to apply the filter. The result may be spatially concentrated (1 h0
+   cell) but getting there reads 7 GiB. The optimizer may also mis-estimate cardinality
+   and choose the wrong join order.
 
-The two-step approach avoids both the cardinality bug and the S3 DPP limitation.
+2. **Small drivers are just faster**: `overture-divisions` regions (437 MiB, 94 files)
+   or countries (single file) scanned with a geographic filter returns h0/h8 cells
+   covering a known geographic scope. Subsequent joins on h0 then prune correctly.
 
----
-
-## 4. The CTE Driving Principle
-
-### The key insight
-
-The performance of a multi-table join on partitioned S3 data depends critically on
-**which CTE or subquery drives the join**. The driving CTE must be:
-
-1. **Small in total bytes** — fast to scan in full
-2. **Spatially concentrated** — covers only a few h0 partition cells
-3. **Partition-key-anchored** — produces h0 values as output, not just h8
-
-When the driving CTE satisfies these criteria, subsequent joins on large partitioned
-datasets can use those h0 values as static filter literals — enabling file-level partition
-pruning at planning time (even on S3) and correct join order estimation.
-
-### Why regions and countries work as drivers
-
-The Overture `regions/**` dataset (437 MiB, 94 files) contains pre-computed h8/h0 cell
-assignments for every administrative region. A query like
-`WHERE region = 'US-CA'` returns only the cells within California — typically covering
-1-2 h0 partition cells for a US state.
-
-Similarly, `countries.parquet` (single flat file, fast to scan) provides country-level
-h0 coverage.
-
-These datasets are **designed** to be small drivers. They return the minimal set of h0
-values needed to prune subsequent joins on large datasets.
-
-### Why PADUS fails as a driver
-
-PADUS is 7 GiB with 21 partition files. A filter like `WHERE State_Nm='CA' AND Des_Tp='NP'`
-requires scanning all 21 files (no geographic partition filter on h0 available before
-the scan). The result is spatially concentrated (1 h0 value), but getting there requires
-reading the full dataset first. You cannot use PADUS to drive a join that would benefit
-from partition pruning — instead, you need to use a geographic reference dataset to
-establish the h0 scope, then join to PADUS within that scope.
-
-### The two-step pattern in practice
+### The preferred pattern
 
 ```sql
--- Step 1: Get h0 values from a fast reference dataset
--- (run as a separate Python query, embed results as literals)
-SELECT DISTINCT h0
-FROM read_parquet('s3://public-overturemaps/hex/regions/**')
-WHERE region = 'US-CA'
--- → [577199624117288959, 577762574070710271]
-
--- Step 2: Use h0 literals to prune all large dataset scans at planning time
-WITH parks AS (
+-- Small geographic reference dataset drives the query
+WITH scope AS (
   SELECT DISTINCT h8, h0
-  FROM read_parquet('s3://public-padus/padus-4-1/fee/hex/**')
-  WHERE Des_Tp = 'NP'
-    AND h0 IN (577199624117288959, 577762574070710271)  -- ← file-level pruning
+  FROM read_parquet('s3://public-overturemaps/regions/hex/**')
+  WHERE region = 'US-CA'
+),
+-- h0 constraint propagates via DPP to both subsequent joins
+parks AS (
+  SELECT DISTINCT p.h8, p.h0
+  FROM scope s
+  JOIN read_parquet('s3://public-padus/padus-4-1/fee/hex/**') p
+    ON s.h8 = p.h8 AND s.h0 = p.h0
+  WHERE p.Des_Tp = 'NP'
 )
 SELECT SUM(c.carbon)/1e6
 FROM parks p
 JOIN read_parquet('s3://public-carbon/vulnerable-carbon-2024/hex/**') c
-  ON p.h8 = c.h8
-WHERE c.h0 IN (577199624117288959, 577762574070710271)  -- ← file-level pruning
+  ON p.h8 = c.h8 AND p.h0 = c.h0
 ```
 
-Static h0 literals in WHERE clauses allow DuckDB to apply file-level pruning at
-**planning time** on S3 (unlike join-derived DPP which is too late). This is the
-recommended pattern until DuckDB fixes S3 DPP at the file level.
+Every join includes `AND .h0 = .h0`. DPP propagates the h0 constraint from scope
+through parks and into carbon, pruning each large dataset to the relevant partitions.
 
-### The JOIN-CTE pattern (wetland app style)
+### Two-step variant (slightly faster, more complex)
 
-The wetland app uses a slightly different pattern — driving the join with regions
-directly as a CTE without pre-extracting h0:
+Pre-compute h0 values as Python-side literals, embed in static WHERE clauses:
+
+```python
+# Step 1: get h0 values
+h0_list = conn.sql("""
+    SELECT DISTINCT h0 FROM read_parquet('s3://public-overturemaps/regions/hex/**')
+    WHERE region = 'US-CA'
+""").fetchall()
+h0_in = ", ".join(str(r[0]) for r in h0_list)
+
+# Step 2: use as static literals — prunes at planning time, before build side materializes
+conn.sql(f"""
+    WITH parks AS (
+        SELECT DISTINCT h8, h0
+        FROM read_parquet('s3://public-padus/padus-4-1/fee/hex/**')
+        WHERE Des_Tp = 'NP' AND h0 IN ({h0_in})
+    )
+    SELECT SUM(c.carbon)/1e6
+    FROM parks p
+    JOIN read_parquet('s3://public-carbon/vulnerable-carbon-2024/hex/**') c
+      ON p.h8 = c.h8 AND p.h0 = c.h0
+    WHERE c.h0 IN ({h0_in})
+""")
+```
+
+Static literals prune at planning time and save one round of build-side materialization.
+For simple queries the improvement is ~9s (~25%). Use this when you already know the h0
+scope from a prior step.
+
+---
+
+## 5. Benchmark Summary (corrected)
+
+All benchmarks on DuckDB 1.5.0. Query: sum carbon in CA National Parks.
+
+| Test | h0 in join? | Files read | Time |
+|---|---|---|---|
+| Join on h8+h0 (DPP, S3) | Yes | 1 / 94 | 38s |
+| Static WHERE literal (S3) | n/a | 1 / 94 | 29s |
+| Join on h8 only (S3) | **No** | **94 / 94** | **407s** |
+| Wrong join order (OOM) | — | — | OOM |
+
+---
+
+## 6. How to Verify DPP Is Working
+
+Always check EXPLAIN ANALYZE for the probe-side scan:
 
 ```sql
-WITH ca_hexes AS (
-  SELECT DISTINCT h8, h0
-  FROM read_parquet('s3://public-overturemaps/hex/regions/**')
-  WHERE region = 'US-CA'
-),
-wetlands AS (
-  SELECT w.h8, w.h0, w.area_m2
-  FROM ca_hexes ca
-  JOIN read_parquet('s3://public-wetlands/glwd/hex/**') w
-    ON ca.h8 = w.h8 AND ca.h0 = w.h0
-)
-...
+EXPLAIN ANALYZE <your query>
 ```
 
-This works because: (a) regions is small enough to scan quickly, (b) the join on h0
-propagates a row-group-level filter via DPP, and (c) regions' cells are spatially
-concentrated (few h0 cells). The `AND ca.h0 = w.h0` condition is what enables the
-h0 filter to propagate.
+Look for:
+- `Total Files Read: 1` (or the expected small number) — file-level pruning is working
+- `Dynamic Filters: ...` — DPP is active
+- Low `#GET` count relative to total partition count
 
-The two-step approach extracts h0 values as Python-side literals first, which is
-slightly faster because it enables file-level pruning at planning time rather than
-row-group pruning at execution time.
+If you see `Total Files Read: 94` (the full partition count), either:
+- h0 is missing from the join condition, or
+- The query structure doesn't allow DPP to propagate (e.g., subquery isolation)
 
 ---
 
-## 5. Communicating This to the LLM Agent
+## 7. S3 Configuration Notes
 
-### Current query-optimization.md issues
+Internal endpoint (k8s only): `rook-ceph-rgw-nautiluss3.rook`, `USE_SSL false`, `THREADS=100`
 
-Section 2 of `query-optimization.md` states:
-> "ALWAYS Include h0 in Joins — Enables partition pruning → 5-20x faster"
+Public endpoint: `s3-west.nrp-nautilus.io`, `USE_SSL true`, `THREADS=2`
 
-This is **factually incorrect** for S3. Including h0 in a join does NOT enable
-partition pruning on S3 (only row-group pruning). The 5-20x claim is unsubstantiated.
-This section needs to be rewritten.
-
-### What the LLM needs to know
-
-The LLM agent needs actionable rules, not implementation details. The key rules are:
-
-1. **Use small geographic drivers**: Start queries with regions or countries data to
-   establish the h0 scope. Don't start with large thematic datasets like PADUS.
-
-2. **Always include h0 in join conditions**: Even though it doesn't enable file-level
-   DPP on S3, it enables row-group pruning and is necessary for correctness.
-
-3. **For maximum performance, use the two-step pattern**: Run a quick h0 lookup first,
-   embed as static IN list, then run the main query with those literals in WHERE clauses.
-
-4. **Check dataset sizes before choosing a join driver**: A dataset with 94 partition
-   files at 100 MiB each is very different from one at 100 KB each.
-
-### Using STAC metadata to guide the LLM
-
-The cleanest generalization is a single `duckdb:join_role` field in each STAC
-collection's `extra_fields`. This encodes whether a dataset is a good join driver
-without requiring the LLM to reason about sizes or partition counts:
-
-```json
-{
-  "id": "overture-regions",
-  "extra_fields": {
-    "duckdb:join_role": "spatial-reference",
-    "duckdb:size_gib": 0.43
-  }
-}
-```
-
-```json
-{
-  "id": "padus-4-1",
-  "extra_fields": {
-    "duckdb:join_role": "thematic",
-    "duckdb:size_gib": 7.0
-  }
-}
-```
-
-**`spatial-reference`**: Small dataset whose primary purpose is mapping geographic
-names/identifiers to h8/h0 cells. Good driving CTE candidates. Currently:
-- `overture-regions` — regions/states/provinces by name → h8/h0 (437 MiB, 94 files)
-- `overture-countries` — country polygons → h8/h0 (single flat file, very fast)
-
-**`thematic`**: Substantive datasets about physical or policy attributes. Large,
-not suitable as join drivers for geographic filtering. Everything else falls here:
-PADUS, carbon, wetlands, species ranges, etc.
-
-The `duckdb:size_gib` field helps the LLM estimate scan cost when choosing between
-multiple spatial-reference options (countries is faster than regions for country-level
-queries).
-
-### LLM prompt steering
-
-With this metadata in place, `query-optimization.md` can instruct:
-
-> "When a query has a geographic scope (country, state, region), check the STAC
-> catalog for datasets with `duckdb:join_role: spatial-reference` and use one as
-> the first CTE. Join thematic datasets to the result of that CTE, always including
-> h0 in join conditions."
-
-This steers the LLM toward the correct pattern without exposing DPP internals,
-and generalizes automatically as new spatial-reference datasets are added to the
-catalog.
-
-### Risks of overly generic guidance
-
-Guidance like "always filter small tables first" can be misleading because:
-- "Small" is relative — regions is 437 MiB, which is small vs. carbon (9.9 GiB) but
-  large vs. countries.parquet (single file)
-- The issue isn't table size per se but **spatial concentration** (how many h0 cells)
-- A non-geographic filter on a large dataset doesn't help establish h0 scope
-
-Better framing: "Start with geographic scope (regions or countries), then apply
-thematic filters within that scope."
-
----
-
-## 6. S3 Is Not a Bottleneck for This Pattern
-
-The benchmarks confirm that using regions and countries directly from S3 as driving
-CTEs is already fast enough — 6.62s for the regions JOIN style, without any local
-caching. The gains come from the driving CTE being small and spatially concentrated,
-not from where it is stored.
-
-Row-group DPP still works on S3: once the regions CTE is materialized (~437 MiB scan),
-DuckDB propagates the resulting h8/h0 set as a filter into subsequent large dataset
-scans. Files are still all opened for footer reads, but matching row groups are skipped
-within each file. For driving CTEs that cover 1-2 h0 cells, this is effective.
-
-The file-level DPP gap (Section 1) matters most when the driving CTE is large or
-spans many h0 cells — which is exactly the failure mode we avoid by steering queries
-toward spatial-reference datasets. With good query structure, the S3 overhead is
-acceptable.
-
-Local volumes or caching would add complexity without meaningful benefit given the
-current query patterns and dataset sizes.
+Required workaround: `SET s3_allow_recursive_globbing=false` — fixes DuckDB 1.5.0
+regression where hierarchical glob expansion adds latency (issue #21347).
