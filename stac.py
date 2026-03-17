@@ -63,7 +63,9 @@ def _extract_parquet_assets(col) -> list[str]:
             s3 = _href_to_s3(href)
             if s3.endswith("/"):
                 s3 = s3.rstrip("/") + "/**"
-            assets.append(f"  - {title}: `read_parquet('{s3}')`")
+            size = asset.extra_fields.get("file:size")
+            size_note = f" ({size/1024**3:.2f} GiB)" if size and size > 1024**2 else ""
+            assets.append(f"  - {title}{size_note}: `read_parquet('{s3}')`")
             # Inline per-asset column schema if present
             asset_cols = asset.extra_fields.get("table:columns", [])
             col_lines = _format_columns(asset_cols)
