@@ -253,4 +253,13 @@ def get_dataset(dataset_id: str) -> str:
     for key, val in STAC_DATASETS.items():
         if dataset_id.lower() in key.lower():
             return val
+    # Cache miss: re-fetch catalog in case datasets were added since startup
+    refreshed = fetch_stac_catalog()
+    if refreshed:
+        STAC_DATASETS.update(refreshed)
+        if dataset_id in STAC_DATASETS:
+            return STAC_DATASETS[dataset_id]
+        for key, val in STAC_DATASETS.items():
+            if dataset_id.lower() in key.lower():
+                return val
     return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
