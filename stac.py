@@ -10,12 +10,35 @@ high-speed internal reads via the Ceph S3 endpoint.
 import os
 import sys
 import pystac
+import requests
+from pystac.stac_io import DefaultStacIO
 
 
 STAC_CATALOG_URL = os.environ.get(
     "STAC_CATALOG_URL",
     "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json",
 )
+
+_STAC_TIMEOUT = int(os.environ.get("STAC_TIMEOUT", "15"))
+
+_S3_PUBLIC = "https://s3-west.nrp-nautilus.io/"
+_S3_INTERNAL = (
+    os.environ.get("S3_ENDPOINT_URL", "http://rook-ceph-rgw-nautiluss3.rook").rstrip("/") + "/"
+)
+
+
+class _TimeoutStacIO(DefaultStacIO):
+    def read_text_from_href(self, href: str) -> str:
+        if href.startswith(_S3_PUBLIC):
+            href = _S3_INTERNAL + href[len(_S3_PUBLIC):]
+        if href.startswith("http"):
+            resp = requests.get(href, timeout=_STAC_TIMEOUT)
+            resp.raise_for_status()
+            return resp.text
+        return super().read_text_from_href(href)
+
+
+pystac.StacIO.set_default(_TimeoutStacIO)
 
 
 def _href_to_s3(href: str) -> str:

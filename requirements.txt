@@ -4,3 +4,4 @@ pandas
 uvicorn
 tabulate
 pystac
+requests
