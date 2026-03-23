@@ -1,0 +1,87 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: duckdb-benchmark-static
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      priorityClassName: opportunistic
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: feature.node.kubernetes.io/pci-10de.present
+                    operator: NotIn
+                    values: ["true"]
+      containers:
+      - name: benchmark
+        image: astral/uv:python3.12-bookworm-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            uv run --with "duckdb==1.5.0" python3 - << 'PYEOF'
+            import duckdb, time
+
+            def run(conn, query):
+                t0 = time.time()
+                result = conn.sql(query).fetchall()
+                return time.time() - t0, result
+
+            def explain(conn, query):
+                t0 = time.time()
+                result = conn.sql(f"EXPLAIN ANALYZE {query}").fetchall()
+                elapsed = time.time() - t0
+                text = "\n".join(r[1] for r in result)
+                return elapsed, text
+
+            print("[duckdb_version]", duckdb.__version__, flush=True)
+
+            COMMON = """
+            SET THREADS=100;
+            SET preserve_insertion_order=false;
+            SET enable_object_cache=false;
+            SET temp_directory='/tmp';
+            INSTALL httpfs; LOAD httpfs;
+            INSTALL h3 FROM community; LOAD h3;
+            CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '');
+            """
+
+            STATIC_QUERY = """
+                SELECT SUM(carbon)/1e6 AS megatons
+                FROM read_parquet('s3://public-carbon/vulnerable-carbon-2024/hex/**')
+                WHERE h0 = 577586652210266111
+            """
+
+            # Test WITHOUT s3_allow_recursive_globbing=false (1.5.0 regression)
+            conn = duckdb.connect(":memory:")
+            conn.sql(COMMON)
+            t, explain_text = explain(conn, STATIC_QUERY)
+            print(f"\n[static_WITHOUT_setting] {t:.2f}s", flush=True)
+            # Extract just the Files/HTTP stats lines
+            for line in explain_text.split('\n'):
+                if any(x in line for x in ['Files Read', 'GET', 'in:', 'Total Time']):
+                    print(line, flush=True)
+            conn.close()
+
+            # Test WITH s3_allow_recursive_globbing=false (workaround)
+            conn2 = duckdb.connect(":memory:")
+            conn2.sql(COMMON)
+            conn2.sql("SET s3_allow_recursive_globbing=false;")
+            t, explain_text = explain(conn2, STATIC_QUERY)
+            print(f"\n[static_WITH_setting] {t:.2f}s", flush=True)
+            for line in explain_text.split('\n'):
+                if any(x in line for x in ['Files Read', 'GET', 'in:', 'Total Time']):
+                    print(line, flush=True)
+            conn2.close()
+            PYEOF
+        resources:
+          requests:
+            cpu: "4"
+            memory: "8Gi"
+          limits:
+            cpu: "4"
+            memory: "8Gi"

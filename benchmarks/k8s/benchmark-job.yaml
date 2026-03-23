@@ -1,0 +1,115 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: duckdb-benchmark
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      priorityClassName: opportunistic
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: feature.node.kubernetes.io/pci-10de.present
+                    operator: NotIn
+                    values: ["true"]
+      containers:
+      - name: benchmark
+        image: astral/uv:python3.12-bookworm-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            uv run --with "duckdb==1.5.0" python3 - << 'PYEOF'
+            import duckdb, time
+
+            SETUP = """
+            SET THREADS=100;
+            SET preserve_insertion_order=false;
+            SET enable_object_cache=false;
+            SET temp_directory='/tmp';
+            INSTALL httpfs; LOAD httpfs;
+            INSTALL h3 FROM community; LOAD h3;
+            CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '');
+            """
+
+            def run(label, conn, q):
+                t0 = time.time()
+                r = conn.sql(q).fetchall()
+                print(f"[{label}] {time.time()-t0:.2f}s => {r}", flush=True)
+
+            def fresh():
+                c = duckdb.connect(":memory:")
+                c.sql(SETUP)
+                return c
+
+            print("[duckdb_version]", duckdb.__version__, flush=True)
+
+            PADUS  = "s3://public-padus/padus-4-1/fee/hex/**"
+            CARBON = "s3://public-carbon/vulnerable-carbon-2024/hex/**"
+            H0     = 577199624117288959
+
+            # Test 5: two-step with static h0 literal — correct approach
+            run("5_two_step", fresh(), f"""
+                WITH parks AS (
+                  SELECT DISTINCT h8, h0
+                  FROM read_parquet('{PADUS}')
+                  WHERE State_Nm = 'CA' AND Des_Tp = 'NP'
+                    AND h0 = {H0}
+                )
+                SELECT SUM(c.carbon)/1e6
+                FROM parks p
+                JOIN read_parquet('{CARBON}') c ON p.h8 = c.h8
+                WHERE c.h0 = {H0}
+            """)
+
+            # Test 6: wetland-app style using regions for h0 lookup
+            run("6_regions_style", fresh(), f"""
+                WITH ca_hexes AS (
+                  SELECT DISTINCT h8, h0
+                  FROM read_parquet('s3://public-overturemaps/hex/regions/**')
+                  WHERE region = 'US-CA'
+                ),
+                parks AS (
+                  SELECT DISTINCT p.h8, p.h0
+                  FROM ca_hexes ca
+                  JOIN read_parquet('{PADUS}') p ON ca.h8 = p.h8 AND ca.h0 = p.h0
+                  WHERE p.Des_Tp = 'NP'
+                )
+                SELECT SUM(c.carbon)/1e6
+                FROM parks p
+                JOIN read_parquet('{CARBON}') c ON p.h8 = c.h8 AND p.h0 = c.h0
+            """)
+
+            # Test 7: same as test 5 but deriving h0 from regions instead of hardcoding
+            conn7 = fresh()
+            h0_from_regions = conn7.sql("""
+                SELECT DISTINCT h0
+                FROM read_parquet('s3://public-overturemaps/hex/regions/**')
+                WHERE region = 'US-CA'
+            """).fetchall()
+            h0_list = ", ".join(str(r[0]) for r in h0_from_regions)
+            print(f"[7_ca_h0s_from_regions] {len(h0_from_regions)} h0 values: {h0_list}", flush=True)
+            run("7_regions_h0_static_filter", conn7, f"""
+                WITH parks AS (
+                  SELECT DISTINCT h8, h0
+                  FROM read_parquet('{PADUS}')
+                  WHERE Des_Tp = 'NP'
+                    AND h0 IN ({h0_list})
+                )
+                SELECT SUM(c.carbon)/1e6
+                FROM parks p
+                JOIN read_parquet('{CARBON}') c ON p.h8 = c.h8
+                WHERE c.h0 IN ({h0_list})
+            """)
+            PYEOF
+        resources:
+          requests:
+            cpu: "4"
+            memory: "8Gi"
+          limits:
+            cpu: "4"
+            memory: "8Gi"
