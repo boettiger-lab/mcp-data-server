@@ -22,7 +22,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pytest pytest-cov
-        pip install duckdb mcp fastmcp uvicorn pystac numpy pandas tabulate
+        pip install -r requirements.txt
     
     - name: Run tests
       run: |
