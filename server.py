@@ -83,7 +83,11 @@ TOOL_INJECTED_CONTEXT = f"""
 def get_isolated_db():
     conn = duckdb.connect(database=":memory:")
     try:
-        if SETUP_SQL: conn.sql(SETUP_SQL)
+        for stmt in (s.strip() for s in SETUP_SQL.split(";") if s.strip()):
+            try:
+                conn.sql(stmt)
+            except Exception as e:
+                print(f"⚠️ Setup statement skipped: {stmt!r}: {e}", file=sys.stderr)
         yield conn
     finally:
         conn.close()
