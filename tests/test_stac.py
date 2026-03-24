@@ -6,7 +6,7 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from stac import fetch_stac_collections, DATA_CATALOG
+from stac import fetch_stac_collections, DATA_CATALOG, list_datasets, get_dataset
 
 
 class TestSTACCatalogParser:
@@ -172,4 +172,38 @@ class TestSTACCatalogParser:
         assert isinstance(DATA_CATALOG, dict)
         # It should either have datasets or an error key
         assert len(DATA_CATALOG) >= 0
+
+
+class TestCatalogUrlParameter:
+    """Test that list_datasets and get_dataset accept an optional catalog_url."""
+
+    def _make_mock_catalog(self):
+        mock_catalog = MagicMock()
+        mock_col = MagicMock()
+        mock_col.id = "custom-dataset"
+        mock_col.title = "Custom Dataset"
+        mock_col.description = "From custom catalog"
+        mock_col.assets = {}
+        mock_col.extra_fields = {}
+        mock_col.get_children.return_value = []
+        mock_catalog.get_children.return_value = [mock_col]
+        return mock_catalog
+
+    def test_list_datasets_custom_url(self):
+        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()) as mock_from_file:
+            result = list_datasets(catalog_url="https://example.com/custom/catalog.json")
+            mock_from_file.assert_called_once_with("https://example.com/custom/catalog.json")
+            assert "custom-dataset" in result
+            assert "https://example.com/custom/catalog.json" in result
+
+    def test_get_dataset_custom_url(self):
+        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()):
+            result = get_dataset("custom-dataset", catalog_url="https://example.com/custom/catalog.json")
+            assert "Custom Dataset" in result
+
+    def test_list_datasets_default_url(self):
+        """Without catalog_url, list_datasets uses the cached STAC_DATASETS (no network call)."""
+        with patch('stac.pystac.Catalog.from_file') as mock_from_file:
+            list_datasets()
+            mock_from_file.assert_not_called()
 

@@ -107,16 +107,18 @@ def catalog_dataset(dataset_id: str) -> str:
 # 6. MCP TOOLS — Dataset Discovery
 # -------------------------------------------------------------------------
 @mcp.tool()
-def list_datasets() -> str:
+def list_datasets(catalog_url: str = None) -> str:
     """List all available datasets with their collection IDs and titles.
-    Call this first to discover what data is available before writing SQL queries."""
-    return _stac_list()
+    Call this first to discover what data is available before writing SQL queries.
+    Optionally provide a catalog_url to use a custom STAC catalog instead of the server default."""
+    return _stac_list(catalog_url)
 
 @mcp.tool()
-def get_dataset(dataset_id: str) -> str:
+def get_dataset(dataset_id: str, catalog_url: str = None) -> str:
     """Get detailed metadata for a dataset: S3 parquet paths, column schemas, and descriptions.
-    Use the collection ID from list_datasets."""
-    return _stac_get(dataset_id)
+    Use the collection ID from list_datasets.
+    Optionally provide a catalog_url to use a custom STAC catalog instead of the server default."""
+    return _stac_get(dataset_id, catalog_url)
 
 def get_dataset_details(dataset_id: str) -> str:
     return _stac_get(dataset_id)
