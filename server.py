@@ -54,7 +54,6 @@ def parse_setup_sql(content):
 
 SETUP_RAW = load_text_file("query-setup.md")
 SETUP_SQL = parse_setup_sql(SETUP_RAW)
-GUIDE_RAW = load_text_file("datasets.md")
 OPTIM_RAW = load_text_file("query-optimization.md")
 H3_RAW = load_text_file("h3-guide.md")
 ROLE_RAW = load_text_file("assistant-role.md")
@@ -67,10 +66,7 @@ TOOL_INJECTED_CONTEXT = f"""
 ### ⚠️ CRITICAL SQL RULES (MUST FOLLOW)
 1. **NO TABLES EXIST:** The database is empty. You CANNOT write `FROM table_name`.
 2. **USE PARQUET PATHS:** You MUST use `FROM read_parquet('s3://...')` for ALL queries.
-3. **DISCOVER PATHS:** Use `list_datasets` and `get_dataset` tools to find S3 paths and column schemas.
-
-### 📂 SQL DATA GUIDE
-{GUIDE_RAW}
+3. **DISCOVER PATHS:** Call `list_datasets` then `get_dataset` to get exact S3 paths and schemas — NEVER guess or hardcode paths.
 
 ### ⚡ OPTIMIZATION RULES
 {OPTIM_RAW}
@@ -147,8 +143,12 @@ def query(sql_query: str) -> str:
         return f"SQL Error: {str(e)}"
 
 query.__doc__ = f"""
-Executes optimized DuckDB SQL.
-STRICTLY FOLLOW THE RULES BELOW.
+Executes optimized DuckDB SQL against S3 parquet files.
+
+BEFORE writing any SQL:
+1. Call `list_datasets` to see all available dataset IDs and titles.
+2. Call `get_dataset` with the relevant dataset ID to get exact S3 paths and column schemas.
+3. Use ONLY paths returned by those tools — never guess or hardcode any S3 URLs.
 
 {TOOL_INJECTED_CONTEXT}
 """
