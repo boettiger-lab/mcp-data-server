@@ -207,5 +207,36 @@ class TestPromptFunction:
         assert len(result) > 0
 
 
+class TestS3Credentials:
+    """Test that S3 credentials are injected into isolated DuckDB connections."""
+
+    def test_query_without_credentials_succeeds(self):
+        """query works normally without S3 credentials."""
+        result = query("SELECT 1 as n")
+        assert "1" in result
+
+    def test_get_isolated_db_injects_secret(self):
+        """get_isolated_db creates a client_s3 secret when credentials are supplied."""
+        with get_isolated_db(s3_key="AKID", s3_secret="SECRET") as conn:
+            secrets = conn.sql("SELECT name FROM duckdb_secrets()").fetchall()
+            names = [r[0] for r in secrets]
+            assert "client_s3" in names
+
+    def test_get_isolated_db_no_secret_without_credentials(self):
+        """get_isolated_db does not create client_s3 when no credentials are supplied."""
+        with get_isolated_db() as conn:
+            secrets = conn.sql("SELECT name FROM duckdb_secrets()").fetchall()
+            names = [r[0] for r in secrets]
+            assert "client_s3" not in names
+
+    def test_credentials_not_in_logs(self, capsys):
+        """S3 credentials must not appear in stderr output."""
+        with get_isolated_db(s3_key="MY_KEY_ID", s3_secret="MY_SECRET_VALUE"):
+            pass
+        captured = capsys.readouterr()
+        assert "MY_KEY_ID" not in captured.err
+        assert "MY_SECRET_VALUE" not in captured.err
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -79,7 +79,7 @@ The example configuration provides access to the following datasets via S3:
 8. **iNaturalist** - Species occurrence range maps
 9. **Corruption Index 2024** - Transparency International data
 
-See [datasets.md](datasets.md) for detailed schema information.  This file is consumed directly by the LLM, additional datasets can be added by describing them here.  
+Datasets are discovered dynamically from the STAC catalog via the `list_datasets` and `get_dataset` tools.
 
 
 ## Local Development
@@ -109,7 +109,7 @@ You can now connect to the server over localhost (note http not https here), e.g
 }
 ```
 
-You can adjust the datasets and instructions to the LLM in the corresponding `.md` files (e.g. datasets.md).  You will need to adjust `query-setup.md` to run the server locally, as it uses endpoint and thread count that only work from inside our k8s cluster. 
+You can adjust the instructions to the LLM in the corresponding `.md` files (e.g. `query-optimization.md`, `h3-guide.md`).  You will need to adjust `query-setup.md` to run the server locally, as it uses endpoint and thread count that only work from inside our k8s cluster.
 Running locally means your local CPU+network resources will be used for the computation, which will likely be much slower than the hosted k8s endpoint. 
 
 
@@ -122,7 +122,6 @@ We have a fully-hosted version
 
 - **server.py** - Main MCP server with FastMCP framework
 - **stac.py** - STAC catalog integration for dynamic dataset discovery
-- **datasets.md** - Dataset catalog and schema documentation
 - **query-setup.md** - Required DuckDB configuration for all queries
 - **query-optimization.md** - Performance optimization guidelines
 - **h3-guide.md** - H3 geospatial operations reference
@@ -154,7 +153,9 @@ The deployment:
 
 ### Tools
 
-- `query(sql_query)` - Execute DuckDB SQL with embedded optimization rules
+- `list_datasets(catalog_url?, catalog_token?)` - List available datasets from the STAC catalog
+- `get_dataset(dataset_id, catalog_url?, catalog_token?)` - Get S3 paths and schema for a dataset
+- `query(sql_query, s3_key?, s3_secret?, s3_endpoint?)` - Execute DuckDB SQL against S3 parquet files
 
 ### Resources
 
@@ -210,11 +211,57 @@ pytest --cov=. tests/
 
 Required settings are documented in [query-setup.md](query-setup.md) and automatically injected into query tool descriptions.
 
+## Private Data Access
+
+The server supports private STAC catalogs and private S3 buckets. Credentials are supplied per-call by the client and are scoped to that request only — they are never logged, cached, or shared between clients.
+
+### Private STAC catalog
+
+If your STAC catalog requires authentication, pass a bearer token alongside the catalog URL:
+
+```json
+{ "tool": "list_datasets", "arguments": {
+    "catalog_url": "https://your-app.example.org/stac/catalog.json",
+    "catalog_token": "YOUR_BEARER_TOKEN"
+}}
+```
+
+The token is forwarded as `Authorization: Bearer <token>` when fetching catalog JSON. Pass the same `catalog_url` and `catalog_token` to `get_dataset` as well.
+
+> **Serving a private catalog**: The catalog endpoint needs to accept bearer token authentication for machine-to-machine access. If you are using oauth2-proxy for human (browser) access, add a parallel nginx `auth_request` bypass for the `/stac/` path that accepts a static shared token via the `Authorization` header. This allows the MCP server to fetch catalog metadata without requiring a browser OAuth session.
+
+### Private S3 data
+
+Pass S3 credentials directly to the `query` tool. The server injects them as a scoped DuckDB secret for the duration of that query, then destroys the connection:
+
+```json
+{ "tool": "query", "arguments": {
+    "sql_query": "SELECT * FROM read_parquet('s3://my-private-bucket/data/**') LIMIT 10",
+    "s3_key": "YOUR_ACCESS_KEY_ID",
+    "s3_secret": "YOUR_SECRET_ACCESS_KEY",
+    "s3_endpoint": "minio.example.org"
+}}
+```
+
+`s3_endpoint` defaults to `s3-west.nrp-nautilus.io` if omitted. SSL is enabled automatically for non-Ceph endpoints.
+
+### Security properties
+
+| Concern | How it is handled |
+|---|---|
+| Credential bleed between clients | Each request uses a separate `duckdb.connect(":memory:")` — DuckDB secrets are connection-scoped and destroyed on close |
+| Credentials in server logs | `CREATE SECRET` statements are constructed internally and never written to stderr |
+| Credentials in transit | All traffic is TLS-terminated at the ingress |
+| Credential persistence | `stateless_http=True` — no session state survives between requests |
+
+### Deploying private apps without a separate server
+
+Rather than maintaining a forked server deployment per app, private geo-agent apps can share the public MCP server endpoint and pass their credentials per-call. This reduces idle deployments and ensures all apps benefit from server improvements automatically.
+
 ## Security
 
 - **Stateless Design**: No persistent database or user data
-- **Read-Only Access**: Server only reads from public S3 buckets
-- **Query Isolation**: Each request gets a fresh DuckDB instance
+- **Query Isolation**: Each request gets a fresh DuckDB instance; client credentials cannot bleed across requests
 - **DNS Rebinding Protection**: Disabled for MCP HTTP mode
 
 
@@ -242,6 +289,6 @@ Contributions welcome! Key areas:
 
 For issues and questions:
 - GitHub Issues: [boettiger-lab/mcp-data-server](https://github.com/boettiger-lab/mcp-data-server)
-- Dataset questions: See [datasets.md](datasets.md) for data sources
+- Dataset questions: Use the `list_datasets` tool or browse the [public STAC catalog](https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json)
 
 

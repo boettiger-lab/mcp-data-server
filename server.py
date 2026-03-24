@@ -80,7 +80,7 @@ TOOL_INJECTED_CONTEXT = f"""
 # 4. ISOLATION ENGINE
 # -------------------------------------------------------------------------
 @contextmanager
-def get_isolated_db():
+def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None):
     conn = duckdb.connect(database=":memory:")
     try:
         for stmt in (s.strip() for s in SETUP_SQL.split(";") if s.strip()):
@@ -88,6 +88,15 @@ def get_isolated_db():
                 conn.sql(stmt)
             except Exception as e:
                 print(f"⚠️ Setup statement skipped: {stmt!r}: {e}", file=sys.stderr)
+        if s3_key and s3_secret:
+            endpoint = s3_endpoint or "s3-west.nrp-nautilus.io"
+            use_ssl = "false" if endpoint.startswith("rook") else "true"
+            # Credentials injected here; intentionally not logged
+            conn.sql(
+                f"CREATE OR REPLACE SECRET client_s3 ("
+                f"TYPE S3, KEY_ID '{s3_key}', SECRET '{s3_secret}', "
+                f"ENDPOINT '{endpoint}', URL_STYLE 'path', USE_SSL '{use_ssl}')"
+            )
         yield conn
     finally:
         conn.close()
@@ -107,18 +116,19 @@ def catalog_dataset(dataset_id: str) -> str:
 # 6. MCP TOOLS — Dataset Discovery
 # -------------------------------------------------------------------------
 @mcp.tool()
-def list_datasets(catalog_url: str = None) -> str:
+def list_datasets(catalog_url: str = None, catalog_token: str = None) -> str:
     """List all available datasets with their collection IDs and titles.
     Call this first to discover what data is available before writing SQL queries.
-    Optionally provide a catalog_url to use a custom STAC catalog instead of the server default."""
-    return _stac_list(catalog_url)
+    Optionally provide catalog_url to use a custom STAC catalog instead of the server default.
+    Optionally provide catalog_token (Bearer token) if the catalog requires authentication."""
+    return _stac_list(catalog_url, catalog_token)
 
 @mcp.tool()
-def get_dataset(dataset_id: str, catalog_url: str = None) -> str:
+def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = None) -> str:
     """Get detailed metadata for a dataset: S3 parquet paths, column schemas, and descriptions.
     Use the collection ID from list_datasets.
-    Optionally provide a catalog_url to use a custom STAC catalog instead of the server default."""
-    return _stac_get(dataset_id, catalog_url)
+    Optionally provide catalog_url and catalog_token if using a private STAC catalog."""
+    return _stac_get(dataset_id, catalog_url, catalog_token)
 
 def get_dataset_details(dataset_id: str) -> str:
     return _stac_get(dataset_id)
@@ -133,11 +143,11 @@ def analyst_persona() -> str:
 # -------------------------------------------------------------------------
 # 8. TOOL DEFINITION — SQL Query
 # -------------------------------------------------------------------------
-def query(sql_query: str) -> str:
+def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None) -> str:
     """Placeholder (overwritten below)."""
     print(f"🔍 Executing: {sql_query}", file=sys.stderr)
     try:
-        with get_isolated_db() as db:
+        with get_isolated_db(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint) as db:
             result = db.sql(sql_query)
             if result is None: return "Command executed successfully."
 
@@ -155,6 +165,9 @@ BEFORE writing any SQL:
 1. Call `list_datasets` to see all available dataset IDs and titles.
 2. Call `get_dataset` with the relevant dataset ID to get exact S3 paths and column schemas.
 3. Use ONLY paths returned by those tools — never guess or hardcode any S3 URLs.
+
+For private data, pass s3_key, s3_secret, and optionally s3_endpoint alongside the SQL query.
+Credentials are scoped to this request only and never persisted.
 
 {TOOL_INJECTED_CONTEXT}
 """
