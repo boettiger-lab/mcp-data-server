@@ -152,14 +152,15 @@ def _format_collection(col) -> str:
     return "\n".join(lines)
 
 
-def fetch_stac_catalog() -> dict[str, str]:
+def fetch_stac_catalog(catalog_url: str = None) -> dict[str, str]:
     """Fetch the STAC catalog and return {collection_id: markdown_summary}."""
+    url = catalog_url or STAC_CATALOG_URL
     try:
-        cat = pystac.Catalog.from_file(STAC_CATALOG_URL)
+        cat = pystac.Catalog.from_file(url)
         datasets = {}
         for child in cat.get_children():
             datasets[child.id] = _format_collection(child)
-        print(f"📂 Loaded {len(datasets)} collections from STAC: {STAC_CATALOG_URL}", file=sys.stderr)
+        print(f"📂 Loaded {len(datasets)} collections from STAC: {url}", file=sys.stderr)
         return datasets
     except Exception as e:
         print(f"⚠️ Failed to load STAC catalog: {e}", file=sys.stderr)
@@ -233,33 +234,44 @@ def fetch_stac_collections(catalog_url: str = None) -> dict[str, str]:
 DATA_CATALOG = fetch_stac_collections()
 
 
-def list_datasets() -> str:
+def list_datasets(catalog_url: str = None) -> str:
     """List all available datasets from the STAC catalog."""
-    if not STAC_DATASETS:
-        return f"No datasets loaded. STAC catalog: {STAC_CATALOG_URL}"
-    lines = [f"# Available Datasets ({len(STAC_DATASETS)} collections)\n"]
-    lines.append(f"STAC catalog: `{STAC_CATALOG_URL}`\n")
-    for cid, summary in STAC_DATASETS.items():
+    if catalog_url:
+        datasets = fetch_stac_catalog(catalog_url)
+        url = catalog_url
+    else:
+        datasets = STAC_DATASETS
+        url = STAC_CATALOG_URL
+    if not datasets:
+        return f"No datasets loaded. STAC catalog: {url}"
+    lines = [f"# Available Datasets ({len(datasets)} collections)\n"]
+    lines.append(f"STAC catalog: `{url}`\n")
+    for cid, summary in datasets.items():
         first_line = summary.split("\n")[0]
         lines.append(f"- **{cid}**: {first_line}")
     return "\n".join(lines)
 
 
-def get_dataset(dataset_id: str) -> str:
+def get_dataset(dataset_id: str, catalog_url: str = None) -> str:
     """Get detailed metadata for a specific dataset."""
-    if dataset_id in STAC_DATASETS:
-        return STAC_DATASETS[dataset_id]
+    if catalog_url:
+        datasets = fetch_stac_catalog(catalog_url)
+    else:
+        datasets = STAC_DATASETS
+    if dataset_id in datasets:
+        return datasets[dataset_id]
     # Fuzzy match
-    for key, val in STAC_DATASETS.items():
+    for key, val in datasets.items():
         if dataset_id.lower() in key.lower():
             return val
-    # Cache miss: re-fetch catalog in case datasets were added since startup
-    refreshed = fetch_stac_catalog()
-    if refreshed:
-        STAC_DATASETS.update(refreshed)
-        if dataset_id in STAC_DATASETS:
-            return STAC_DATASETS[dataset_id]
-        for key, val in STAC_DATASETS.items():
-            if dataset_id.lower() in key.lower():
-                return val
+    # Cache miss (default catalog only): re-fetch in case datasets were added since startup
+    if not catalog_url:
+        refreshed = fetch_stac_catalog()
+        if refreshed:
+            STAC_DATASETS.update(refreshed)
+            if dataset_id in STAC_DATASETS:
+                return STAC_DATASETS[dataset_id]
+            for key, val in STAC_DATASETS.items():
+                if dataset_id.lower() in key.lower():
+                    return val
     return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
