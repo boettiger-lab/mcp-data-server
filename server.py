@@ -80,7 +80,7 @@ TOOL_INJECTED_CONTEXT = f"""
 # 4. ISOLATION ENGINE
 # -------------------------------------------------------------------------
 @contextmanager
-def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None):
+def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None):
     conn = duckdb.connect(database=":memory:")
     try:
         for stmt in (s.strip() for s in SETUP_SQL.split(";") if s.strip()):
@@ -91,11 +91,13 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
         if s3_key and s3_secret:
             endpoint = s3_endpoint or "s3-west.nrp-nautilus.io"
             use_ssl = "false" if endpoint.startswith("rook") else "true"
+            scope_clause = f", SCOPE '{s3_scope}'" if s3_scope else ""
             # Credentials injected here; intentionally not logged
             conn.sql(
                 f"CREATE OR REPLACE SECRET client_s3 ("
                 f"TYPE S3, KEY_ID '{s3_key}', SECRET '{s3_secret}', "
-                f"ENDPOINT '{endpoint}', URL_STYLE 'path', USE_SSL '{use_ssl}')"
+                f"ENDPOINT '{endpoint}', URL_STYLE 'path', USE_SSL '{use_ssl}'"
+                f"{scope_clause})"
             )
         yield conn
     finally:
@@ -143,11 +145,11 @@ def analyst_persona() -> str:
 # -------------------------------------------------------------------------
 # 8. TOOL DEFINITION — SQL Query
 # -------------------------------------------------------------------------
-def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None) -> str:
+def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None) -> str:
     """Placeholder (overwritten below)."""
     print(f"🔍 Executing: {sql_query}", file=sys.stderr)
     try:
-        with get_isolated_db(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint) as db:
+        with get_isolated_db(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope) as db:
             result = db.sql(sql_query)
             if result is None: return "Command executed successfully."
 
@@ -166,7 +168,8 @@ BEFORE writing any SQL:
 2. Call `get_dataset` with the relevant dataset ID to get exact S3 paths and column schemas.
 3. Use ONLY paths returned by those tools — never guess or hardcode any S3 URLs.
 
-For private data, pass s3_key, s3_secret, and optionally s3_endpoint alongside the SQL query.
+For private data, pass s3_key, s3_secret, and optionally s3_endpoint and s3_scope alongside the SQL query.
+Use s3_scope (e.g. 's3://private-wyoming') when the query mixes private and public S3 paths so DuckDB routes each to the correct endpoint.
 Credentials are scoped to this request only and never persisted.
 
 {TOOL_INJECTED_CONTEXT}
