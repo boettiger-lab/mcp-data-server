@@ -28,17 +28,21 @@ _S3_INTERNAL = (
 
 
 class _TimeoutStacIO(DefaultStacIO):
+    def __init__(self, token: str = None):
+        self._token = token
+
     def read_text_from_href(self, href: str) -> str:
         if href.startswith(_S3_PUBLIC):
             href = _S3_INTERNAL + href[len(_S3_PUBLIC):]
         if href.startswith("http"):
-            resp = requests.get(href, timeout=_STAC_TIMEOUT)
+            headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+            resp = requests.get(href, timeout=_STAC_TIMEOUT, headers=headers)
             resp.raise_for_status()
             return resp.text
         return super().read_text_from_href(href)
 
 
-pystac.StacIO.set_default(_TimeoutStacIO)
+pystac.StacIO.set_default(_TimeoutStacIO())
 
 
 def _href_to_s3(href: str) -> str:
@@ -152,11 +156,12 @@ def _format_collection(col) -> str:
     return "\n".join(lines)
 
 
-def fetch_stac_catalog(catalog_url: str = None) -> dict[str, str]:
+def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> dict[str, str]:
     """Fetch the STAC catalog and return {collection_id: markdown_summary}."""
     url = catalog_url or STAC_CATALOG_URL
     try:
-        cat = pystac.Catalog.from_file(url)
+        stac_io = _TimeoutStacIO(token=catalog_token)
+        cat = pystac.Catalog.from_file(url, stac_io=stac_io)
         datasets = {}
         for child in cat.get_children():
             datasets[child.id] = _format_collection(child)
@@ -234,10 +239,10 @@ def fetch_stac_collections(catalog_url: str = None) -> dict[str, str]:
 DATA_CATALOG = fetch_stac_collections()
 
 
-def list_datasets(catalog_url: str = None) -> str:
+def list_datasets(catalog_url: str = None, catalog_token: str = None) -> str:
     """List all available datasets from the STAC catalog."""
     if catalog_url:
-        datasets = fetch_stac_catalog(catalog_url)
+        datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
         url = catalog_url
     else:
         datasets = STAC_DATASETS
@@ -252,10 +257,10 @@ def list_datasets(catalog_url: str = None) -> str:
     return "\n".join(lines)
 
 
-def get_dataset(dataset_id: str, catalog_url: str = None) -> str:
+def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = None) -> str:
     """Get detailed metadata for a specific dataset."""
     if catalog_url:
-        datasets = fetch_stac_catalog(catalog_url)
+        datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
     else:
         datasets = STAC_DATASETS
     if dataset_id in datasets:

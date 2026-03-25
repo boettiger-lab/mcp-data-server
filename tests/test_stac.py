@@ -192,7 +192,9 @@ class TestCatalogUrlParameter:
     def test_list_datasets_custom_url(self):
         with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()) as mock_from_file:
             result = list_datasets(catalog_url="https://example.com/custom/catalog.json")
-            mock_from_file.assert_called_once_with("https://example.com/custom/catalog.json")
+            args, kwargs = mock_from_file.call_args
+            assert args[0] == "https://example.com/custom/catalog.json"
+            assert "stac_io" in kwargs
             assert "custom-dataset" in result
             assert "https://example.com/custom/catalog.json" in result
 
@@ -201,9 +203,47 @@ class TestCatalogUrlParameter:
             result = get_dataset("custom-dataset", catalog_url="https://example.com/custom/catalog.json")
             assert "Custom Dataset" in result
 
+    def test_get_dataset_catalog_token_forwarded(self):
+        """catalog_token is forwarded through get_dataset to the StacIO instance."""
+        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()) as mock_from_file:
+            get_dataset("custom-dataset",
+                        catalog_url="https://example.com/custom/catalog.json",
+                        catalog_token="secret-token")
+            _, kwargs = mock_from_file.call_args
+            stac_io = kwargs.get("stac_io")
+            assert stac_io is not None
+            assert stac_io._token == "secret-token"
+
     def test_list_datasets_default_url(self):
         """Without catalog_url, list_datasets uses the cached STAC_DATASETS (no network call)."""
         with patch('stac.pystac.Catalog.from_file') as mock_from_file:
             list_datasets()
             mock_from_file.assert_not_called()
+
+    def test_catalog_token_passed_as_bearer(self):
+        """catalog_token is forwarded to the StacIO instance as a Bearer header."""
+        with patch('stac.requests.get') as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.text = '{"type":"Catalog","id":"test","links":[],"stac_version":"1.0.0","description":""}'
+            mock_resp.raise_for_status = MagicMock()
+            mock_get.return_value = mock_resp
+            from stac import _TimeoutStacIO
+            io = _TimeoutStacIO(token="my-secret-token")
+            io.read_text_from_href("https://example.com/catalog.json")
+            mock_get.assert_called_once()
+            _, kwargs = mock_get.call_args
+            assert kwargs.get("headers", {}).get("Authorization") == "Bearer my-secret-token"
+
+    def test_no_token_no_auth_header(self):
+        """Without a token, no Authorization header is sent."""
+        with patch('stac.requests.get') as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.text = "{}"
+            mock_resp.raise_for_status = MagicMock()
+            mock_get.return_value = mock_resp
+            from stac import _TimeoutStacIO
+            io = _TimeoutStacIO()
+            io.read_text_from_href("https://example.com/catalog.json")
+            _, kwargs = mock_get.call_args
+            assert not kwargs.get("headers", {}).get("Authorization")
 
