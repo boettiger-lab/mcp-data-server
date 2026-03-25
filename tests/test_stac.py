@@ -203,6 +203,17 @@ class TestCatalogUrlParameter:
             result = get_dataset("custom-dataset", catalog_url="https://example.com/custom/catalog.json")
             assert "Custom Dataset" in result
 
+    def test_get_dataset_catalog_token_forwarded(self):
+        """catalog_token is forwarded through get_dataset to the StacIO instance."""
+        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()) as mock_from_file:
+            get_dataset("custom-dataset",
+                        catalog_url="https://example.com/custom/catalog.json",
+                        catalog_token="secret-token")
+            _, kwargs = mock_from_file.call_args
+            stac_io = kwargs.get("stac_io")
+            assert stac_io is not None
+            assert stac_io._token == "secret-token"
+
     def test_list_datasets_default_url(self):
         """Without catalog_url, list_datasets uses the cached STAC_DATASETS (no network call)."""
         with patch('stac.pystac.Catalog.from_file') as mock_from_file:
