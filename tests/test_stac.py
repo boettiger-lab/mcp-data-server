@@ -6,7 +6,7 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from stac import fetch_stac_collections, DATA_CATALOG, list_datasets, get_dataset
+from stac import fetch_stac_collections, DATA_CATALOG, list_datasets, get_dataset, fetch_stac_catalog
 
 
 class TestSTACCatalogParser:
@@ -246,4 +246,100 @@ class TestCatalogUrlParameter:
             io.read_text_from_href("https://example.com/catalog.json")
             _, kwargs = mock_get.call_args
             assert not kwargs.get("headers", {}).get("Authorization")
+
+
+class TestChildCollectionIndexing:
+    """Test that child collections are indexed and queryable by their own ID."""
+
+    def _make_mock_catalog_with_children(self):
+        """Create a catalog with a parent that has two child sub-collections."""
+        mock_catalog = MagicMock()
+
+        # Child 1: senate districts
+        child1 = MagicMock()
+        child1.id = "census-2025-sldu"
+        child1.title = "Senate Districts"
+        child1.description = "Upper chamber legislative districts"
+        child1.extra_fields = {
+            "table:columns": [
+                {"name": "SLDUST", "type": "varchar", "description": "Senate district ID"},
+                {"name": "STATEFP", "type": "varchar", "description": "State FIPS code"},
+            ]
+        }
+        asset1 = MagicMock()
+        asset1.href = "https://s3-west.nrp-nautilus.io/public-census/census-2025/sldu/hex/"
+        asset1.media_type = "application/x-parquet"
+        asset1.title = "hex"
+        asset1.extra_fields = {}
+        child1.assets = {"hex": asset1}
+        child1.get_children.return_value = []
+
+        # Child 2: congressional districts
+        child2 = MagicMock()
+        child2.id = "census-2025-cd"
+        child2.title = "Congressional Districts"
+        child2.description = "Congressional districts"
+        child2.extra_fields = {
+            "table:columns": [
+                {"name": "CD119FP", "type": "varchar", "description": "Congressional district"},
+                {"name": "STATEFP", "type": "varchar", "description": "State FIPS code"},
+            ]
+        }
+        asset2 = MagicMock()
+        asset2.href = "https://s3-west.nrp-nautilus.io/public-census/census-2025/cd/hex/"
+        asset2.media_type = "application/x-parquet"
+        asset2.title = "hex"
+        asset2.extra_fields = {}
+        child2.assets = {"hex": asset2}
+        child2.get_children.return_value = []
+
+        # Parent collection
+        parent = MagicMock()
+        parent.id = "us-census"
+        parent.title = "US Census"
+        parent.description = "Census boundary datasets"
+        parent.assets = {}
+        parent.extra_fields = {}
+        parent.get_children.return_value = [child1, child2]
+
+        mock_catalog.get_children.return_value = [parent]
+        return mock_catalog
+
+    def test_child_collections_indexed(self):
+        """fetch_stac_catalog indexes both parent and child collection IDs."""
+        with patch('stac.pystac.Catalog.from_file',
+                   return_value=self._make_mock_catalog_with_children()):
+            datasets = fetch_stac_catalog(catalog_url="https://example.com/catalog.json")
+            assert "us-census" in datasets
+            assert "census-2025-sldu" in datasets
+            assert "census-2025-cd" in datasets
+
+    def test_child_has_own_columns(self):
+        """Child collection metadata contains its own column schema."""
+        with patch('stac.pystac.Catalog.from_file',
+                   return_value=self._make_mock_catalog_with_children()):
+            datasets = fetch_stac_catalog(catalog_url="https://example.com/catalog.json")
+            sldu = datasets["census-2025-sldu"]
+            assert "SLDUST" in sldu
+            cd = datasets["census-2025-cd"]
+            assert "CD119FP" in cd
+
+    def test_parent_does_not_show_child_columns(self):
+        """Parent collection no longer inherits an arbitrary child's columns."""
+        with patch('stac.pystac.Catalog.from_file',
+                   return_value=self._make_mock_catalog_with_children()):
+            datasets = fetch_stac_catalog(catalog_url="https://example.com/catalog.json")
+            parent = datasets["us-census"]
+            # Parent has no table:columns of its own; should not show child columns
+            assert "SLDUST" not in parent
+            assert "CD119FP" not in parent
+
+    def test_get_dataset_with_child_id(self):
+        """get_dataset accepts a child collection ID and returns its metadata."""
+        with patch('stac.pystac.Catalog.from_file',
+                   return_value=self._make_mock_catalog_with_children()):
+            result = get_dataset("census-2025-sldu",
+                                 catalog_url="https://example.com/catalog.json")
+            assert "Senate Districts" in result
+            assert "SLDUST" in result
 

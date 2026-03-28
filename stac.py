@@ -112,12 +112,15 @@ def _extract_columns(col) -> list[str]:
     return lines
 
 
-def _format_collection(col) -> str:
+def _format_collection(col, sub_children: list = None) -> str:
     """Build a compact markdown summary of one STAC collection.
 
     If the collection has direct children (e.g. wyoming-wildlife-lands has
     per-species sub-collections), expand one level to find assets and
     column schemas that aren't on the parent. Does NOT recurse further.
+
+    *sub_children* may be passed to avoid a duplicate ``get_children()``
+    network call when the caller already fetched them.
     """
     lines = []
     lines.append(f"**{col.title or col.id}**")
@@ -134,7 +137,8 @@ def _format_collection(col) -> str:
     # Check for sub-children — some collections (wyoming-wildlife-lands,
     # pad-us, census) group sub-datasets as child collections, each with
     # their own assets and column schemas.
-    sub_children = list(col.get_children())
+    if sub_children is None:
+        sub_children = list(col.get_children())
     if sub_children:
         lines.append(f"\n**Sub-datasets ({len(sub_children)}):**\n")
         for sc in sub_children:
@@ -143,9 +147,6 @@ def _format_collection(col) -> str:
             if sc_parquet:
                 lines.append(f"*{sc_title}* (`{sc.id}`):")
                 lines.extend(sc_parquet)
-            # Use sub-child columns if parent has none
-            if not col_lines:
-                col_lines = _extract_columns(sc)
     elif parquet_assets:
         lines.append("\nSQL data (use with `query` tool):")
         lines.extend(parquet_assets)
@@ -164,7 +165,11 @@ def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> di
         cat = pystac.Catalog.from_file(url, stac_io=stac_io)
         datasets = {}
         for child in cat.get_children():
-            datasets[child.id] = _format_collection(child)
+            sub_children = list(child.get_children())
+            datasets[child.id] = _format_collection(child, sub_children=sub_children)
+            # Index child collections so get_dataset works with child IDs
+            for sub_child in sub_children:
+                datasets[sub_child.id] = _format_collection(sub_child)
         print(f"📂 Loaded {len(datasets)} collections from STAC: {url}", file=sys.stderr)
         return datasets
     except Exception as e:
