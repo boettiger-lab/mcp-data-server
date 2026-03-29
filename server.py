@@ -66,7 +66,7 @@ TOOL_INJECTED_CONTEXT = f"""
 ### ⚠️ CRITICAL SQL RULES (MUST FOLLOW)
 1. **NO TABLES EXIST:** The database is empty. You CANNOT write `FROM table_name`.
 2. **USE PARQUET PATHS:** You MUST use `FROM read_parquet('s3://...')` for ALL queries.
-3. **DISCOVER PATHS:** Call `list_datasets` then `get_dataset` to get exact S3 paths and schemas — NEVER guess or hardcode paths.
+3. **DISCOVER PATHS:** Call `browse_stac_catalog` then `get_stac_details` to get exact S3 paths and schemas — NEVER guess or hardcode paths.
 
 ### ⚡ OPTIMIZATION RULES
 {OPTIM_RAW}
@@ -118,17 +118,18 @@ def catalog_dataset(dataset_id: str) -> str:
 # 6. MCP TOOLS — Dataset Discovery
 # -------------------------------------------------------------------------
 @mcp.tool()
-def list_datasets(catalog_url: str = None, catalog_token: str = None) -> str:
-    """List all available datasets with their collection IDs and titles.
-    Call this first to discover what data is available before writing SQL queries.
+def browse_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> str:
+    """Browse the full public STAC catalog to discover datasets not already loaded in your app.
+    Use when the user asks about data outside your pre-configured layers.
     Optionally provide catalog_url to use a custom STAC catalog instead of the server default.
     Optionally provide catalog_token (Bearer token) if the catalog requires authentication."""
     return _stac_list(catalog_url, catalog_token)
 
 @mcp.tool()
-def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = None) -> str:
-    """Get detailed metadata for a dataset: S3 parquet paths, column schemas, and descriptions.
-    Use the collection ID from list_datasets.
+def get_stac_details(dataset_id: str, catalog_url: str = None, catalog_token: str = None) -> str:
+    """Fetch metadata (parquet paths, column schemas) for any STAC collection by ID.
+    Use for datasets outside your pre-loaded app catalog — for datasets already in your app,
+    use the local get_dataset_details tool instead.
     Optionally provide catalog_url and catalog_token if using a private STAC catalog."""
     return _stac_get(dataset_id, catalog_url, catalog_token)
 
@@ -164,8 +165,8 @@ query.__doc__ = f"""
 Executes optimized DuckDB SQL against S3 parquet files.
 
 BEFORE writing any SQL:
-1. Call `list_datasets` to see all available dataset IDs and titles.
-2. Call `get_dataset` with the relevant dataset ID to get exact S3 paths and column schemas.
+1. Call `browse_stac_catalog` to see all available dataset IDs and titles.
+2. Call `get_stac_details` with the relevant dataset ID to get exact S3 paths and column schemas.
 3. Use ONLY paths returned by those tools — never guess or hardcode any S3 URLs.
 
 For private data, pass s3_key, s3_secret, and optionally s3_endpoint and s3_scope alongside the SQL query.
