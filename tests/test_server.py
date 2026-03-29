@@ -154,10 +154,10 @@ class TestDataCatalogParsing:
 class TestResourceFunctions:
     """Test MCP resource functions."""
     
-    def test_list_datasets_returns_string(self):
-        """Test that list_datasets returns a string."""
-        from server import list_datasets
-        result = list_datasets()
+    def test_browse_stac_catalog_returns_string(self):
+        """Test that browse_stac_catalog returns a string."""
+        from server import browse_stac_catalog
+        result = browse_stac_catalog()
         assert isinstance(result, str)
     
     def test_get_dataset_details_found(self):
