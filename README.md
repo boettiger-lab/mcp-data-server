@@ -1,5 +1,7 @@
 # MCP DuckDB Geospatial Data Server
 
+**[Documentation](https://boettiger-lab.github.io/mcp-data-server/)**
+
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides SQL query access to large-scale geospatial datasets stored in S3. Built with DuckDB for high-performance analytics on H3-indexed environmental, biodiversity, and geospatial data.
 
 ## Quick Start
