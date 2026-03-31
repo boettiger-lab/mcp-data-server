@@ -1,5 +1,21 @@
 # Agent Architecture
 
+## Deployment
+
+The MCP server runs on the NRP Nautilus Kubernetes cluster at **`https://duckdb-mcp.nrp-nautilus.io`**.
+
+- **2 replicas** of the `duckdb-mcp` pod, each cloning this repo at startup and running `server.py` via `uv`
+- **Resources:** 16 Gi RAM requested, up to 160 Gi / 16 CPU per pod
+- **STAC catalog:** `https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json` (set via `STAC_CATALOG_URL` env var)
+- **Ingress:** HAProxy with CORS enabled, 10-minute query timeout, 1-hour SSE tunnel timeout
+
+To redeploy after pushing changes to `main`, restart the pods so they re-clone:
+```
+kubectl rollout restart deployment/duckdb-mcp
+```
+
+---
+
 This project uses two distinct, asynchronous AI agent processes. Do not confuse them.
 
 ---
