@@ -1,5 +1,10 @@
 # Agent Architecture
 
+> **The `.md` files in this repo are runtime prompt artifacts, not documentation.**
+> `server.py` loads them at startup and injects their content into MCP tool descriptions
+> and prompts. Editing them changes what the agent is instructed to do.
+> `README.md` is the only human-facing documentation.
+
 ## Deployment
 
 The MCP server runs on the NRP Nautilus Kubernetes cluster at **`https://duckdb-mcp.nrp-nautilus.io`**.
