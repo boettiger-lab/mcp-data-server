@@ -18,14 +18,16 @@ SELECT APPROX_COUNT_DISTINCT(h8) * 0.737327598 as area_km2 FROM ...
 
 ## Joining Different Resolutions
 
-Some datasets use different H3 resolutions (h8 vs h0-h4). Use `h3_cell_to_parent()` to convert:
+Some datasets use different H3 resolutions (h8 vs h0-h4). Use `h3_cell_to_parent()` to convert the finer resolution up to the coarser one before joining:
 
 ```sql
 -- iNaturalist has h4, wetlands has h8 → convert h8 to h4
-JOIN read_parquet('s3://public-inat/range-maps/hex/**') pos 
-    ON h3_cell_to_parent(wetlands.h8, 4) = pos.h4 
-    AND wetlands.h0 = pos.h0  -- Always include h0 for partition pruning!
+JOIN read_parquet('s3://public-inat/range-maps/hex/**') pos
+    ON h3_cell_to_parent(wetlands.h8, 4) = pos.h4
+    AND wetlands.h0 = pos.h0  -- include h0 when both sides have it
 ```
+
+If one dataset lacks h0 (different partition scheme), omit it from that side of the join and rely on the resolution join alone.
 
 ## Multiple Rows per Hex: Two Different Problems
 

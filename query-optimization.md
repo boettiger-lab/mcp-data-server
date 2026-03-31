@@ -2,7 +2,7 @@
 
 ## 1. Always include h0 in joins
 
-All datasets are hive-partitioned by h0. Always include h0 in every join condition:
+Most datasets are hive-partitioned by h0. When both sides of a join have h0, always include it in the join condition:
 
 ```sql
 JOIN table2 ON table1.hX = table2.hX AND table1.h0 = table2.h0
