@@ -122,16 +122,25 @@ We have a fully-hosted version
 
 - **server.py** - Main MCP server with FastMCP framework
 - **stac.py** - STAC catalog integration for dynamic dataset discovery
-- **query-setup.md** - Required DuckDB configuration for all queries
-- **query-optimization.md** - Performance optimization guidelines
-- **h3-guide.md** - H3 geospatial operations reference
+
+### Runtime Prompt Files
+
+The `.md` files in this repo are **not documentation** — they are curated prompt content loaded by `server.py` at startup and injected directly into MCP tool descriptions and prompts at runtime. The agent (LLM) reads them as instructions, not humans.
+
+| File | How it is used |
+|---|---|
+| `query-setup.md` | SQL parsed and executed in every fresh DuckDB connection before a query runs |
+| `query-optimization.md` | Injected verbatim into the `query` tool description |
+| `h3-guide.md` | Injected verbatim into the `query` tool description |
+| `assistant-role.md` | Served as the `geospatial-analyst` MCP prompt (role + response style) |
+
+Editing these files changes what the agent is told to do. They must be written for a stateless LLM — short, concrete, and unambiguous. See `AGENTS.md` for editing rules.
 
 ### Key Design Patterns
 
-1. **Prompt Engineering**: Injects strict SQL rules into tool descriptions to guide LLM behavior
-2. **Isolation Engine**: Each query gets a fresh DuckDB connection for security
-3. **Context Injection**: Documentation is embedded into MCP resources and tool descriptions
-4. **Partition Pruning**: Uses H3 resolution columns (`h0`) for efficient S3 reads
+1. **Isolation Engine**: Each query runs in a fresh `duckdb.connect(":memory:")` — no state or credentials survive between requests
+2. **Context Injection**: Prompt files are embedded into tool descriptions so even MCP clients that don't support `prompts/list` receive the guidance
+3. **Partition Pruning**: H3 resolution columns (`h0`) enable DuckDB to skip S3 partitions, giving 5–20× speedups on large datasets
 
 ## Kubernetes Deployment
 
@@ -153,9 +162,9 @@ The deployment:
 
 ### Tools
 
-- `list_datasets(catalog_url?, catalog_token?)` - List available datasets from the STAC catalog
-- `get_dataset(dataset_id, catalog_url?, catalog_token?)` - Get S3 paths and schema for a dataset
-- `query(sql_query, s3_key?, s3_secret?, s3_endpoint?)` - Execute DuckDB SQL against S3 parquet files
+- `browse_stac_catalog(catalog_url?, catalog_token?)` - List available datasets from the STAC catalog
+- `get_stac_details(dataset_id, catalog_url?, catalog_token?)` - Get S3 paths and schema for a dataset
+- `query(sql_query, s3_key?, s3_secret?, s3_endpoint?, s3_scope?)` - Execute DuckDB SQL against S3 parquet files
 
 ### Resources
 
@@ -289,6 +298,6 @@ Contributions welcome! Key areas:
 
 For issues and questions:
 - GitHub Issues: [boettiger-lab/mcp-data-server](https://github.com/boettiger-lab/mcp-data-server)
-- Dataset questions: Use the `list_datasets` tool or browse the [public STAC catalog](https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json)
+- Dataset questions: Use the `browse_stac_catalog` tool or browse the [public STAC catalog](https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json)
 
 
