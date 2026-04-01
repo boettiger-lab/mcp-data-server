@@ -147,12 +147,12 @@ def _format_collection(col, sub_children: list = None) -> str:
             if sc_parquet:
                 lines.append(f"*{sc_title}* (`{sc.id}`):")
                 lines.extend(sc_parquet)
+        lines.append(f"\nCall get_stac_details with a sub-dataset ID (e.g. `{sub_children[0].id}`) for column schemas and details.")
     elif parquet_assets:
         lines.append("\nSQL data (use with `query` tool):")
         lines.extend(parquet_assets)
-
-    if col_lines:
-        lines.extend(col_lines)
+        if col_lines:
+            lines.extend(col_lines)
 
     return "\n".join(lines)
 
