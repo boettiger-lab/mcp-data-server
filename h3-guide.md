@@ -6,28 +6,42 @@
 
 ## Key Facts
 
-- Each h8 hexagon = **73.7327598 hectares** (≈ 0.737 km²)
-- Always report AREAS, not hex counts
-- **Use** `APPROX_COUNT_DISTINCT(h8)` when counting hexes to compute areas -- this avoids double-counting and is reasonably fast enough.
+- Always report **areas** (km², acres, etc.), never raw hex counts
+- Use `APPROX_COUNT_DISTINCT(hN)` when counting hexes — avoids double-counting
+- **Never SUM area columns** (ACRES, GIS_Acres, area_ha, etc.) on hex data. These store the source polygon's total area repeated on every hex row. `SUM(ACRES)` = polygon_area × num_hex_cells — wrong by 10³–10⁶×. Always compute area from hex cells instead.
 
 ## Area Conversion
 
+| Resolution | km²/cell | acres/cell |
+|---|---|---|
+| h5 | 252.9 | 62,502 |
+| h6 | 36.13 | 8,929 |
+| h8 | 0.7373 | 182.2 |
+| h10 | 0.01505 | 3.718 |
+
 ```sql
-SELECT APPROX_COUNT_DISTINCT(h8) * 0.737327598 as area_km2 FROM ...
+-- Example: area from h8 hexes
+SELECT APPROX_COUNT_DISTINCT(h8) * 0.7373 AS area_km2 FROM ...
+
+-- Example: area from h5 hexes (e.g. GFW fishing effort)
+SELECT APPROX_COUNT_DISTINCT(h5) * 252.9 AS area_km2 FROM ...
 ```
 
 ## Joining Different Resolutions
 
-Some datasets use different H3 resolutions (h8 vs h0-h4). Use `h3_cell_to_parent()` to convert the finer resolution up to the coarser one before joining:
+Datasets use different H3 resolutions (e.g. GFW fishing effort at h5/h6, WDPA at h8, iNaturalist at h4). Use `h3_cell_to_parent()` to convert the **finer** resolution up to the **coarser** one before joining:
 
 ```sql
--- iNaturalist has h4, wetlands has h8 → convert h8 to h4
+-- WDPA h8 × iNaturalist h4: convert h8 → h4
 JOIN read_parquet('s3://public-inat/range-maps/hex/**') pos
     ON h3_cell_to_parent(wetlands.h8, 4) = pos.h4
     AND wetlands.h0 = pos.h0  -- include h0 when both sides have it
+
+-- WDPA h8 × GFW h5: convert h8 → h5
+JOIN gfw ON h3_cell_to_parent(wdpa.h8, 5) = gfw.h5
 ```
 
-If one dataset lacks h0 (different partition scheme), omit it from that side of the join and rely on the resolution join alone.
+When one side lacks h0 (e.g. year-partitioned GFW), omit h0 from that side of the join. Prefer hex-partitioned variants (with h0) when available for partition pruning.
 
 ## Multiple Rows per Hex: Two Different Problems
 
