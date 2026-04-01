@@ -29,13 +29,17 @@ SELECT APPROX_COUNT_DISTINCT(h5) * 252.9 AS area_km2 FROM ...
 
 ## Joining Different Resolutions
 
-Datasets use different H3 resolutions. Use `h3_cell_to_parent()` to convert the **finer** resolution up to the **coarser** one before joining:
+Use `h3_cell_to_parent()` — not `h3_cell_to_children()` — to join datasets at different resolutions. Always convert the **finer** (higher number) resolution to the **coarser** (lower number) resolution:
 
 ```sql
 -- dataset_a has h8, dataset_b has h4: convert h8 → h4
 JOIN dataset_b b
     ON h3_cell_to_parent(a.h8, 4) = b.h4
     AND a.h0 = b.h0  -- include h0 when both sides have it
+
+-- WDPA (h8) + GFW fishing effort (h6): convert h8 → h6
+JOIN gfw ON h3_cell_to_parent(wdpa.h8, 6) = gfw.h6
+         AND wdpa.h0 = gfw.h0
 ```
 
 When one side lacks h0, omit it from that side. Prefer hex-partitioned variants (with h0) when available for partition pruning.
