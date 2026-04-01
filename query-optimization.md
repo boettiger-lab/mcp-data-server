@@ -20,19 +20,19 @@ scope before joining large thematic datasets (PADUS, carbon, wetlands, species).
 ```sql
 WITH scope AS (
   SELECT DISTINCT h8, h0
-  FROM read_parquet('s3://public-overturemaps/regions/hex/**')
+  FROM read_parquet('<STAC_REGIONS_HEX_PATH>')
   WHERE region = 'US-CA'
 ),
 parks AS (
   SELECT DISTINCT p.h8, p.h0
   FROM scope s
-  JOIN read_parquet('s3://public-padus/padus-4-1/fee/hex/**') p
+  JOIN read_parquet('<STAC_PADUS_HEX_PATH>') p
     ON s.h8 = p.h8 AND s.h0 = p.h0
   WHERE p.Des_Tp = 'NP'
 )
 SELECT SUM(c.carbon)/1e6
 FROM parks p
-JOIN read_parquet('s3://public-carbon/vulnerable-carbon-2024/hex/**') c
+JOIN read_parquet('<STAC_CARBON_HEX_PATH>') c
   ON p.h8 = c.h8 AND p.h0 = c.h0
 ```
 

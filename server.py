@@ -66,7 +66,11 @@ TOOL_INJECTED_CONTEXT = f"""
 ### ⚠️ CRITICAL SQL RULES (MUST FOLLOW)
 1. **NO TABLES EXIST:** The database is empty. You CANNOT write `FROM table_name`.
 2. **USE PARQUET PATHS:** You MUST use `FROM read_parquet('s3://...')` for ALL queries.
-3. **DISCOVER PATHS:** Call `browse_stac_catalog` then `get_stac_details` to get exact S3 paths and schemas — NEVER guess or hardcode paths.
+3. **DISCOVER PATHS — TRUST STAC PATHS EXACTLY:** Call `browse_stac_catalog` then `get_stac_details` to get exact S3 paths — then use them **verbatim**. NEVER guess, modify, or "fix" a path. Both path depth and glob pattern vary across datasets — there is no single convention. Examples:
+   - `read_parquet('s3://public-wdpa/hex/**')` — bucket root, recursive glob
+   - `read_parquet('s3://public-padus/padus-4-1/fee/hex/h0=*/data_0.parquet')` — nested path, partition glob
+
+   Both are correct. Copy-paste the path from get_stac_details. In SQL examples below, `<STAC_HEX_PATH>` means "insert the exact path from get_stac_details here."
 
 ### ⚡ OPTIMIZATION RULES
 {OPTIM_RAW}

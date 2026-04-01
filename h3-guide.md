@@ -53,13 +53,13 @@ Some vector datasets store one row per *feature* (e.g. each protected area). Mul
 **❌ WRONG:** Joining directly multiplies rows
 ```sql
 -- If 2 features cover hex ABC, this counts carbon twice
-JOIN read_parquet('s3://bucket/dataset/hex/**') d ON c.h8 = d.h8
+JOIN read_parquet('<STAC_HEX_PATH>') d ON c.h8 = d.h8
 ```
 
 **✅ CORRECT:** Deduplicate first with DISTINCT
 ```sql
 unique_hexes AS (
-  SELECT DISTINCT h8, h0 FROM read_parquet('s3://bucket/dataset/hex/**')
+  SELECT DISTINCT h8, h0 FROM read_parquet('<STAC_HEX_PATH>')
 ),
 SELECT country, SUM(carbon) as total
 FROM countries c
@@ -87,12 +87,12 @@ Raster datasets are converted to hex by assigning each **pixel** its H3 cell —
 ```sql
 -- Continuous values (carbon, biomass, etc.) → SUM or AVG
 SELECT h8, h0, SUM(value) as total
-FROM read_parquet('s3://bucket/dataset/hex/**')
+FROM read_parquet('<STAC_HEX_PATH>')
 GROUP BY h8, h0
 
 -- Categorical values (land cover, etc.) → use MODE (most frequent class)
 SELECT h8, h0, MODE(class) as dominant_class
-FROM read_parquet('s3://bucket/dataset/hex/**')
+FROM read_parquet('<STAC_HEX_PATH>')
 GROUP BY h8, h0
 ```
 
@@ -109,7 +109,7 @@ SELECT
   COUNT(*)                        AS total_rows,
   APPROX_COUNT_DISTINCT(h8)       AS unique_hexes,
   COUNT(*) * 1.0 / APPROX_COUNT_DISTINCT(h8) AS avg_rows_per_hex
-FROM read_parquet('s3://bucket/dataset/hex/h0=8001fffffffffff/data_0.parquet');
+FROM read_parquet('<STAC_HEX_PATH_SINGLE_PARTITION>');
 ```
 
 | avg_rows_per_hex | Meaning |
