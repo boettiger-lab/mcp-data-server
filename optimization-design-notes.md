@@ -262,5 +262,5 @@ Internal endpoint (k8s only): `rook-ceph-rgw-nautiluss3.rook`, `USE_SSL false`, 
 
 Public endpoint: `s3-west.nrp-nautilus.io`, `USE_SSL true`, `THREADS=2`
 
-Required workaround: `SET s3_allow_recursive_globbing=false` — fixes DuckDB 1.5.0
-regression where hierarchical glob expansion adds latency (issue #21347).
+Note: DuckDB 1.5.0 had a regression where hierarchical glob expansion added
+latency (issue #21347). Fixed in DuckDB 1.5.1 — workaround no longer needed.
