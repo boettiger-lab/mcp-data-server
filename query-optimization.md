@@ -39,3 +39,22 @@ JOIN read_parquet('<STAC_CARBON_HEX_PATH>') c
 **Note:** `rook-ceph-rgw-nautiluss3.rook` is an internal endpoint only accessible from k8s. Always use it — not the public endpoint — to run queries.
 
 You must read parquet datasets from S3 using read_parquet(). There are no local tables.
+
+## 3. Case-insensitive text search
+
+DuckDB `LIKE` is case-sensitive by default. Name/label fields (site names, owner names,
+program names) are often stored in uppercase or mixed case. Always normalize both sides:
+
+```sql
+WHERE lower(site) LIKE '%' || lower('user input') || '%'
+```
+
+## 4. Apostrophes in string literals
+
+Site names and owner names can contain apostrophes (e.g. `O'Brien Ranch`). Double any
+single quote inside a SQL string literal — do not use a backslash:
+
+```sql
+WHERE site = 'O''Brien Ranch'   -- correct
+WHERE site = 'O'Brien Ranch'    -- parse error
+```
