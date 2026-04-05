@@ -1,3 +1,4 @@
+import hmac
 import os
 import re
 import duckdb
@@ -8,6 +9,8 @@ from contextlib import contextmanager
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.session import BaseSession
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 from stac import STAC_DATASETS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get
 
 # Workaround for https://github.com/boettiger-lab/mcp-data-server/issues/5
@@ -183,11 +186,30 @@ Credentials are scoped to this request only and never persisted.
 mcp.tool()(query)
 
 # -------------------------------------------------------------------------
-# 9. SERVER START
+# 9. OPTIONAL BEARER TOKEN AUTH
+# -------------------------------------------------------------------------
+_MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "").strip()
+
+class _BearerAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        auth = request.headers.get("Authorization", "")
+        supplied = auth[len("Bearer "):] if auth.startswith("Bearer ") else ""
+        if not hmac.compare_digest(supplied.encode(), _MCP_AUTH_TOKEN.encode()):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return await call_next(request)
+
+# -------------------------------------------------------------------------
+# 10. SERVER START
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
     app = mcp.streamable_http_app()
     app.router.redirect_slashes = False
+
+    if _MCP_AUTH_TOKEN:
+        app.add_middleware(_BearerAuthMiddleware)
+        print("🔒 Auth enabled (MCP_AUTH_TOKEN is set)", file=sys.stderr)
+    else:
+        print("🔓 Auth disabled (MCP_AUTH_TOKEN not set)", file=sys.stderr)
 
     print("🚀 Starting DuckDB MCP Server...", file=sys.stderr)
     print(f"📂 STAC catalog: {STAC_CATALOG_URL}", file=sys.stderr)
