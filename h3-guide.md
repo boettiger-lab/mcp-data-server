@@ -4,6 +4,14 @@
 
 **H3 hex joins replace geometry functions.** Do NOT use `ST_Intersects`, `ST_Contains`, `ST_Area`, or `ST_Within` — these require scanning full polygon geometries and are orders of magnitude slower. Instead, join datasets on their shared H3 index (`h8`, `h0`) to compute overlaps, areas, and containment. If two datasets use different H3 resolutions, convert with `h3_cell_to_parent()`.
 
+## Resolution Direction
+
+**Higher H3 resolution numbers are finer (smaller cells); lower numbers are coarser (larger cells).** h0 is the coarsest (~1000 km edge length); h15 is the finest. A higher-resolution cell is always a *child* of a lower-resolution cell — never the reverse.
+
+- h8 cells are children of h6 cells, not parents
+- If a dataset is indexed at h6, it has no h8 column and no h8_parent column
+- Always check the dataset schema for available resolution columns before writing a join
+
 ## Key Facts
 
 - Always report **areas** (km², acres, etc.), never raw hex counts
@@ -29,7 +37,34 @@ SELECT APPROX_COUNT_DISTINCT(h5) * 252.9 AS area_km2 FROM ...
 
 ## Joining Different Resolutions
 
-Use `h3_cell_to_parent()` — not `h3_cell_to_children()` — to join datasets at different resolutions. Always convert the **finer** (higher number) resolution to the **coarser** (lower number) resolution:
+**Always join by converting the finer (higher-numbered) dataset to the coarser resolution — never look for child columns on the coarser dataset.**
+
+### Step 1: Check for pre-computed parent columns (preferred)
+
+Many fine-resolution datasets (e.g. GEBCO h8) already carry pre-computed parent columns (`h7`, `h6`, `h5`, ...). Use these directly — they are faster than calling `h3_cell_to_parent()` on every row. Check the schema first:
+
+```sql
+-- Check what resolution columns exist
+DESCRIBE SELECT * FROM read_parquet('<STAC_PATH>') LIMIT 1;
+```
+
+If the finer dataset has the target parent column, use it directly:
+
+```sql
+-- GEBCO (h8-indexed, has h6 column) joined to geomorphology (h6-indexed)
+WITH gebco_by_h6 AS (
+  SELECT h6, h0, AVG(elevation) AS avg_elevation
+  FROM read_parquet('<GEBCO_PATH>')
+  GROUP BY h6, h0
+)
+SELECT s.feature_type, g.avg_elevation
+FROM read_parquet('<GEOMORPHOLOGY_PATH>') s
+JOIN gebco_by_h6 g ON s.h6 = g.h6 AND s.h0 = g.h0
+```
+
+### Step 2: Fall back to h3_cell_to_parent() when no pre-computed column exists
+
+Use `h3_cell_to_parent()` — not `h3_cell_to_children()` — when the pre-computed parent column is absent:
 
 ```sql
 -- dataset_a has h8, dataset_b has h4: convert h8 → h4
