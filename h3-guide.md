@@ -2,7 +2,12 @@
 
 **Most datasets have H3 hex versions.** Always use them for spatial operations instead of GeoParquet geometry columns.
 
-**H3 hex joins replace ALL spatial operations — this is non-negotiable.** Never use `ST_Within`, `ST_Intersects`, `ST_Contains`, `ST_Distance`, or any other spatial predicate. On global datasets these run for 10+ minutes and return nothing useful. Every dataset is pre-indexed with H3 cell IDs so that geographic filtering and joining is a pure integer hash join — no geometry, no spatial extension, no per-row evaluation. If no H3-indexed boundary exists for a required geography, say so; do not fall back to spatial predicates.
+**Always use H3 hex datasets for filtering and joining — never spatial predicates on GeoParquet.**
+When a dataset appears in the STAC catalog as GeoParquet, a hex-indexed version almost always exists alongside it. Find and use the hex version. Never use `ST_Within`, `ST_Intersects`, `ST_Contains`, or similar predicates to filter or join large datasets — on global data these run 10+ minutes and return nothing useful.
+
+If you browse the catalog and only find a GeoParquet with no hex equivalent, **say so** rather than falling back to spatial predicates. A missing hex version is a data pipeline gap (not something to work around silently).
+
+Small spatial operations on a **single already-retrieved geometry** are fine — e.g. `ST_Centroid` or `ST_AsText` on one result row for display or map zoom. This is different from using spatial predicates to scan or filter a dataset.
 
 ## Resolution Direction
 
