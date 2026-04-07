@@ -162,6 +162,13 @@ def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint
             result = db.sql(sql_query)
             if result is None: return "Command executed successfully."
 
+            # Drop geometry columns — GEOMETRY('OGC:CRS84') crashes pandas conversion
+            # (DuckDB issue: unsupported NumPy type). Geometry is not useful in tabular output.
+            geom_cols = [c for c, t in zip(result.columns, result.dtypes) if "GEOMETRY" in str(t).upper()]
+            if geom_cols:
+                keep = [f'"{c}"' for c in result.columns if c not in geom_cols]
+                result = result.select(", ".join(keep))
+
             df = result.limit(50).df()
             if df.empty: return "No results found."
             return df.to_markdown(index=False)
