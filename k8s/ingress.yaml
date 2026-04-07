@@ -11,6 +11,10 @@ metadata:
     haproxy-ingress.github.io/cors-allow-credentials: "true"
     haproxy-ingress.github.io/cors-max-age: "86400"
     
+    # Load balancing: route new requests to the pod with fewest active connections
+    # (default round-robin is blind to load; leastconn avoids piling onto busy pods)
+    haproxy-ingress.github.io/balance-algorithm: leastconn
+
     # Timeout settings for long-running queries
     haproxy-ingress.github.io/timeout-client: "600s"  # 10 minutes - must match timeout-server
     haproxy-ingress.github.io/timeout-server: "600s"  # 10 minutes for long DuckDB queries
