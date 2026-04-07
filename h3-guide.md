@@ -2,7 +2,7 @@
 
 **Most datasets have H3 hex versions.** Always use them for spatial operations instead of GeoParquet geometry columns.
 
-**H3 hex joins replace geometry functions.** Do NOT use `ST_Intersects`, `ST_Contains`, `ST_Area`, or `ST_Within` — these require scanning full polygon geometries and are orders of magnitude slower. Instead, join datasets on their shared H3 index (`h8`, `h0`) to compute overlaps, areas, and containment. If two datasets use different H3 resolutions, convert with `h3_cell_to_parent()`.
+**H3 hex joins replace ALL spatial operations — this is non-negotiable.** Never use `ST_Within`, `ST_Intersects`, `ST_Contains`, `ST_Distance`, or any other spatial predicate. On global datasets these run for 10+ minutes and return nothing useful. Every dataset is pre-indexed with H3 cell IDs so that geographic filtering and joining is a pure integer hash join — no geometry, no spatial extension, no per-row evaluation. If no H3-indexed boundary exists for a required geography, say so; do not fall back to spatial predicates.
 
 ## Resolution Direction
 
