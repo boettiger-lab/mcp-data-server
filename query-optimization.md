@@ -49,7 +49,14 @@ program names) are often stored in uppercase or mixed case. Always normalize bot
 WHERE lower(site) LIKE '%' || lower('user input') || '%'
 ```
 
-## 4. Apostrophes in string literals
+## 4. GeoParquet geometry columns
+
+GeoParquet files contain a geometry column (usually `geom`) typed as `GEOMETRY('OGC:CRS84')`.
+This type cannot be displayed in tabular output — the server drops it automatically.
+Avoid `SELECT *` on GeoParquet files; select only the columns you need. If you need
+coordinates, cast explicitly: `ST_AsText(geom) AS geom_wkt`.
+
+## 5. Apostrophes in string literals
 
 Site names and owner names can contain apostrophes (e.g. `O'Brien Ranch`). Double any
 single quote inside a SQL string literal — do not use a backslash:

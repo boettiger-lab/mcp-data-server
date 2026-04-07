@@ -90,7 +90,6 @@ TOOL_INJECTED_CONTEXT = f"""
 def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None):
     conn = duckdb.connect(database=":memory:")
     try:
-        conn.execute("SET statement_timeout = '600s'")
         for stmt in (s.strip() for s in SETUP_SQL.split(";") if s.strip()):
             try:
                 conn.sql(stmt)
@@ -161,6 +160,13 @@ def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint
         with get_isolated_db(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope) as db:
             result = db.sql(sql_query)
             if result is None: return "Command executed successfully."
+
+            # Drop geometry columns — GEOMETRY('OGC:CRS84') crashes pandas conversion
+            # (DuckDB issue: unsupported NumPy type). Geometry is not useful in tabular output.
+            geom_cols = [c for c, t in zip(result.columns, result.dtypes) if "GEOMETRY" in str(t).upper()]
+            if geom_cols:
+                keep = [f'"{c}"' for c in result.columns if c not in geom_cols]
+                result = result.select(", ".join(keep))
 
             df = result.limit(50).df()
             if df.empty: return "No results found."
