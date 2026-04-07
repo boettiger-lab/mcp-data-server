@@ -90,6 +90,7 @@ TOOL_INJECTED_CONTEXT = f"""
 def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None):
     conn = duckdb.connect(database=":memory:")
     try:
+        conn.execute("SET statement_timeout = '600s'")
         for stmt in (s.strip() for s in SETUP_SQL.split(";") if s.strip()):
             try:
                 conn.sql(stmt)
