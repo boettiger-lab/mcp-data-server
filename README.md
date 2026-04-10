@@ -35,7 +35,21 @@ Examples:
 
 
 
-### Using Claude Code (Desktop)
+### Using Claude Code (CLI)
+
+Run this command once in your terminal:
+
+```bash
+claude mcp add --transport http duckdb-geo https://duckdb-mcp.nrp-nautilus.io/mcp
+```
+
+To make it available across all your projects, add `--scope user`:
+
+```bash
+claude mcp add --transport http --scope user duckdb-geo https://duckdb-mcp.nrp-nautilus.io/mcp
+```
+
+### Using Claude Desktop
 
 Add to your Claude Desktop configuration file:
 
