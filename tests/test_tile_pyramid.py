@@ -151,3 +151,28 @@ class TestRegisterHexTiles:
         r1 = register_hex_tiles(con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4)
         r2 = register_hex_tiles(con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4)
         assert r1["hash"] == r2["hash"]
+
+
+from tiles.db import build_tile_connection
+
+
+class TestBuildTileConnection:
+    def test_loads_required_extensions(self):
+        con = build_tile_connection()
+        try:
+            # Proxy: LOAD must have succeeded if these functions are callable.
+            con.sql("SELECT h3_latlng_to_cell(37.8, -122.3, 5)").fetchone()
+            con.sql("SELECT ST_Point(0, 0)").fetchone()
+            # httpfs loaded — confirm by presence of its config.
+            con.sql("SELECT current_setting('s3_region')").fetchone()
+        finally:
+            con.close()
+
+    def test_no_s3_secret_created(self):
+        con = build_tile_connection()
+        try:
+            names = [r[0] for r in con.sql("SELECT name FROM duckdb_secrets()").fetchall()]
+            # Persistent tile connection reads only from public buckets.
+            assert "client_s3" not in names
+        finally:
+            con.close()
