@@ -275,5 +275,25 @@ class TestS3Credentials:
         assert "MY_SECRET_VALUE" not in captured.err
 
 
+class TestTileRouteMounted:
+    def test_tile_route_exists_in_starlette_app(self):
+        """After importing server, the streamable_http_app should have a /tiles route."""
+        from server import mcp
+        app = mcp.streamable_http_app()
+        # Also apply our own mount (mimicking the startup block).
+        from server import mount_tiles
+        mount_tiles(app)
+        paths = [getattr(r, "path", None) or getattr(r, "path_format", None) for r in app.routes]
+        assert any(p and "/tiles/" in p for p in paths)
+
+    def test_register_hex_tiles_is_an_mcp_tool(self):
+        """The MCP server should expose register_hex_tiles as a tool."""
+        from server import mcp
+        # FastMCP tracks tools on its internal registry; adapt to the API.
+        import anyio
+        tool_names = [t.name for t in anyio.run(mcp.list_tools)]
+        assert "register_hex_tiles" in tool_names
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
