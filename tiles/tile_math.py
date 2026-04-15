@@ -1,4 +1,5 @@
 """Pure helper functions for tile math. No side effects, no DuckDB."""
+import hashlib
 import math
 from typing import Tuple
 
@@ -11,9 +12,6 @@ def tile_xyz_to_lnglat_bounds(z: int, x: int, y: int) -> Tuple[float, float, flo
     lat_n = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
     lat_s = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
     return (west, lat_s, east, lat_n)
-
-
-import hashlib
 
 
 def zoom_to_h3_res(z: int, min_res: int, finest_res: int, zoom_offset: int = 4) -> int:
