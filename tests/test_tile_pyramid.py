@@ -153,6 +153,25 @@ class TestRegisterHexTiles:
         assert r1["hash"] == r2["hash"]
 
 
+import json as _json
+
+
+class TestTilesetMetadata:
+    def test_metadata_written_alongside_pyramid(self, local_bucket, h3_conn):
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=3, agg="SUM", zoom_offset=3,
+        )
+        meta_path = local_bucket / "hex" / result["hash"] / "metadata.json"
+        assert meta_path.exists()
+        meta = _json.loads(meta_path.read_text())
+        assert meta["finest_res"] == 5
+        assert meta["min_res"] == 3
+        assert meta["agg"] == "SUM"
+        assert meta["zoom_offset"] == 3
+        assert meta["value_columns"] == ["val"]
+
+
 from tiles.db import build_tile_connection
 
 

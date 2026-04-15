@@ -3,6 +3,7 @@
 register_hex_tiles() materializes a partitioned parquet pyramid to object storage.
 Tile requests read directly from the pyramid — no coordination needed.
 """
+import json
 import os
 from typing import List
 
@@ -59,6 +60,12 @@ def _public_base_url() -> str:
     return os.environ.get("MCP_PUBLIC_BASE_URL", "https://duckdb-mcp.nrp-nautilus.io").rstrip("/")
 
 
+def _json_dumps_escaped(obj) -> str:
+    # DuckDB's COPY ... (FORMAT CSV, QUOTE '') writes the raw string. We must
+    # escape any single quotes in the JSON so they don't break the SQL literal.
+    return json.dumps(obj).replace("'", "''")
+
+
 def _inspect_user_sql(con: duckdb.DuckDBPyConnection, user_sql: str):
     """Run user SQL with LIMIT 0 to extract column names without materializing data."""
     columns = con.sql(f"SELECT * FROM ({user_sql}) LIMIT 0").columns
@@ -103,6 +110,20 @@ def register_hex_tiles(
     if not output_uri.startswith("s3://"):
         os.makedirs(output_uri, exist_ok=True)
     con.sql(pyramid_sql)
+
+    # Write a sidecar metadata.json so the tile handler knows finest_res / zoom_offset.
+    metadata = {
+        "finest_res": finest_res,
+        "min_res": min_res,
+        "agg": agg,
+        "zoom_offset": zoom_offset,
+        "value_columns": value_columns,
+    }
+    metadata_sql = (
+        f"COPY (SELECT '{_json_dumps_escaped(metadata)}' AS j) "
+        f"TO '{output_uri}metadata.json' (FORMAT CSV, HEADER false, QUOTE '')"
+    )
+    con.sql(metadata_sql)
 
     # Bounds of finest-level cells (approximate via simple min/max on cell centers).
     finest_uri = f"{output_uri}res={finest_res}/*.parquet"

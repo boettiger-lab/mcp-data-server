@@ -76,3 +76,28 @@ class TestServeTile:
         client = TestClient(app_with_tiles)
         r = client.get(f"/tiles/bogus/{registered_ca}/5/5/12.pbf")
         assert r.status_code == 404
+
+
+class TestMetadataDriven:
+    def test_endpoint_reads_finest_res_from_metadata(self, app_with_tiles, local_bucket):
+        """After registering with finest_res=4, a tile request should use res=4 max."""
+        con = app_with_tiles.state.tile_con
+        user_sql = """
+            SELECT h3_latlng_to_cell(37.8, -122.3, 4) AS h4, 1.0 AS val
+        """
+        result = register_hex_tiles(
+            con=con, sql=user_sql, finest_res=4, min_res=2, agg="AVG", zoom_offset=4,
+        )
+        client = TestClient(app_with_tiles)
+        # At z=20 with zoom_offset=4 → target_res=16, clamped to finest_res=4.
+        # Tile over (37.8, -122.3) at z=20 covers one r4 hex or so. Main assertion:
+        # request succeeds (not 404 from "no pyramid at res=16").
+        # Compute approximate tile (x,y) at z=20 for (37.8, -122.3):
+        import math
+        lat_rad = math.radians(37.8)
+        z = 20
+        n = 2 ** z
+        x = int((-122.3 + 180) / 360 * n)
+        y = int((1 - math.log(math.tan(lat_rad) + 1/math.cos(lat_rad)) / math.pi) / 2 * n)
+        r = client.get(f"/tiles/hex/{result['hash']}/{z}/{x}/{y}.pbf")
+        assert r.status_code in (200, 204)  # not 404

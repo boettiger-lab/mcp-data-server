@@ -8,6 +8,7 @@ Verified DuckDB signatures (from Task 1 probe, commit 0ff46e8):
 - h3_cell_to_boundary_wkt(cell) -> VARCHAR
 - ST_Transform requires always_xy=true (4th arg) for EPSG:4326→EPSG:3857
 """
+import json
 import math
 import os
 import sys
@@ -40,15 +41,27 @@ def _tileset_dir(namespace: str, name: str) -> str:
     return f"{_bucket_base()}/{namespace}/{name}"
 
 
-def _pyramid_exists(con, namespace: str, name: str, res: int) -> bool:
-    """Check whether the pyramid partition for (namespace, name, res) is readable."""
-    uri = f"{_tileset_dir(namespace, name)}/res={res}/*.parquet"
+def _read_metadata(namespace: str, name: str):
+    """Read the metadata.json sidecar for a tileset. Returns None if missing."""
+    uri = f"{_tileset_dir(namespace, name)}/metadata.json"
     try:
-        cur = con.cursor()
-        cur.sql(f"SELECT 1 FROM read_parquet('{uri}') LIMIT 1").fetchone()
-        return True
+        # Local path shortcut for tests (no need for an extra DuckDB connection).
+        if not uri.startswith("s3://") and not uri.startswith("http"):
+            with open(uri, "r") as f:
+                return json.loads(f.read().strip())
+        # For S3, use a one-off DuckDB connection to read via httpfs.
+        import duckdb
+        c = duckdb.connect(":memory:")
+        c.sql("INSTALL httpfs; LOAD httpfs")
+        row = c.sql(f"SELECT content FROM read_text('{uri}')").fetchone()
+        c.close()
+        if row is None:
+            return None
+        return json.loads(row[0])
+    except FileNotFoundError:
+        return None
     except Exception:
-        return False
+        return None
 
 
 def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
@@ -121,20 +134,13 @@ async def serve_tile(request: Request) -> Response:
 
     con = request.app.state.tile_con
 
-    # Probe whether the tileset exists at any res — use finest since it's always present.
-    # We don't know finest_res at tile-serving time without metadata; try a few.
-    # Convention: we accept whatever res in [2..15] has data.
-    target_res = None
-    for guess_finest in range(15, 1, -1):
-        if await anyio.to_thread.run_sync(_pyramid_exists, con, namespace, name, guess_finest):
-            finest_res = guess_finest
-            # (Floor of) zoom_to_h3_res with default zoom_offset=4 and min_res=2.
-            # In v1 we don't persist zoom_offset/min_res per-tileset — caller's registered
-            # URL captures the content hash, so clients get stable tiles. Use defaults.
-            target_res = zoom_to_h3_res(z, min_res=2, finest_res=finest_res, zoom_offset=4)
-            break
-    if target_res is None:
+    meta = await anyio.to_thread.run_sync(_read_metadata, namespace, name)
+    if meta is None:
         return Response(status_code=404)
+    finest_res = meta["finest_res"]
+    min_res = meta["min_res"]
+    zoom_offset = meta["zoom_offset"]
+    target_res = zoom_to_h3_res(z, min_res=min_res, finest_res=finest_res, zoom_offset=zoom_offset)
 
     sql = _build_tile_sql(namespace, name, z, x, y, target_res, finest_res)
     try:
