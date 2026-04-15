@@ -77,3 +77,77 @@ class TestBuildPyramidSQL:
         )
         # Only the finest level — no UNION ALL.
         assert "UNION ALL" not in sql
+
+
+import os
+import duckdb
+from pathlib import Path
+from tiles.pyramid import register_hex_tiles
+
+
+@pytest.fixture
+def local_bucket(tmp_path, monkeypatch):
+    """Point TILE_BUCKET_BASE at a local directory so no S3 is required."""
+    bucket = tmp_path / "tiles-bucket"
+    bucket.mkdir()
+    monkeypatch.setenv("TILE_BUCKET_BASE", str(bucket))
+    monkeypatch.setenv("MCP_PUBLIC_BASE_URL", "http://test.local")
+    return bucket
+
+
+@pytest.fixture
+def h3_conn():
+    con = duckdb.connect(":memory:")
+    con.sql("INSTALL h3 FROM community; LOAD h3")
+    con.sql("INSTALL spatial; LOAD spatial")
+    con.sql("INSTALL httpfs; LOAD httpfs")
+    yield con
+    con.close()
+
+
+class TestRegisterHexTiles:
+    def test_writes_pyramid_partitions(self, local_bucket, h3_conn):
+        # Source: 5 cells at r5 around a point.
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5, val
+            FROM (VALUES (37.8, -122.3, 1.0),
+                         (37.9, -122.4, 2.0),
+                         (38.0, -122.5, 3.0),
+                         (38.1, -122.6, 4.0),
+                         (38.2, -122.7, 5.0)) t(lat, lng, val)
+        """
+        result = register_hex_tiles(
+            con=h3_conn,
+            sql=user_sql,
+            finest_res=5,
+            min_res=2,
+            agg="AVG",
+            zoom_offset=4,
+        )
+        assert "hash" in result
+        # Partitioned files written: res=2 through res=5.
+        for res in (2, 3, 4, 5):
+            partition = local_bucket / "hex" / result["hash"] / f"res={res}"
+            assert partition.exists(), f"Missing res={res}"
+            assert any(partition.iterdir()), f"Empty res={res}"
+
+    def test_tile_url_template_uses_public_base(self, local_bucket, h3_conn):
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4,
+        )
+        assert result["tile_url_template"].startswith("http://test.local/tiles/hex/")
+        assert result["tile_url_template"].endswith("/{z}/{x}/{y}.pbf")
+
+    def test_returns_value_columns(self, local_bucket, h3_conn):
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS v1, 2.0 AS v2"
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4,
+        )
+        assert result["value_columns"] == ["v1", "v2"]
+
+    def test_identical_inputs_same_hash(self, local_bucket, h3_conn):
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        r1 = register_hex_tiles(con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4)
+        r2 = register_hex_tiles(con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4)
+        assert r1["hash"] == r2["hash"]
