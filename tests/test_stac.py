@@ -425,16 +425,18 @@ class TestCollectionToDict:
 
     def test_nav_links_excluded(self):
         col = self._make_collection()
+        nav_links = []
         for rel in ("root", "parent", "self", "child", "item"):
             lnk = MagicMock()
             lnk.rel = rel
             lnk.href = f"https://example.com/{rel}"
             lnk.title = None
+            nav_links.append(lnk)
         doc_link = MagicMock()
         doc_link.rel = "documentation"
         doc_link.href = "https://docs.example.com"
         doc_link.title = "Docs"
-        col.links = [doc_link]
+        col.links = nav_links + [doc_link]
         result = _collection_to_dict(col)
         assert any(lnk["rel"] == "documentation" for lnk in result["links"])
         for lnk in result["links"]:

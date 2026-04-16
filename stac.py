@@ -26,6 +26,9 @@ _S3_INTERNAL = (
     os.environ.get("S3_ENDPOINT_URL", "http://rook-ceph-rgw-nautiluss3.rook").rstrip("/") + "/"
 )
 
+# Navigational STAC link rel types excluded from _collection_to_dict output.
+_NAV_RELS = {"root", "parent", "self", "child", "item"}
+
 
 class _TimeoutStacIO(DefaultStacIO):
     def __init__(self, token: str = None):
@@ -195,7 +198,6 @@ def _collection_to_dict(col, sub_children=None) -> dict:
     }
 
     # External links (exclude navigational rel types)
-    _NAV_RELS = {"root", "parent", "self", "child", "item"}
     result["links"] = [
         {k: v for k, v in {
             "rel": lnk.rel,
@@ -248,7 +250,6 @@ _STAC_RAW: dict[str, dict] = {}
 
 def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> dict[str, str]:
     """Fetch the STAC catalog and return {collection_id: markdown_summary}."""
-    global _STAC_RAW
     url = catalog_url or STAC_CATALOG_URL
     try:
         stac_io = _TimeoutStacIO(token=catalog_token)
@@ -420,9 +421,10 @@ def get_collection(collection_id: str, catalog_url: str = None, catalog_token: s
         if collection_id.lower() in key.lower():
             return val
 
-    # Cache miss (default catalog only): re-fetch
+    # Cache miss (default catalog only): re-fetch.
+    # fetch_stac_catalog() calls _STAC_RAW.update(raw) when catalog_url is None.
     if not catalog_url:
-        fetch_stac_catalog()  # repopulates _STAC_RAW as side effect
+        fetch_stac_catalog()
         if collection_id in _STAC_RAW:
             return _STAC_RAW[collection_id]
         for key, val in _STAC_RAW.items():
