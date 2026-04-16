@@ -171,3 +171,34 @@ COPY (SELECT ...) TO 's3://public-output/unique-file-name.csv' (FORMAT CSV, HEAD
 Then tell the user the *public https* address (note the use of the public, not private endpoint): it should have the format like: `https://s3-west.nrp-nautilus.io/public-output/unique-file-name.csv` (adjust `unique-file-name.csv` part appropriately.)
 
 **Note:** s3://public-output has a 30-day expiration and 1 Gb object size limit. CORS headers will permit files to be placed here and rendered by other tools.
+
+## Rendering hex results as a map layer
+
+For hex result sets too large to display as a table (roughly >100k cells), or
+whenever the user wants to visualize hexes directly on the map, use the
+`register_hex_tiles` MCP tool instead of returning markdown.
+
+**When to use:**
+- User asks to *show*, *render*, *visualize*, or *color* hexes on the map
+- Result set would exceed the 50-row `query` cap with meaningful content
+- The answer is "per-hex values across a region" rather than "top N rows"
+
+**How to use:**
+1. Write your analysis SQL that returns `(h3_index, value1, value2, ...)` — first
+   column must be the H3 index at your chosen resolution.
+2. Call `register_hex_tiles(sql=..., finest_res=N)` with the resolution of that
+   index column.
+3. Return the `tile_url_template` to the client. Any MapLibre-compatible client
+   (including geo-agent) will render it natively as a vector source.
+
+Example SQL shape for the `sql` parameter:
+
+    SELECT h3_latlng_to_cell(lat, lng, 8) AS h8,
+           AVG(carbon_density) AS carbon
+    FROM read_parquet('s3://public-cng/.../carbon_r8.parquet')
+    WHERE <region filter>
+    GROUP BY 1
+
+The tool handles pyramiding (coarser hexes at lower zooms) and partitioned
+parquet storage automatically. Repeat calls with identical inputs return the
+same URL — natural caching.
