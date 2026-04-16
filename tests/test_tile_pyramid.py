@@ -44,8 +44,8 @@ class TestBuildPyramidSQL:
             h3_column="h8",
             output_uri="s3://public-output/hex/abc/",
         )
-        # Parent selects use SUM(val)
-        assert "SUM(val)" in sql
+        # Parent selects use SUM("val") — column names are quoted
+        assert 'SUM("val")' in sql
 
     def test_partitions_by_res(self):
         sql = build_pyramid_sql(
@@ -65,8 +65,8 @@ class TestBuildPyramidSQL:
             value_columns=["v1", "v2"], h3_column="h8",
             output_uri="s3://public-output/hex/abc/",
         )
-        assert "AVG(v1)" in sql
-        assert "AVG(v2)" in sql
+        assert 'AVG("v1")' in sql
+        assert 'AVG("v2")' in sql
 
     def test_min_res_equals_finest_res_single_level(self):
         sql = build_pyramid_sql(

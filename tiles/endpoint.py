@@ -41,20 +41,20 @@ def _tileset_dir(namespace: str, name: str) -> str:
     return f"{_bucket_base()}/{namespace}/{name}"
 
 
-def _read_metadata(namespace: str, name: str):
-    """Read the metadata.json sidecar for a tileset. Returns None if missing."""
+def _read_metadata(con, namespace: str, name: str):
+    """Read the metadata.json sidecar for a tileset using an existing connection.
+
+    Uses the persistent tile_con (already has httpfs loaded) rather than
+    opening a new DuckDB connection per request.
+    Returns None if the sidecar is missing or unreadable.
+    """
     uri = f"{_tileset_dir(namespace, name)}/metadata.json"
     try:
-        # Local path shortcut for tests (no need for an extra DuckDB connection).
+        # Local path shortcut for tests.
         if not uri.startswith("s3://") and not uri.startswith("http"):
             with open(uri, "r") as f:
                 return json.loads(f.read().strip())
-        # For S3, use a one-off DuckDB connection to read via httpfs.
-        import duckdb
-        c = duckdb.connect(":memory:")
-        c.sql("INSTALL httpfs; LOAD httpfs")
-        row = c.sql(f"SELECT content FROM read_text('{uri}')").fetchone()
-        c.close()
+        row = con.cursor().sql(f"SELECT content FROM read_text('{uri}')").fetchone()
         if row is None:
             return None
         return json.loads(row[0])
@@ -62,6 +62,26 @@ def _read_metadata(namespace: str, name: str):
         return None
     except Exception:
         return None
+
+
+def _get_cached_metadata(app_state, con, namespace: str, name: str):
+    """Return metadata for a tileset, caching it on app.state after first read.
+
+    Metadata never changes after registration, so one read per server lifetime
+    is sufficient.
+    """
+    cache_attr = "_tile_meta_cache"
+    cache = getattr(app_state, cache_attr, None)
+    if cache is None:
+        cache = {}
+        setattr(app_state, cache_attr, cache)
+    key = f"{namespace}/{name}"
+    if key not in cache:
+        meta = _read_metadata(con, namespace, name)
+        if meta is not None:
+            cache[key] = meta
+        return meta
+    return cache[key]
 
 
 def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
@@ -134,7 +154,9 @@ async def serve_tile(request: Request) -> Response:
 
     con = request.app.state.tile_con
 
-    meta = await anyio.to_thread.run_sync(_read_metadata, namespace, name)
+    meta = await anyio.to_thread.run_sync(
+        _get_cached_metadata, request.app.state, con, namespace, name
+    )
     if meta is None:
         return Response(status_code=404)
     finest_res = meta["finest_res"]

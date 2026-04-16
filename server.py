@@ -195,7 +195,6 @@ mcp.tool()(query)
 # -------------------------------------------------------------------------
 # 8b. TILE ENDPOINT — dynamic MVT for H3 hex visualization (see issue #4)
 # -------------------------------------------------------------------------
-from starlette.routing import Route
 from tiles.endpoint import serve_tile
 from tiles.db import build_tile_connection
 from tiles.pyramid import register_hex_tiles as _register_hex_tiles
@@ -252,9 +251,7 @@ def mount_tiles(app):
     # Pre-initialize the connection so first tile request is fast.
     con = _get_tile_con()
     app.state.tile_con = con
-    app.router.routes.append(
-        Route("/tiles/{namespace}/{name}/{z:int}/{x:int}/{y:int}.pbf", serve_tile)
-    )
+    app.add_route("/tiles/{namespace}/{name}/{z:int}/{x:int}/{y:int}.pbf", serve_tile)
 
 # -------------------------------------------------------------------------
 # 9. OPTIONAL BEARER TOKEN AUTH

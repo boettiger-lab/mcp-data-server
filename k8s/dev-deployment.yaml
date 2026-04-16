@@ -1,25 +1,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: duckdb-mcp
+  name: dev-duckdb-mcp
   namespace: biodiversity
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
-      app: duckdb-mcp
+      app: dev-duckdb-mcp
   template:
     metadata:
       labels:
-        app: duckdb-mcp
+        app: dev-duckdb-mcp
     spec:
-#      nodeSelector:
-#        kubernetes.io/hostname: stratus1.nrp-espm.berkeley.edu
-#      tolerations:
-#      - key: "nautilus.io/issue"
-#        operator: "Equal"
-#        value: "1476"
-#        effect: "NoSchedule"    
       containers:
       - name: server
         image: astral/uv:python3.12-bookworm-slim
@@ -27,17 +20,19 @@ spec:
         args:
           - |
             apt-get update && apt-get install -y git && \
-            git clone https://github.com/boettiger-lab/mcp-data-server.git /app && \
+            git clone --branch dev https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
             uv run --with "mcp" --with "duckdb" --with pandas --with uvicorn --with tabulate --with pystac --with requests server.py
         env:
         - name: STAC_CATALOG_URL
           value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
-        resources:   
+        - name: MCP_PUBLIC_BASE_URL
+          value: "https://dev-duckdb-mcp.nrp-nautilus.io"
+        resources:
           requests:
             memory: 16Gi
             cpu: 1
-          limits: 
+          limits:
             memory: 160Gi
             cpu: 16
         ports:
@@ -45,7 +40,6 @@ spec:
         readinessProbe:
           tcpSocket:
             port: 8000
-          initialDelaySeconds: 15  # Give 'uv' time to install deps
+          initialDelaySeconds: 15
           periodSeconds: 5
           failureThreshold: 5
-
