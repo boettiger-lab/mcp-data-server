@@ -17,6 +17,7 @@ export default {
           { text: 'Quick Start', link: '/guide/quickstart' },
           { text: 'Available Datasets', link: '/guide/datasets' },
           { text: 'Private Data Access', link: '/guide/private-data' },
+          { text: 'Programmatic Access (R & Python)', link: '/guide/programmatic-access' },
         ],
       },
       {
