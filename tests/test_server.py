@@ -160,22 +160,22 @@ class TestResourceFunctions:
         result = browse_stac_catalog()
         assert isinstance(result, str)
     
-    def test_get_dataset_details_found(self):
+    def test_get_stac_details_found(self):
         """Test getting details for an existing dataset."""
-        from server import get_dataset_details, DATA_CATALOG
-        
+        from server import get_stac_details, DATA_CATALOG
+
         if DATA_CATALOG:
             # Get first valid key that's not _intro
             test_key = next((k for k in DATA_CATALOG.keys() if k != "_intro"), None)
             if test_key:
-                result = get_dataset_details(test_key)
+                result = get_stac_details(test_key)
                 assert isinstance(result, str)
                 assert len(result) > 0
-    
-    def test_get_dataset_details_not_found(self):
+
+    def test_get_stac_details_not_found(self):
         """Test getting details for non-existent dataset."""
-        from server import get_dataset_details
-        result = get_dataset_details("nonexistent_dataset_xyz")
+        from server import get_stac_details
+        result = get_stac_details("nonexistent_dataset_xyz")
         assert "not found" in result.lower()
 
 
@@ -273,6 +273,26 @@ class TestS3Credentials:
         captured = capsys.readouterr()
         assert "MY_KEY_ID" not in captured.err
         assert "MY_SECRET_VALUE" not in captured.err
+
+
+class TestTileRouteMounted:
+    def test_tile_route_exists_in_starlette_app(self):
+        """After importing server, the streamable_http_app should have a /tiles route."""
+        from server import mcp
+        app = mcp.streamable_http_app()
+        # Also apply our own mount (mimicking the startup block).
+        from server import mount_tiles
+        mount_tiles(app)
+        paths = [getattr(r, "path", None) or getattr(r, "path_format", None) for r in app.routes]
+        assert any(p and "/tiles/" in p for p in paths)
+
+    def test_register_hex_tiles_is_an_mcp_tool(self):
+        """The MCP server should expose register_hex_tiles as a tool."""
+        from server import mcp
+        # FastMCP tracks tools on its internal registry; adapt to the API.
+        import anyio
+        tool_names = [t.name for t in anyio.run(mcp.list_tools)]
+        assert "register_hex_tiles" in tool_names
 
 
 if __name__ == "__main__":

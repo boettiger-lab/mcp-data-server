@@ -11,7 +11,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.session import BaseSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from stac import STAC_DATASETS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get
+from stac import STAC_DATASETS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection
 
 # Workaround for https://github.com/boettiger-lab/mcp-data-server/issues/5
 # send_notification crashes with ClosedResourceError when the client disconnects
@@ -135,13 +135,21 @@ def browse_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> s
 @mcp.tool()
 def get_stac_details(dataset_id: str, catalog_url: str = None, catalog_token: str = None) -> str:
     """Fetch metadata (parquet paths, column schemas) for any STAC collection by ID.
-    Use for datasets outside your pre-loaded app catalog — for datasets already in your app,
-    use the local get_dataset_details tool instead.
+    Returns markdown formatted for LLM consumption (use get_collection for structured JSON).
     Optionally provide catalog_url and catalog_token if using a private STAC catalog."""
     return _stac_get(dataset_id, catalog_url, catalog_token)
 
-def get_dataset_details(dataset_id: str) -> str:
-    return _stac_get(dataset_id)
+@mcp.tool()
+def get_collection(collection_id: str, catalog_url: str = None, catalog_token: str = None) -> dict:
+    """Return structured STAC collection metadata as JSON for programmatic use.
+
+    Unlike get_stac_details (markdown for LLM consumption), this returns the
+    raw collection dict with all assets (parquet, PMTiles, COG, GeoJSON),
+    per-asset STAC extension fields (table:columns, raster:bands, vector:layers),
+    full collection metadata, and child collection IDs. S3 paths are pre-resolved.
+
+    Intended for app code that builds map layers and system prompts programmatically."""
+    return _stac_get_collection(collection_id, catalog_url, catalog_token)
 
 # -------------------------------------------------------------------------
 # 7. MCP PROMPTS (Personas for Smart Clients)
@@ -193,6 +201,67 @@ Credentials are scoped to this request only and never persisted.
 mcp.tool()(query)
 
 # -------------------------------------------------------------------------
+# 8b. TILE ENDPOINT — dynamic MVT for H3 hex visualization (see issue #4)
+# -------------------------------------------------------------------------
+from tiles.endpoint import serve_tile
+from tiles.db import build_tile_connection
+from tiles.pyramid import register_hex_tiles as _register_hex_tiles
+
+
+# Module-level persistent connection. Initialized lazily at first use OR
+# at startup via the lifespan in mount_tiles().
+_tile_con = None
+
+
+def _get_tile_con():
+    global _tile_con
+    if _tile_con is None:
+        _tile_con = build_tile_connection()
+    return _tile_con
+
+
+def register_hex_tiles(
+    sql: str,
+    finest_res: int,
+    min_res: int = 2,
+    agg: str = "AVG",
+    zoom_offset: int = 4,
+) -> dict:
+    """Materialize a partitioned H3 hex pyramid to public object storage and return
+    a MapLibre-compatible vector tile URL template.
+
+    Use this tool for H3 hex datasets too large to return as markdown table —
+    roughly >100k cells, or any case where the user wants to visualize hexes
+    directly on the map (rather than color an existing polygon layer).
+
+    Input SQL contract: return (h3_index, value1, value2, ...) where the first
+    column is an H3 index at resolution `finest_res`, and subsequent columns
+    are numeric values. All value columns are aggregated by `agg` (AVG, SUM, MIN,
+    MAX, COUNT) at each coarser resolution down to `min_res`.
+
+    Returns a dict with `tile_url_template` that any MapLibre client can consume
+    via:
+        map.addSource(id, {type: 'vector', tiles: [tile_url_template], minzoom: 0, maxzoom: 14});
+        map.addLayer({..., 'source-layer': 'hex', paint: {...}});
+    """
+    con = _get_tile_con()
+    return _register_hex_tiles(
+        con=con, sql=sql, finest_res=finest_res, min_res=min_res,
+        agg=agg, zoom_offset=zoom_offset,
+    )
+
+
+mcp.tool()(register_hex_tiles)
+
+
+def mount_tiles(app):
+    """Mount the /tiles route onto the Starlette app and ensure tile con is ready."""
+    # Pre-initialize the connection so first tile request is fast.
+    con = _get_tile_con()
+    app.state.tile_con = con
+    app.add_route("/tiles/{namespace}/{name}/{z:int}/{x:int}/{y:int}.pbf", serve_tile)
+
+# -------------------------------------------------------------------------
 # 9. OPTIONAL BEARER TOKEN AUTH
 # -------------------------------------------------------------------------
 _MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "").strip()
@@ -211,6 +280,7 @@ class _BearerAuthMiddleware(BaseHTTPMiddleware):
 if __name__ == "__main__":
     app = mcp.streamable_http_app()
     app.router.redirect_slashes = False
+    mount_tiles(app)
 
     if _MCP_AUTH_TOKEN:
         app.add_middleware(_BearerAuthMiddleware)

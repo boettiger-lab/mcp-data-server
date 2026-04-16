@@ -26,6 +26,25 @@ _S3_INTERNAL = (
     os.environ.get("S3_ENDPOINT_URL", "http://rook-ceph-rgw-nautiluss3.rook").rstrip("/") + "/"
 )
 
+# Navigational STAC link rel types excluded from _collection_to_dict output.
+_NAV_RELS = {"root", "parent", "self", "child", "item"}
+
+
+def _fuzzy_lookup(mapping: dict, key: str):
+    """Look up *key* in *mapping*: exact → prefix → substring. Returns None if no match."""
+    if key in mapping:
+        return mapping[key]
+    low = key.lower()
+    # Prefix match (e.g. "census" matches "census-2024-state")
+    for k, v in mapping.items():
+        if k.lower().startswith(low):
+            return v
+    # Substring match
+    for k, v in mapping.items():
+        if low in k.lower():
+            return v
+    return None
+
 
 class _TimeoutStacIO(DefaultStacIO):
     def __init__(self, token: str = None):
@@ -157,6 +176,94 @@ def _format_collection(col, sub_children: list = None) -> str:
     return "\n".join(lines)
 
 
+def _collection_to_dict(col, sub_children=None) -> dict:
+    """Convert a pystac Collection to a structured dict for programmatic use.
+
+    All asset hrefs are converted from HTTPS to s3:// form.
+    Pass sub_children when already fetched to avoid extra network calls.
+    """
+    result: dict = {
+        "id": col.id,
+        "title": col.title,
+        "description": col.description,
+        "license": getattr(col, "license", None),
+        "keywords": list(getattr(col, "keywords", None) or []),
+    }
+
+    # Providers
+    result["providers"] = [
+        {k: v for k, v in {
+            "name": p.name,
+            "description": getattr(p, "description", None),
+            "roles": list(p.roles) if getattr(p, "roles", None) else None,
+            "url": getattr(p, "url", None),
+        }.items() if v is not None}
+        for p in (col.providers or [])
+    ]
+
+    # Extent
+    ext = col.extent
+    result["extent"] = {
+        "spatial": {"bbox": ext.spatial.bboxes if ext and ext.spatial else []},
+        "temporal": {
+            "interval": [
+                [dt.isoformat() if dt else None for dt in interval]
+                for interval in (ext.temporal.intervals if ext and ext.temporal else [])
+            ]
+        },
+    }
+
+    # External links (exclude navigational rel types)
+    result["links"] = [
+        {k: v for k, v in {
+            "rel": lnk.rel,
+            "href": lnk.href,
+            "title": getattr(lnk, "title", None),
+        }.items() if v is not None}
+        for lnk in (col.links or [])
+        if lnk.rel not in _NAV_RELS
+    ]
+
+    # Summaries
+    if col.summaries:
+        try:
+            result["summaries"] = col.summaries.to_dict()
+        except Exception:
+            result["summaries"] = {}
+    else:
+        result["summaries"] = {}
+
+    # All assets — every media type, with S3 path conversion
+    assets = {}
+    for asset_id, asset in (col.assets or {}).items():
+        a: dict = {
+            "href": _href_to_s3(asset.href),
+            "type": asset.media_type,
+            "title": asset.title,
+            "description": asset.description,
+        }
+        # Merge extra_fields (table:columns, raster:bands, vector:layers, file:size, …)
+        a.update(asset.extra_fields)
+        assets[asset_id] = {k: v for k, v in a.items() if v is not None}
+    result["assets"] = assets
+
+    # Collection-level STAC extension fields
+    for ext_key in ("table:columns", "vector:layers", "raster:bands"):
+        val = col.extra_fields.get(ext_key)
+        if val is not None:
+            result[ext_key] = val
+
+    # Child collection IDs — only populated when sub_children are provided
+    if sub_children is not None:
+        result["children"] = [sc.id for sc in sub_children]
+
+    return {k: v for k, v in result.items() if v is not None}
+
+
+# Parallel cache of structured dicts, populated alongside STAC_DATASETS at startup.
+_STAC_RAW: dict[str, dict] = {}
+
+
 def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> dict[str, str]:
     """Fetch the STAC catalog and return {collection_id: markdown_summary}."""
     url = catalog_url or STAC_CATALOG_URL
@@ -164,13 +271,19 @@ def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> di
         stac_io = _TimeoutStacIO(token=catalog_token)
         cat = pystac.Catalog.from_file(url, stac_io=stac_io)
         datasets = {}
+        raw: dict[str, dict] = {}
         for child in cat.get_children():
             sub_children = list(child.get_children())
             datasets[child.id] = _format_collection(child, sub_children=sub_children)
-            # Index child collections so get_dataset works with child IDs
+            raw[child.id] = _collection_to_dict(child, sub_children=sub_children)
+            # Index child collections so get_dataset / get_collection work with child IDs
             for sub_child in sub_children:
                 datasets[sub_child.id] = _format_collection(sub_child)
+                raw[sub_child.id] = _collection_to_dict(sub_child)
         print(f"📂 Loaded {len(datasets)} collections from STAC: {url}", file=sys.stderr)
+        # Update module-level structured cache only for the default catalog
+        if not catalog_url:
+            _STAC_RAW.update(raw)
         return datasets
     except Exception as e:
         print(f"⚠️ Failed to load STAC catalog: {e}", file=sys.stderr)
@@ -268,20 +381,81 @@ def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = N
         datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
     else:
         datasets = STAC_DATASETS
-    if dataset_id in datasets:
-        return datasets[dataset_id]
-    # Fuzzy match
-    for key, val in datasets.items():
-        if dataset_id.lower() in key.lower():
-            return val
+
+    result = _fuzzy_lookup(datasets, dataset_id)
+    if result is not None:
+        return result
+
     # Cache miss (default catalog only): re-fetch in case datasets were added since startup
     if not catalog_url:
         refreshed = fetch_stac_catalog()
         if refreshed:
             STAC_DATASETS.update(refreshed)
-            if dataset_id in STAC_DATASETS:
-                return STAC_DATASETS[dataset_id]
-            for key, val in STAC_DATASETS.items():
-                if dataset_id.lower() in key.lower():
-                    return val
+            result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
+            if result is not None:
+                return result
     return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
+
+
+def get_collection(collection_id: str, catalog_url: str = None, catalog_token: str = None) -> dict:
+    """Return structured STAC collection metadata for programmatic use.
+
+    Unlike get_stac_details (which returns markdown for LLM consumption),
+    this returns the raw collection dict with:
+    - All assets (parquet, PMTiles, COG, GeoJSON) with hrefs converted to s3://
+    - Per-asset STAC extension fields (table:columns, raster:bands, vector:layers)
+    - Full collection metadata (providers, extent, license, keywords, links)
+    - Child collection IDs for parent containers
+
+    Intended for app code (e.g. geo-agent) that builds map layers and system
+    prompts programmatically from structured data.
+    """
+    if catalog_url:
+        # On-demand fetch for non-default catalogs — avoid full-catalog iteration.
+        stac_io = _TimeoutStacIO(token=catalog_token)
+        try:
+            cat = pystac.Catalog.from_file(catalog_url, stac_io=stac_io)
+            # Direct top-level lookup (stops at first match).
+            child = cat.get_child(collection_id)
+            if child is not None:
+                sub_children = list(child.get_children())
+                return _collection_to_dict(child, sub_children=sub_children)
+            # Not top-level — scan lazily for sub-children and fuzzy matches.
+            low = collection_id.lower()
+            prefix_hit = None
+            substring_hit = None
+            for top in cat.get_children():
+                sub_children = list(top.get_children())
+                for sc in sub_children:
+                    if sc.id == collection_id:
+                        return _collection_to_dict(sc)
+                # Track best fuzzy match while iterating
+                for candidate_id, candidate in [(top.id, top)] + [(sc.id, sc) for sc in sub_children]:
+                    cl = candidate_id.lower()
+                    if prefix_hit is None and cl.startswith(low):
+                        sc_children = sub_children if candidate is top else []
+                        prefix_hit = _collection_to_dict(candidate, sub_children=sc_children or None)
+                    elif substring_hit is None and low in cl:
+                        sc_children = sub_children if candidate is top else []
+                        substring_hit = _collection_to_dict(candidate, sub_children=sc_children or None)
+            if prefix_hit is not None:
+                return prefix_hit
+            if substring_hit is not None:
+                return substring_hit
+        except Exception as e:
+            return {"error": f"Failed to fetch catalog: {e}"}
+        return {"error": f"Collection '{collection_id}' not found. Use browse_stac_catalog to list available collections."}
+
+    # Default catalog: look up from pre-populated cache.
+    result = _fuzzy_lookup(_STAC_RAW, collection_id)
+    if result is not None:
+        return result
+
+    # Cache miss: re-fetch.
+    # fetch_stac_catalog() updates _STAC_RAW when catalog_url is None.
+    fetch_stac_catalog()
+    result = _fuzzy_lookup(_STAC_RAW, collection_id)
+    if result is not None:
+        return result
+
+    return {"error": f"Collection '{collection_id}' not found. Use browse_stac_catalog to list available collections."}
