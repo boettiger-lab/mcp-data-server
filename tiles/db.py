@@ -8,7 +8,7 @@ import duckdb
 
 
 def build_tile_connection() -> duckdb.DuckDBPyConnection:
-    """Create a :memory: connection with extensions loaded.
+    """Create a :memory: connection with extensions loaded and S3 configured.
 
     Extensions are assumed to be pre-installed in the image (see mcp-data-server#54);
     LOAD is per-session and always required.
@@ -18,4 +18,17 @@ def build_tile_connection() -> duckdb.DuckDBPyConnection:
     con.sql("INSTALL httpfs; LOAD httpfs")
     con.sql("INSTALL spatial; LOAD spatial")
     con.sql("INSTALL h3 FROM community; LOAD h3")
+
+    # Performance tuning — match the query tool settings.
+    con.sql("SET THREADS=100")
+    con.sql("SET preserve_insertion_order=false")
+    con.sql("SET enable_object_cache=true")
+    con.sql("SET temp_directory='/tmp'")
+
+    # S3 access: use the cluster-internal Ceph endpoint (same as query tool).
+    con.sql(
+        "CREATE OR REPLACE SECRET s3 ("
+        "TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', "
+        "URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '')"
+    )
     return con
