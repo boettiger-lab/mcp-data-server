@@ -21,7 +21,7 @@ Small spatial operations on a **single already-retrieved geometry** are fine —
 
 - Always report **areas** (km², acres, etc.), never raw hex counts
 - Use `APPROX_COUNT_DISTINCT(hN)` when counting hexes — avoids double-counting
-- **Never SUM area columns** (ACRES, GIS_Acres, area_ha, etc.) on hex data. These store the source polygon's total area repeated on every hex row. `SUM(ACRES)` = polygon_area × num_hex_cells — wrong by 10³–10⁶×. Always compute area from hex cells instead.
+- **Never SUM area columns** (ACRES, GIS_Acres, area_ha, etc.) on hex data. These store the source polygon's total area repeated on every hex row. `SUM(ACRES)` = polygon_area × num_hex_cells — wrong by 10³–10⁶×. Always compute area from hex cells instead. Note: `DISTINCT` deduplication removes duplicate rows for the same feature but does not resolve overlapping features — two features covering the same ground still sum their acreages independently. `APPROX_COUNT_DISTINCT(hN) * area_per_cell` is the only method immune to this, since it counts physical cells rather than feature declarations.
 
 ## Area Conversion
 
