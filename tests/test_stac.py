@@ -6,7 +6,7 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from stac import fetch_stac_collections, DATA_CATALOG, list_datasets, get_dataset, fetch_stac_catalog, get_collection, _collection_to_dict
+from stac import fetch_stac_collections, DATA_CATALOG, list_datasets, get_dataset, fetch_stac_catalog, get_collection, _collection_to_dict, _fuzzy_lookup
 
 
 class TestSTACCatalogParser:
@@ -447,6 +447,17 @@ class TestCollectionToDict:
         result = _collection_to_dict(col)
         assert result["assets"] == {}
 
+    def test_none_values_stripped_from_top_level(self):
+        col = self._make_collection()
+        col.license = None
+        col.description = None
+        result = _collection_to_dict(col)
+        assert "license" not in result
+        assert "description" not in result
+        # Non-None fields still present
+        assert "id" in result
+        assert "assets" in result
+
     def test_extent_iso_format(self):
         col = self._make_collection()
         result = _collection_to_dict(col)
@@ -458,13 +469,13 @@ class TestCollectionToDict:
 class TestGetCollection:
     """Tests for the get_collection function."""
 
-    def _make_mock_catalog(self):
-        mock_catalog = MagicMock()
+    def _make_minimal_col(self, col_id, title="", description="", license=None):
+        """Helper to build a minimal mock pystac Collection."""
         col = MagicMock()
-        col.id = "custom-col"
-        col.title = "Custom Collection"
-        col.description = "For testing"
-        col.license = "ODbL"
+        col.id = col_id
+        col.title = title
+        col.description = description
+        col.license = license
         col.keywords = []
         col.providers = []
         col.links = []
@@ -476,6 +487,13 @@ class TestGetCollection:
         extent = MagicMock(); extent.spatial = spatial; extent.temporal = temporal
         col.extent = extent
         col.get_children.return_value = []
+        return col
+
+    def _make_mock_catalog(self):
+        col = self._make_minimal_col("custom-col", title="Custom Collection",
+                                     description="For testing", license="ODbL")
+        mock_catalog = MagicMock()
+        mock_catalog.get_child.return_value = col
         mock_catalog.get_children.return_value = [col]
         return mock_catalog
 
@@ -487,7 +505,9 @@ class TestGetCollection:
         assert result["id"] == "custom-col"
 
     def test_not_found_returns_error_dict(self):
-        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()):
+        mock_catalog = self._make_mock_catalog()
+        mock_catalog.get_child.return_value = None  # direct lookup fails
+        with patch('stac.pystac.Catalog.from_file', return_value=mock_catalog):
             result = get_collection("nonexistent",
                                     catalog_url="https://example.com/catalog.json")
         assert "error" in result
@@ -500,37 +520,109 @@ class TestGetCollection:
         assert "timeout" in result["error"]
 
     def test_children_exposed_for_parent(self):
-        mock_catalog = MagicMock()
-        parent = MagicMock()
-        parent.id = "parent-col"
-        parent.title = "Parent"
-        parent.description = ""
-        parent.license = None
-        parent.keywords = []
-        parent.providers = []
-        parent.links = []
-        parent.summaries = None
-        parent.extra_fields = {}
-        parent.assets = {}
-        spatial = MagicMock(); spatial.bboxes = []
-        temporal = MagicMock(); temporal.intervals = []
-        extent = MagicMock(); extent.spatial = spatial; extent.temporal = temporal
-        parent.extent = extent
-
-        child = MagicMock(); child.id = "child-col"
-        child.title = "Child"; child.description = ""
-        child.license = None; child.keywords = []; child.providers = []
-        child.links = []; child.summaries = None; child.extra_fields = {}
-        child.assets = {}; child.extent = extent
-        child.get_children.return_value = []
-
+        child = self._make_minimal_col("child-col", title="Child")
+        parent = self._make_minimal_col("parent-col", title="Parent")
         parent.get_children.return_value = [child]
+
+        mock_catalog = MagicMock()
+        mock_catalog.get_child.return_value = parent
         mock_catalog.get_children.return_value = [parent]
 
         with patch('stac.pystac.Catalog.from_file', return_value=mock_catalog):
             result = get_collection("parent-col",
                                     catalog_url="https://example.com/catalog.json")
         assert result["children"] == ["child-col"]
+
+    def test_finds_sub_child_by_exact_id(self):
+        """get_collection finds a sub-child without iterating the whole catalog."""
+        child = self._make_minimal_col("sub-dataset", title="Sub Dataset")
+        parent = self._make_minimal_col("parent-col", title="Parent")
+        parent.get_children.return_value = [child]
+
+        mock_catalog = MagicMock()
+        mock_catalog.get_child.return_value = None  # not top-level
+        mock_catalog.get_children.return_value = [parent]
+
+        with patch('stac.pystac.Catalog.from_file', return_value=mock_catalog):
+            result = get_collection("sub-dataset",
+                                    catalog_url="https://example.com/catalog.json")
+        assert result["id"] == "sub-dataset"
+
+    def test_fuzzy_prefix_match(self):
+        """Prefix match: 'custom' finds 'custom-col'."""
+        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()) as m:
+            m.return_value.get_child.return_value = None  # no exact match for 'custom'
+            result = get_collection("custom",
+                                    catalog_url="https://example.com/catalog.json")
+        assert result["id"] == "custom-col"
+
+    def test_fuzzy_substring_match(self):
+        """Substring match: 'stom' finds 'custom-col'."""
+        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()) as m:
+            m.return_value.get_child.return_value = None
+            result = get_collection("stom",
+                                    catalog_url="https://example.com/catalog.json")
+        assert result["id"] == "custom-col"
+
+
+class TestFuzzyLookup:
+    """Tests for the _fuzzy_lookup helper."""
+
+    def test_exact_match(self):
+        assert _fuzzy_lookup({"a": 1, "ab": 2}, "a") == 1
+
+    def test_prefix_match(self):
+        assert _fuzzy_lookup({"census-2024-state": 1, "wdpa": 2}, "census") == 1
+
+    def test_substring_match(self):
+        assert _fuzzy_lookup({"us-census": 1}, "census") == 1
+
+    def test_exact_preferred_over_prefix(self):
+        m = {"census": "exact", "census-2024": "prefix"}
+        assert _fuzzy_lookup(m, "census") == "exact"
+
+    def test_prefix_preferred_over_substring(self):
+        m = {"us-census": "substring", "census-2024": "prefix"}
+        assert _fuzzy_lookup(m, "census") == "prefix"
+
+    def test_no_match_returns_none(self):
+        assert _fuzzy_lookup({"a": 1}, "z") is None
+
+
+class TestGetCollectionDefaultCatalog:
+    """Tests for get_collection against the default (cached) catalog."""
+
+    def test_cache_miss_triggers_refetch(self):
+        """When ID is not in _STAC_RAW, get_collection re-fetches and finds it."""
+        import stac
+        original_raw = dict(stac._STAC_RAW)
+        try:
+            stac._STAC_RAW.clear()
+            fake_entry = {"id": "new-col", "title": "New"}
+            with patch('stac.fetch_stac_catalog') as mock_fetch:
+                def side_effect(*a, **kw):
+                    stac._STAC_RAW["new-col"] = fake_entry
+                    return {}
+                mock_fetch.side_effect = side_effect
+                result = get_collection("new-col")
+            assert result["id"] == "new-col"
+            mock_fetch.assert_called_once()
+        finally:
+            stac._STAC_RAW.clear()
+            stac._STAC_RAW.update(original_raw)
+
+    def test_fuzzy_match_on_default_catalog(self):
+        """Fuzzy lookup works against the pre-populated _STAC_RAW cache."""
+        import stac
+        original_raw = dict(stac._STAC_RAW)
+        try:
+            stac._STAC_RAW.clear()
+            stac._STAC_RAW["census-2024-state"] = {"id": "census-2024-state", "title": "State"}
+            result = get_collection("census-2024")
+            assert result["id"] == "census-2024-state"
+        finally:
+            stac._STAC_RAW.clear()
+            stac._STAC_RAW.update(original_raw)
 
 
 class TestGetCollectionMCPTool:

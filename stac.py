@@ -30,6 +30,22 @@ _S3_INTERNAL = (
 _NAV_RELS = {"root", "parent", "self", "child", "item"}
 
 
+def _fuzzy_lookup(mapping: dict, key: str):
+    """Look up *key* in *mapping*: exact → prefix → substring. Returns None if no match."""
+    if key in mapping:
+        return mapping[key]
+    low = key.lower()
+    # Prefix match (e.g. "census" matches "census-2024-state")
+    for k, v in mapping.items():
+        if k.lower().startswith(low):
+            return v
+    # Substring match
+    for k, v in mapping.items():
+        if low in k.lower():
+            return v
+    return None
+
+
 class _TimeoutStacIO(DefaultStacIO):
     def __init__(self, token: str = None):
         self._token = token
@@ -241,7 +257,7 @@ def _collection_to_dict(col, sub_children=None) -> dict:
     if sub_children is not None:
         result["children"] = [sc.id for sc in sub_children]
 
-    return result
+    return {k: v for k, v in result.items() if v is not None}
 
 
 # Parallel cache of structured dicts, populated alongside STAC_DATASETS at startup.
@@ -365,22 +381,19 @@ def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = N
         datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
     else:
         datasets = STAC_DATASETS
-    if dataset_id in datasets:
-        return datasets[dataset_id]
-    # Fuzzy match
-    for key, val in datasets.items():
-        if dataset_id.lower() in key.lower():
-            return val
+
+    result = _fuzzy_lookup(datasets, dataset_id)
+    if result is not None:
+        return result
+
     # Cache miss (default catalog only): re-fetch in case datasets were added since startup
     if not catalog_url:
         refreshed = fetch_stac_catalog()
         if refreshed:
             STAC_DATASETS.update(refreshed)
-            if dataset_id in STAC_DATASETS:
-                return STAC_DATASETS[dataset_id]
-            for key, val in STAC_DATASETS.items():
-                if dataset_id.lower() in key.lower():
-                    return val
+            result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
+            if result is not None:
+                return result
     return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
 
 
@@ -398,37 +411,51 @@ def get_collection(collection_id: str, catalog_url: str = None, catalog_token: s
     prompts programmatically from structured data.
     """
     if catalog_url:
-        # On-demand fetch for non-default catalogs; build a raw dict on the fly.
-        raw: dict[str, dict] = {}
+        # On-demand fetch for non-default catalogs — avoid full-catalog iteration.
         stac_io = _TimeoutStacIO(token=catalog_token)
         try:
             cat = pystac.Catalog.from_file(catalog_url, stac_io=stac_io)
-            for child in cat.get_children():
+            # Direct top-level lookup (stops at first match).
+            child = cat.get_child(collection_id)
+            if child is not None:
                 sub_children = list(child.get_children())
-                raw[child.id] = _collection_to_dict(child, sub_children=sub_children)
-                for sub_child in sub_children:
-                    raw[sub_child.id] = _collection_to_dict(sub_child)
+                return _collection_to_dict(child, sub_children=sub_children)
+            # Not top-level — scan lazily for sub-children and fuzzy matches.
+            low = collection_id.lower()
+            prefix_hit = None
+            substring_hit = None
+            for top in cat.get_children():
+                sub_children = list(top.get_children())
+                for sc in sub_children:
+                    if sc.id == collection_id:
+                        return _collection_to_dict(sc)
+                # Track best fuzzy match while iterating
+                for candidate_id, candidate in [(top.id, top)] + [(sc.id, sc) for sc in sub_children]:
+                    cl = candidate_id.lower()
+                    if prefix_hit is None and cl.startswith(low):
+                        sc_children = sub_children if candidate is top else []
+                        prefix_hit = _collection_to_dict(candidate, sub_children=sc_children or None)
+                    elif substring_hit is None and low in cl:
+                        sc_children = sub_children if candidate is top else []
+                        substring_hit = _collection_to_dict(candidate, sub_children=sc_children or None)
+            if prefix_hit is not None:
+                return prefix_hit
+            if substring_hit is not None:
+                return substring_hit
         except Exception as e:
             return {"error": f"Failed to fetch catalog: {e}"}
-    else:
-        raw = _STAC_RAW
+        return {"error": f"Collection '{collection_id}' not found. Use browse_stac_catalog to list available collections."}
 
-    if collection_id in raw:
-        return raw[collection_id]
+    # Default catalog: look up from pre-populated cache.
+    result = _fuzzy_lookup(_STAC_RAW, collection_id)
+    if result is not None:
+        return result
 
-    # Fuzzy match
-    for key, val in raw.items():
-        if collection_id.lower() in key.lower():
-            return val
-
-    # Cache miss (default catalog only): re-fetch.
-    # fetch_stac_catalog() calls _STAC_RAW.update(raw) when catalog_url is None.
-    if not catalog_url:
-        fetch_stac_catalog()
-        if collection_id in _STAC_RAW:
-            return _STAC_RAW[collection_id]
-        for key, val in _STAC_RAW.items():
-            if collection_id.lower() in key.lower():
-                return val
+    # Cache miss: re-fetch.
+    # fetch_stac_catalog() updates _STAC_RAW when catalog_url is None.
+    fetch_stac_catalog()
+    result = _fuzzy_lookup(_STAC_RAW, collection_id)
+    if result is not None:
+        return result
 
     return {"error": f"Collection '{collection_id}' not found. Use browse_stac_catalog to list available collections."}

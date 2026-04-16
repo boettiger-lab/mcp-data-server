@@ -135,13 +135,9 @@ def browse_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> s
 @mcp.tool()
 def get_stac_details(dataset_id: str, catalog_url: str = None, catalog_token: str = None) -> str:
     """Fetch metadata (parquet paths, column schemas) for any STAC collection by ID.
-    Use for datasets outside your pre-loaded app catalog — for datasets already in your app,
-    use the local get_dataset_details tool instead.
+    Returns markdown formatted for LLM consumption (use get_collection for structured JSON).
     Optionally provide catalog_url and catalog_token if using a private STAC catalog."""
     return _stac_get(dataset_id, catalog_url, catalog_token)
-
-def get_dataset_details(dataset_id: str) -> str:
-    return _stac_get(dataset_id)
 
 @mcp.tool()
 def get_collection(collection_id: str, catalog_url: str = None, catalog_token: str = None) -> dict:

@@ -160,22 +160,22 @@ class TestResourceFunctions:
         result = browse_stac_catalog()
         assert isinstance(result, str)
     
-    def test_get_dataset_details_found(self):
+    def test_get_stac_details_found(self):
         """Test getting details for an existing dataset."""
-        from server import get_dataset_details, DATA_CATALOG
-        
+        from server import get_stac_details, DATA_CATALOG
+
         if DATA_CATALOG:
             # Get first valid key that's not _intro
             test_key = next((k for k in DATA_CATALOG.keys() if k != "_intro"), None)
             if test_key:
-                result = get_dataset_details(test_key)
+                result = get_stac_details(test_key)
                 assert isinstance(result, str)
                 assert len(result) > 0
-    
-    def test_get_dataset_details_not_found(self):
+
+    def test_get_stac_details_not_found(self):
         """Test getting details for non-existent dataset."""
-        from server import get_dataset_details
-        result = get_dataset_details("nonexistent_dataset_xyz")
+        from server import get_stac_details
+        result = get_stac_details("nonexistent_dataset_xyz")
         assert "not found" in result.lower()
 
 
