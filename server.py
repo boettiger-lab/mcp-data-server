@@ -11,7 +11,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.session import BaseSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from stac import STAC_DATASETS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get
+from stac import STAC_DATASETS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection
 
 # Workaround for https://github.com/boettiger-lab/mcp-data-server/issues/5
 # send_notification crashes with ClosedResourceError when the client disconnects
@@ -142,6 +142,18 @@ def get_stac_details(dataset_id: str, catalog_url: str = None, catalog_token: st
 
 def get_dataset_details(dataset_id: str) -> str:
     return _stac_get(dataset_id)
+
+@mcp.tool()
+def get_collection(collection_id: str, catalog_url: str = None, catalog_token: str = None) -> dict:
+    """Return structured STAC collection metadata as JSON for programmatic use.
+
+    Unlike get_stac_details (markdown for LLM consumption), this returns the
+    raw collection dict with all assets (parquet, PMTiles, COG, GeoJSON),
+    per-asset STAC extension fields (table:columns, raster:bands, vector:layers),
+    full collection metadata, and child collection IDs. S3 paths are pre-resolved.
+
+    Intended for app code that builds map layers and system prompts programmatically."""
+    return _stac_get_collection(collection_id, catalog_url, catalog_token)
 
 # -------------------------------------------------------------------------
 # 7. MCP PROMPTS (Personas for Smart Clients)

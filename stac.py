@@ -157,20 +157,116 @@ def _format_collection(col, sub_children: list = None) -> str:
     return "\n".join(lines)
 
 
+def _collection_to_dict(col, sub_children=None) -> dict:
+    """Convert a pystac Collection to a structured dict for programmatic use.
+
+    All asset hrefs are converted from HTTPS to s3:// form.
+    Pass sub_children when already fetched to avoid extra network calls.
+    """
+    result: dict = {
+        "id": col.id,
+        "title": col.title,
+        "description": col.description,
+        "license": getattr(col, "license", None),
+        "keywords": list(getattr(col, "keywords", None) or []),
+    }
+
+    # Providers
+    result["providers"] = [
+        {k: v for k, v in {
+            "name": p.name,
+            "description": getattr(p, "description", None),
+            "roles": list(p.roles) if getattr(p, "roles", None) else None,
+            "url": getattr(p, "url", None),
+        }.items() if v is not None}
+        for p in (col.providers or [])
+    ]
+
+    # Extent
+    ext = col.extent
+    result["extent"] = {
+        "spatial": {"bbox": ext.spatial.bboxes if ext and ext.spatial else []},
+        "temporal": {
+            "interval": [
+                [dt.isoformat() if dt else None for dt in interval]
+                for interval in (ext.temporal.intervals if ext and ext.temporal else [])
+            ]
+        },
+    }
+
+    # External links (exclude navigational rel types)
+    _NAV_RELS = {"root", "parent", "self", "child", "item"}
+    result["links"] = [
+        {k: v for k, v in {
+            "rel": lnk.rel,
+            "href": lnk.href,
+            "title": getattr(lnk, "title", None),
+        }.items() if v is not None}
+        for lnk in (col.links or [])
+        if lnk.rel not in _NAV_RELS
+    ]
+
+    # Summaries
+    if col.summaries:
+        try:
+            result["summaries"] = col.summaries.to_dict()
+        except Exception:
+            result["summaries"] = {}
+    else:
+        result["summaries"] = {}
+
+    # All assets — every media type, with S3 path conversion
+    assets = {}
+    for asset_id, asset in (col.assets or {}).items():
+        a: dict = {
+            "href": _href_to_s3(asset.href),
+            "type": asset.media_type,
+            "title": asset.title,
+            "description": asset.description,
+        }
+        # Merge extra_fields (table:columns, raster:bands, vector:layers, file:size, …)
+        a.update(asset.extra_fields)
+        assets[asset_id] = {k: v for k, v in a.items() if v is not None}
+    result["assets"] = assets
+
+    # Collection-level STAC extension fields
+    for ext_key in ("table:columns", "vector:layers", "raster:bands"):
+        val = col.extra_fields.get(ext_key)
+        if val is not None:
+            result[ext_key] = val
+
+    # Child collection IDs — only populated when sub_children are provided
+    if sub_children is not None:
+        result["children"] = [sc.id for sc in sub_children]
+
+    return result
+
+
+# Parallel cache of structured dicts, populated alongside STAC_DATASETS at startup.
+_STAC_RAW: dict[str, dict] = {}
+
+
 def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> dict[str, str]:
     """Fetch the STAC catalog and return {collection_id: markdown_summary}."""
+    global _STAC_RAW
     url = catalog_url or STAC_CATALOG_URL
     try:
         stac_io = _TimeoutStacIO(token=catalog_token)
         cat = pystac.Catalog.from_file(url, stac_io=stac_io)
         datasets = {}
+        raw: dict[str, dict] = {}
         for child in cat.get_children():
             sub_children = list(child.get_children())
             datasets[child.id] = _format_collection(child, sub_children=sub_children)
-            # Index child collections so get_dataset works with child IDs
+            raw[child.id] = _collection_to_dict(child, sub_children=sub_children)
+            # Index child collections so get_dataset / get_collection work with child IDs
             for sub_child in sub_children:
                 datasets[sub_child.id] = _format_collection(sub_child)
+                raw[sub_child.id] = _collection_to_dict(sub_child)
         print(f"📂 Loaded {len(datasets)} collections from STAC: {url}", file=sys.stderr)
+        # Update module-level structured cache only for the default catalog
+        if not catalog_url:
+            _STAC_RAW.update(raw)
         return datasets
     except Exception as e:
         print(f"⚠️ Failed to load STAC catalog: {e}", file=sys.stderr)
@@ -285,3 +381,52 @@ def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = N
                 if dataset_id.lower() in key.lower():
                     return val
     return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
+
+
+def get_collection(collection_id: str, catalog_url: str = None, catalog_token: str = None) -> dict:
+    """Return structured STAC collection metadata for programmatic use.
+
+    Unlike get_stac_details (which returns markdown for LLM consumption),
+    this returns the raw collection dict with:
+    - All assets (parquet, PMTiles, COG, GeoJSON) with hrefs converted to s3://
+    - Per-asset STAC extension fields (table:columns, raster:bands, vector:layers)
+    - Full collection metadata (providers, extent, license, keywords, links)
+    - Child collection IDs for parent containers
+
+    Intended for app code (e.g. geo-agent) that builds map layers and system
+    prompts programmatically from structured data.
+    """
+    if catalog_url:
+        # On-demand fetch for non-default catalogs; build a raw dict on the fly.
+        raw: dict[str, dict] = {}
+        stac_io = _TimeoutStacIO(token=catalog_token)
+        try:
+            cat = pystac.Catalog.from_file(catalog_url, stac_io=stac_io)
+            for child in cat.get_children():
+                sub_children = list(child.get_children())
+                raw[child.id] = _collection_to_dict(child, sub_children=sub_children)
+                for sub_child in sub_children:
+                    raw[sub_child.id] = _collection_to_dict(sub_child)
+        except Exception as e:
+            return {"error": f"Failed to fetch catalog: {e}"}
+    else:
+        raw = _STAC_RAW
+
+    if collection_id in raw:
+        return raw[collection_id]
+
+    # Fuzzy match
+    for key, val in raw.items():
+        if collection_id.lower() in key.lower():
+            return val
+
+    # Cache miss (default catalog only): re-fetch
+    if not catalog_url:
+        fetch_stac_catalog()  # repopulates _STAC_RAW as side effect
+        if collection_id in _STAC_RAW:
+            return _STAC_RAW[collection_id]
+        for key, val in _STAC_RAW.items():
+            if collection_id.lower() in key.lower():
+                return val
+
+    return {"error": f"Collection '{collection_id}' not found. Use browse_stac_catalog to list available collections."}
