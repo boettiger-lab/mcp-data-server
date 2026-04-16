@@ -13,6 +13,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from stac import STAC_DATASETS, STAC_LOAD_ERRORS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection
 
+# Optional swappable query backend (e.g. GPU-accelerated).
+# If query_backend.py is present alongside server.py it replaces the built-in DuckDB engine.
+try:
+    import query_backend as _query_backend
+    _CUSTOM_BACKEND = True
+except ImportError:
+    _CUSTOM_BACKEND = False
+
 # Workaround for https://github.com/boettiger-lab/mcp-data-server/issues/5
 # send_notification crashes with ClosedResourceError when the client disconnects
 # (e.g. after a ~60s client-side timeout) while a query is still running.
@@ -185,6 +193,8 @@ def analyst_persona() -> str:
 def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None) -> str:
     """Placeholder (overwritten below)."""
     print(f"🔍 Executing: {sql_query}", file=sys.stderr)
+    if _CUSTOM_BACKEND:
+        return _query_backend.execute(sql_query, s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope)
     try:
         with get_isolated_db(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope) as db:
             result = db.sql(sql_query)
