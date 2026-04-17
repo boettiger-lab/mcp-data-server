@@ -14,6 +14,7 @@ class TestCatalogUrlParameter:
     """Test that list_datasets and get_dataset accept an optional catalog_url."""
 
     def _make_mock_catalog(self):
+        """Return (catalog_mock, collection_mock) compatible with the link-walk interface."""
         mock_catalog = MagicMock()
         mock_col = MagicMock()
         mock_col.id = "custom-dataset"
@@ -21,12 +22,19 @@ class TestCatalogUrlParameter:
         mock_col.description = "From custom catalog"
         mock_col.assets = {}
         mock_col.extra_fields = {}
-        mock_col.get_children.return_value = []
-        mock_catalog.get_children.return_value = [mock_col]
-        return mock_catalog
+        mock_col.links = []  # no sub-children
+        # Root catalog exposes one child link
+        child_link = MagicMock()
+        child_link.rel = "child"
+        child_link.href = "https://example.com/custom/custom-dataset/collection.json"
+        child_link.title = "Custom Dataset"
+        mock_catalog.links = [child_link]
+        return mock_catalog, mock_col
 
     def test_list_datasets_custom_url(self):
-        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()) as mock_from_file:
+        cat, col = self._make_mock_catalog()
+        with patch('stac.pystac.Catalog.from_file', return_value=cat) as mock_from_file, \
+             patch('stac.pystac.Collection.from_file', return_value=col):
             result = list_datasets(catalog_url="https://example.com/custom/catalog.json")
             args, kwargs = mock_from_file.call_args
             assert args[0] == "https://example.com/custom/catalog.json"
@@ -35,13 +43,17 @@ class TestCatalogUrlParameter:
             assert "https://example.com/custom/catalog.json" in result
 
     def test_get_dataset_custom_url(self):
-        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()):
+        cat, col = self._make_mock_catalog()
+        with patch('stac.pystac.Catalog.from_file', return_value=cat), \
+             patch('stac.pystac.Collection.from_file', return_value=col):
             result = get_dataset("custom-dataset", catalog_url="https://example.com/custom/catalog.json")
             assert "Custom Dataset" in result
 
     def test_get_dataset_catalog_token_forwarded(self):
         """catalog_token is forwarded through get_dataset to the StacIO instance."""
-        with patch('stac.pystac.Catalog.from_file', return_value=self._make_mock_catalog()) as mock_from_file:
+        cat, col = self._make_mock_catalog()
+        with patch('stac.pystac.Catalog.from_file', return_value=cat) as mock_from_file, \
+             patch('stac.pystac.Collection.from_file', return_value=col):
             get_dataset("custom-dataset",
                         catalog_url="https://example.com/custom/catalog.json",
                         catalog_token="secret-token")
@@ -88,7 +100,11 @@ class TestChildCollectionIndexing:
     """Test that child collections are indexed and queryable by their own ID."""
 
     def _make_mock_catalog_with_children(self):
-        """Create a catalog with a parent that has two child sub-collections."""
+        """Create (catalog, parent, child1, child2) mocks for the link-walk interface.
+
+        The catalog has one child link pointing to the parent.
+        The parent has two child links pointing to child1 and child2.
+        """
         mock_catalog = MagicMock()
 
         # Child 1: senate districts
@@ -108,7 +124,7 @@ class TestChildCollectionIndexing:
         asset1.title = "hex"
         asset1.extra_fields = {}
         child1.assets = {"hex": asset1}
-        child1.get_children.return_value = []
+        child1.links = []  # no grandchildren
 
         # Child 2: congressional districts
         child2 = MagicMock()
@@ -127,24 +143,52 @@ class TestChildCollectionIndexing:
         asset2.title = "hex"
         asset2.extra_fields = {}
         child2.assets = {"hex": asset2}
-        child2.get_children.return_value = []
+        child2.links = []  # no grandchildren
 
-        # Parent collection
+        # Parent collection — has two sub-child links
         parent = MagicMock()
         parent.id = "us-census"
         parent.title = "US Census"
         parent.description = "Census boundary datasets"
         parent.assets = {}
         parent.extra_fields = {}
-        parent.get_children.return_value = [child1, child2]
+        sub1_link = MagicMock()
+        sub1_link.rel = "child"
+        sub1_link.href = "https://example.com/public-census/sldu/collection.json"
+        sub1_link.title = None
+        sub2_link = MagicMock()
+        sub2_link.rel = "child"
+        sub2_link.href = "https://example.com/public-census/cd/collection.json"
+        sub2_link.title = None
+        parent.links = [sub1_link, sub2_link]
 
-        mock_catalog.get_children.return_value = [parent]
-        return mock_catalog
+        # Root catalog — one child link pointing to parent
+        parent_link = MagicMock()
+        parent_link.rel = "child"
+        parent_link.href = "https://example.com/public-census/collection.json"
+        parent_link.title = None
+        mock_catalog.links = [parent_link]
+
+        return mock_catalog, parent, child1, child2
+
+    def _collection_side_effect(self, parent, child1, child2):
+        """Return a side_effect for pystac.Collection.from_file given the mocks."""
+        def _side_effect(href, *args, **kwargs):
+            if "public-census/collection.json" in href:
+                return parent
+            if "sldu" in href:
+                return child1
+            if "/cd/" in href:
+                return child2
+            raise ValueError(f"Unexpected href: {href}")
+        return _side_effect
 
     def test_child_collections_indexed(self):
         """fetch_stac_catalog indexes both parent and child collection IDs."""
-        with patch('stac.pystac.Catalog.from_file',
-                   return_value=self._make_mock_catalog_with_children()):
+        cat, parent, child1, child2 = self._make_mock_catalog_with_children()
+        with patch('stac.pystac.Catalog.from_file', return_value=cat), \
+             patch('stac.pystac.Collection.from_file',
+                   side_effect=self._collection_side_effect(parent, child1, child2)):
             datasets = fetch_stac_catalog(catalog_url="https://example.com/catalog.json")
             assert "us-census" in datasets
             assert "census-2025-sldu" in datasets
@@ -152,8 +196,10 @@ class TestChildCollectionIndexing:
 
     def test_child_has_own_columns(self):
         """Child collection metadata contains its own column schema."""
-        with patch('stac.pystac.Catalog.from_file',
-                   return_value=self._make_mock_catalog_with_children()):
+        cat, parent, child1, child2 = self._make_mock_catalog_with_children()
+        with patch('stac.pystac.Catalog.from_file', return_value=cat), \
+             patch('stac.pystac.Collection.from_file',
+                   side_effect=self._collection_side_effect(parent, child1, child2)):
             datasets = fetch_stac_catalog(catalog_url="https://example.com/catalog.json")
             sldu = datasets["census-2025-sldu"]
             assert "SLDUST" in sldu
@@ -162,18 +208,22 @@ class TestChildCollectionIndexing:
 
     def test_parent_does_not_show_child_columns(self):
         """Parent collection no longer inherits an arbitrary child's columns."""
-        with patch('stac.pystac.Catalog.from_file',
-                   return_value=self._make_mock_catalog_with_children()):
+        cat, parent, child1, child2 = self._make_mock_catalog_with_children()
+        with patch('stac.pystac.Catalog.from_file', return_value=cat), \
+             patch('stac.pystac.Collection.from_file',
+                   side_effect=self._collection_side_effect(parent, child1, child2)):
             datasets = fetch_stac_catalog(catalog_url="https://example.com/catalog.json")
-            parent = datasets["us-census"]
+            parent_md = datasets["us-census"]
             # Parent has no table:columns of its own; should not show child columns
-            assert "SLDUST" not in parent
-            assert "CD119FP" not in parent
+            assert "SLDUST" not in parent_md
+            assert "CD119FP" not in parent_md
 
     def test_get_dataset_with_child_id(self):
         """get_dataset accepts a child collection ID and returns its metadata."""
-        with patch('stac.pystac.Catalog.from_file',
-                   return_value=self._make_mock_catalog_with_children()):
+        cat, parent, child1, child2 = self._make_mock_catalog_with_children()
+        with patch('stac.pystac.Catalog.from_file', return_value=cat), \
+             patch('stac.pystac.Collection.from_file',
+                   side_effect=self._collection_side_effect(parent, child1, child2)):
             result = get_dataset("census-2025-sldu",
                                  catalog_url="https://example.com/catalog.json")
             assert "Senate Districts" in result
@@ -699,4 +749,179 @@ class TestFetchResilience:
         assert col is None
         assert error is not None
         assert "ConnectionError" in next(iter(error.values()))
+
+    def _reset_module_state(self, stac_mod):
+        """Reset module-level caches between tests to avoid cross-test pollution."""
+        stac_mod.STAC_DATASETS.clear()
+        stac_mod._STAC_RAW.clear()
+        stac_mod.STAC_LOAD_ERRORS.clear()
+
+    def _make_root_catalog(self, child_hrefs):
+        """Build a MagicMock pystac.Catalog with the given child hrefs as 'child' links."""
+        from unittest.mock import MagicMock
+        cat = MagicMock()
+        child_links = []
+        for href in child_hrefs:
+            link = MagicMock()
+            link.rel = "child"
+            link.href = href
+            link.title = None
+            child_links.append(link)
+        cat.links = child_links
+        cat.get_child_links = MagicMock(return_value=child_links)
+        return cat
+
+    def _make_leaf_collection(self, cid):
+        """Build a MagicMock leaf pystac.Collection with no sub-children."""
+        from unittest.mock import MagicMock
+        col = MagicMock()
+        col.id = cid
+        col.title = cid
+        col.description = f"Test collection {cid}"
+        col.links = []
+        col.assets = {}
+        col.extra_fields = {}
+        col.providers = []
+        col.summaries = None
+        col.keywords = []
+        # Extent mock — minimal spatial + empty temporal
+        spatial = MagicMock(); spatial.bboxes = [[-180, -90, 180, 90]]
+        temporal = MagicMock(); temporal.intervals = []
+        ext = MagicMock(); ext.spatial = spatial; ext.temporal = temporal
+        col.extent = ext
+        col.get_children = MagicMock(return_value=[])
+        return col
+
+    def test_fetch_root_failure_returns_empty_and_records_root_error(self):
+        """When root fetch raises, return empty dict; STAC_LOAD_ERRORS['__root__'] is set."""
+        from unittest.mock import patch
+        import requests
+        import stac
+
+        self._reset_module_state(stac)
+
+        with patch(
+            "stac.pystac.Catalog.from_file",
+            side_effect=requests.exceptions.Timeout("root timed out"),
+        ):
+            result = stac.fetch_stac_catalog()
+
+        assert result == {}
+        assert "__root__" in stac.STAC_LOAD_ERRORS
+        assert "Timeout" in stac.STAC_LOAD_ERRORS["__root__"]
+
+    def test_fetch_one_parent_fails_others_succeed(self):
+        """One parent timing out does not block the others; its identifier enters STAC_LOAD_ERRORS."""
+        from unittest.mock import patch
+        import requests
+        import stac
+
+        self._reset_module_state(stac)
+
+        cat = self._make_root_catalog([
+            "https://example.com/public-a/stac-collection.json",
+            "https://example.com/public-b/stac-collection.json",
+            "https://example.com/public-c/stac-collection.json",
+        ])
+        # Pre-built leaf collections for a and c; b will raise.
+        col_a = self._make_leaf_collection("a")
+        col_c = self._make_leaf_collection("c")
+
+        def collection_side_effect(href, *args, **kwargs):
+            if "public-a" in href:
+                return col_a
+            if "public-c" in href:
+                return col_c
+            raise requests.exceptions.Timeout("b timed out")
+
+        with patch("stac.pystac.Catalog.from_file", return_value=cat), \
+             patch("stac.pystac.Collection.from_file", side_effect=collection_side_effect):
+            result = stac.fetch_stac_catalog()
+
+        assert "a" in result
+        assert "c" in result
+        assert "b" not in result  # failed parent
+        # One error recorded, keyed by the href's tail segment
+        assert len(stac.STAC_LOAD_ERRORS) == 1
+        assert any("public-b" in k for k in stac.STAC_LOAD_ERRORS.keys())
+
+    def test_fetch_all_parents_fail(self):
+        """When every child fetch fails, datasets is empty and every child is in errors."""
+        from unittest.mock import patch
+        import requests
+        import stac
+
+        self._reset_module_state(stac)
+
+        cat = self._make_root_catalog([
+            "https://example.com/public-a/stac-collection.json",
+            "https://example.com/public-b/stac-collection.json",
+        ])
+
+        with patch("stac.pystac.Catalog.from_file", return_value=cat), \
+             patch(
+                 "stac.pystac.Collection.from_file",
+                 side_effect=requests.exceptions.Timeout("all dead"),
+             ):
+            result = stac.fetch_stac_catalog()
+
+        assert result == {}
+        assert len(stac.STAC_LOAD_ERRORS) == 2
+        assert "__root__" not in stac.STAC_LOAD_ERRORS  # root succeeded
+
+    def test_fetch_subchild_fails_parent_still_loads(self):
+        """One failing sub-child does not kill its parent's entry."""
+        from unittest.mock import patch, MagicMock
+        import requests
+        import stac
+
+        self._reset_module_state(stac)
+
+        cat = self._make_root_catalog([
+            "https://example.com/public-parent/stac-collection.json",
+        ])
+        parent = self._make_leaf_collection("parent")
+        # Parent has two sub-child links
+        sub1_link = MagicMock(); sub1_link.rel = "child"
+        sub1_link.href = "https://example.com/public-parent/sub1/stac-collection.json"
+        sub1_link.title = None
+        sub2_link = MagicMock(); sub2_link.rel = "child"
+        sub2_link.href = "https://example.com/public-parent/sub2/stac-collection.json"
+        sub2_link.title = None
+        parent.links = [sub1_link, sub2_link]
+        sub1 = self._make_leaf_collection("sub1")
+
+        def collection_side_effect(href, *args, **kwargs):
+            if href.endswith("/public-parent/stac-collection.json"):
+                return parent
+            if "sub1" in href:
+                return sub1
+            raise requests.exceptions.Timeout("sub2 dead")
+
+        with patch("stac.pystac.Catalog.from_file", return_value=cat), \
+             patch("stac.pystac.Collection.from_file", side_effect=collection_side_effect):
+            result = stac.fetch_stac_catalog()
+
+        assert "parent" in result
+        assert "sub1" in result
+        assert "sub2" not in result
+        assert any("sub2" in k for k in stac.STAC_LOAD_ERRORS.keys())
+
+    def test_concurrency_env_var_honored(self, monkeypatch):
+        """STAC_FETCH_CONCURRENCY=2 → ThreadPoolExecutor constructed with max_workers=2."""
+        from unittest.mock import patch
+        import stac
+
+        monkeypatch.setenv("STAC_FETCH_CONCURRENCY", "2")
+        importlib.reload(stac)
+        self._reset_module_state(stac)
+
+        cat = self._make_root_catalog([])  # no children — just verify executor arg
+
+        with patch("stac.pystac.Catalog.from_file", return_value=cat), \
+             patch("stac.ThreadPoolExecutor") as mock_executor:
+            mock_executor.return_value.__enter__.return_value.submit = lambda *a, **kw: None
+            stac.fetch_stac_catalog()
+
+        mock_executor.assert_called_once_with(max_workers=2)
 
