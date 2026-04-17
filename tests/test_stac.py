@@ -601,3 +601,102 @@ class TestFetchResilience:
         assert "public-wyoming" in result
         assert "Wyoming Wildlife" in result
 
+    def test_fetch_parent_success_returns_collection_and_subchild_hrefs(self):
+        """On success: returns the Collection, a list of sub-child hrefs, and None for error."""
+        from unittest.mock import patch, MagicMock
+        import stac
+
+        mock_col = MagicMock()
+        mock_col.id = "test-parent"
+        link1 = MagicMock(); link1.rel = "child"; link1.href = "https://example.com/child1.json"
+        link2 = MagicMock(); link2.rel = "child"; link2.href = "https://example.com/child2.json"
+        link3 = MagicMock(); link3.rel = "self";  link3.href = "https://example.com/self.json"
+        mock_col.links = [link1, link2, link3]
+
+        with patch("stac.pystac.Collection.from_file", return_value=mock_col):
+            col, subchild_hrefs, error = stac._fetch_parent(
+                "https://example.com/parent.json", title="Parent", token=None,
+            )
+
+        assert col is mock_col
+        assert subchild_hrefs == [
+            "https://example.com/child1.json",
+            "https://example.com/child2.json",
+        ]
+        assert error is None
+
+    def test_fetch_parent_timeout_returns_error_with_href_tail(self):
+        """On timeout: returns (None, [], {ident: reason}) where ident is href-derived."""
+        from unittest.mock import patch
+        import requests
+        import stac
+
+        with patch(
+            "stac.pystac.Collection.from_file",
+            side_effect=requests.exceptions.Timeout("connection timed out"),
+        ):
+            col, subchild_hrefs, error = stac._fetch_parent(
+                "https://example.com/public-wyoming/stac-collection.json",
+                title=None, token=None,
+            )
+
+        assert col is None
+        assert subchild_hrefs == []
+        assert error is not None
+        # Identifier should include the href tail segment
+        assert "public-wyoming" in next(iter(error.keys()))
+        # Reason should include the exception class name
+        assert "Timeout" in next(iter(error.values()))
+
+    def test_fetch_parent_catches_all_exceptions(self):
+        """Any exception is caught; worker never raises."""
+        from unittest.mock import patch
+        import stac
+
+        with patch(
+            "stac.pystac.Collection.from_file",
+            side_effect=ValueError("malformed JSON"),
+        ):
+            col, subchild_hrefs, error = stac._fetch_parent(
+                "https://example.com/foo.json", title=None, token=None,
+            )
+
+        assert col is None
+        assert error is not None
+        assert "ValueError" in next(iter(error.values()))
+
+    def test_fetch_subchild_success(self):
+        """Sub-child worker returns (col, None) on success."""
+        from unittest.mock import patch, MagicMock
+        import stac
+
+        mock_col = MagicMock()
+        mock_col.id = "test-subchild"
+
+        with patch("stac.pystac.Collection.from_file", return_value=mock_col):
+            col, error = stac._fetch_subchild(
+                "https://example.com/sub.json", parent_id="parent", token=None,
+            )
+
+        assert col is mock_col
+        assert error is None
+
+    def test_fetch_subchild_failure(self):
+        """Sub-child worker returns (None, error) on failure."""
+        from unittest.mock import patch
+        import requests
+        import stac
+
+        with patch(
+            "stac.pystac.Collection.from_file",
+            side_effect=requests.exceptions.ConnectionError("conn refused"),
+        ):
+            col, error = stac._fetch_subchild(
+                "https://example.com/public-foo/sub/stac-collection.json",
+                parent_id="public-foo", token=None,
+            )
+
+        assert col is None
+        assert error is not None
+        assert "ConnectionError" in next(iter(error.values()))
+

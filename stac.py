@@ -306,6 +306,52 @@ def _collection_to_dict(col, sub_children=None) -> dict:
     return {k: v for k, v in result.items() if v is not None}
 
 
+def _fetch_parent(href: str, title: str | None, token: str | None):
+    """Thread-worker: fetch one top-level child Collection.
+
+    Returns a 3-tuple (col, subchild_hrefs, error):
+    - col: the parsed pystac.Collection on success, else None
+    - subchild_hrefs: list of sub-child hrefs to enqueue next (empty on failure
+      OR when the collection has no children — both cases are valid)
+    - error: None on success, or {identifier: reason} on failure
+
+    Rendering (to markdown and dict) happens in the caller after all fetches
+    complete, so that parents can be rendered with their successfully-fetched
+    sub-children in hand.
+
+    This function must NEVER raise — all exceptions are caught and translated
+    to the error dict.
+    """
+    child_io = _TimeoutStacIO(token=token, timeout=_STAC_CHILD_TIMEOUT)
+    try:
+        col = pystac.Collection.from_file(href, stac_io=child_io)
+        subchild_hrefs = [l.href for l in (col.links or []) if l.rel == "child"]
+        return col, subchild_hrefs, None
+    except Exception as e:
+        ident = _child_identifier(href, title_hint=title)
+        reason = f"{type(e).__name__}: {e}"
+        return None, [], {ident: reason}
+
+
+def _fetch_subchild(href: str, parent_id: str, token: str | None):
+    """Thread-worker: fetch one sub-child Collection (a leaf of a parent).
+
+    Returns a 2-tuple (col, error):
+    - col: the parsed pystac.Collection on success, else None
+    - error: None on success, or {identifier: reason} on failure
+
+    Never raises — all exceptions caught.
+    """
+    child_io = _TimeoutStacIO(token=token, timeout=_STAC_CHILD_TIMEOUT)
+    try:
+        col = pystac.Collection.from_file(href, stac_io=child_io)
+        return col, None
+    except Exception as e:
+        ident = _child_identifier(href, title_hint=None)
+        reason = f"{type(e).__name__}: {e}"
+        return None, {ident: reason}
+
+
 # Parallel cache of structured dicts, populated alongside STAC_DATASETS at startup.
 _STAC_RAW: dict[str, dict] = {}
 
