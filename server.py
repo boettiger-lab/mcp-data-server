@@ -25,8 +25,6 @@ async def _resilient_send_notification(self, notification, related_request_id=No
         pass
 BaseSession.send_notification = _resilient_send_notification
 
-DATA_CATALOG = STAC_DATASETS
-
 # -------------------------------------------------------------------------
 # 1. INITIALIZATION
 # -------------------------------------------------------------------------

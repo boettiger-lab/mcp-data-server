@@ -138,35 +138,22 @@ class TestQueryFunction:
         assert len(lines) <= 55
 
 
-class TestDataCatalogParsing:
-    """Test data catalog parsing logic."""
-    
-    def test_catalog_parsing_with_sections(self):
-        """Test that catalog with numbered sections is parsed correctly."""
-        from server import DATA_CATALOG
-        # DATA_CATALOG should be a dict
-        assert isinstance(DATA_CATALOG, dict)
-        # Should have at least _intro key if CATALOG_RAW exists
-        if DATA_CATALOG:
-            assert "_intro" in DATA_CATALOG or len(DATA_CATALOG) > 0
-
-
 class TestResourceFunctions:
     """Test MCP resource functions."""
-    
+
     def test_browse_stac_catalog_returns_string(self):
         """Test that browse_stac_catalog returns a string."""
         from server import browse_stac_catalog
         result = browse_stac_catalog()
         assert isinstance(result, str)
-    
+
     def test_get_stac_details_found(self):
         """Test getting details for an existing dataset."""
-        from server import get_stac_details, DATA_CATALOG
+        from server import get_stac_details
+        from stac import STAC_DATASETS
 
-        if DATA_CATALOG:
-            # Get first valid key that's not _intro
-            test_key = next((k for k in DATA_CATALOG.keys() if k != "_intro"), None)
+        if STAC_DATASETS:
+            test_key = next(iter(STAC_DATASETS.keys()), None)
             if test_key:
                 result = get_stac_details(test_key)
                 assert isinstance(result, str)
