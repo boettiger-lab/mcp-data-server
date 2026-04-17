@@ -925,3 +925,35 @@ class TestFetchResilience:
 
         mock_executor.assert_called_once_with(max_workers=2)
 
+    def test_list_datasets_footer_appears_when_errors_exist(self):
+        """list_datasets() appends a ⚠️ footer listing failed ids + reasons."""
+        import stac
+
+        self._reset_module_state(stac)
+        stac.STAC_DATASETS["alive-1"] = "**Alive 1**\nDescription 1"
+        stac.STAC_DATASETS["alive-2"] = "**Alive 2**\nDescription 2"
+        stac.STAC_LOAD_ERRORS["public-dead"] = "Timeout: connection timed out"
+        stac.STAC_LOAD_ERRORS["public-other"] = "ConnectionError: conn refused"
+
+        out = stac.list_datasets()
+
+        assert "alive-1" in out
+        assert "alive-2" in out
+        # Footer content
+        assert "⚠️" in out
+        assert "could not be loaded" in out
+        assert "public-dead" in out
+        assert "public-other" in out
+
+    def test_list_datasets_no_footer_when_no_errors(self):
+        """When STAC_LOAD_ERRORS is empty, the footer is absent."""
+        import stac
+
+        self._reset_module_state(stac)
+        stac.STAC_DATASETS["alive-1"] = "**Alive 1**\nDescription 1"
+
+        out = stac.list_datasets()
+
+        assert "⚠️" not in out
+        assert "could not be loaded" not in out
+

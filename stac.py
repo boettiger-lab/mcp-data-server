@@ -479,20 +479,35 @@ fetch_stac_catalog()
 
 
 def list_datasets(catalog_url: str = None, catalog_token: str = None) -> str:
-    """List all available datasets from the STAC catalog."""
+    """List all available datasets from the STAC catalog.
+
+    Appends a warning footer when `STAC_LOAD_ERRORS` is non-empty, so callers
+    can distinguish "not in catalog" from "failed to load this time."
+    """
     if catalog_url:
         datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
         url = catalog_url
+        # Errors for custom catalogs are not tracked in module state; caller
+        # can detect failure via returned dict being empty or partial.
+        footer_errors: dict = {}
     else:
         datasets = STAC_DATASETS
         url = STAC_CATALOG_URL
-    if not datasets:
+        footer_errors = STAC_LOAD_ERRORS
+    if not datasets and not footer_errors:
         return f"No datasets loaded. STAC catalog: {url}"
     lines = [f"# Available Datasets ({len(datasets)} collections)\n"]
     lines.append(f"STAC catalog: `{url}`\n")
     for cid, summary in datasets.items():
         first_line = summary.split("\n")[0]
         lines.append(f"- **{cid}**: {first_line}")
+    if footer_errors:
+        lines.append("")
+        err_pairs = ", ".join(f"{k} ({v.split(':', 1)[0]})" for k, v in footer_errors.items())
+        lines.append(
+            f"⚠️ {len(footer_errors)} collection"
+            f"{'s' if len(footer_errors) != 1 else ''} could not be loaded: {err_pairs}"
+        )
     return "\n".join(lines)
 
 
