@@ -1,3 +1,4 @@
+import importlib
 import pytest
 from unittest.mock import patch, MagicMock
 import sys
@@ -468,9 +469,6 @@ class TestGetCollectionMCPTool:
         import anyio
         tool_names = [t.name for t in anyio.run(mcp.list_tools)]
         assert "get_collection" in tool_names
-
-
-import importlib
 
 
 class TestFetchResilience:
