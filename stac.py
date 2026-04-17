@@ -19,7 +19,20 @@ STAC_CATALOG_URL = os.environ.get(
     "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json",
 )
 
-_STAC_TIMEOUT = int(os.environ.get("STAC_TIMEOUT", "15"))
+# Backwards-compatible: STAC_TIMEOUT alone still works as a single knob; the two
+# new vars override it when set. Root is a hard prerequisite (generous timeout);
+# children are individually skippable (tight timeout). See
+# docs/superpowers/specs/2026-04-16-stac-catalog-resilience-design.md.
+_STAC_ROOT_TIMEOUT = int(
+    os.environ.get("STAC_ROOT_TIMEOUT", os.environ.get("STAC_TIMEOUT", "15"))
+)
+_STAC_CHILD_TIMEOUT = int(
+    os.environ.get("STAC_CHILD_TIMEOUT", os.environ.get("STAC_TIMEOUT", "5"))
+)
+_STAC_FETCH_CONCURRENCY = int(os.environ.get("STAC_FETCH_CONCURRENCY", "8"))
+
+# Legacy alias retained so external callers (if any) that read the old name still work.
+_STAC_TIMEOUT = _STAC_CHILD_TIMEOUT
 
 _S3_PUBLIC = "https://s3-west.nrp-nautilus.io/"
 _S3_INTERNAL = (
@@ -262,6 +275,11 @@ def _collection_to_dict(col, sub_children=None) -> dict:
 
 # Parallel cache of structured dicts, populated alongside STAC_DATASETS at startup.
 _STAC_RAW: dict[str, dict] = {}
+
+# Populated by fetch_stac_catalog on the default-catalog path; keys are the best
+# available identifier (real collection id when parse succeeded, else href tail),
+# values are short reason strings. Cleared on each successful default-catalog load.
+STAC_LOAD_ERRORS: dict[str, str] = {}
 
 
 def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> dict[str, str]:

@@ -469,3 +469,59 @@ class TestGetCollectionMCPTool:
         tool_names = [t.name for t in anyio.run(mcp.list_tools)]
         assert "get_collection" in tool_names
 
+
+import importlib
+
+
+class TestFetchResilience:
+    """Tests for per-child timeout, bounded parallelism, and partial-result handling
+    added for mcp-data-server#65."""
+
+    def test_root_timeout_default_is_15(self, monkeypatch):
+        """With no env vars set, STAC_ROOT_TIMEOUT defaults to 15s."""
+        monkeypatch.delenv("STAC_TIMEOUT", raising=False)
+        monkeypatch.delenv("STAC_ROOT_TIMEOUT", raising=False)
+        import stac
+        importlib.reload(stac)
+        assert stac._STAC_ROOT_TIMEOUT == 15
+
+    def test_child_timeout_default_is_5(self, monkeypatch):
+        """With no env vars set, STAC_CHILD_TIMEOUT defaults to 5s."""
+        monkeypatch.delenv("STAC_TIMEOUT", raising=False)
+        monkeypatch.delenv("STAC_CHILD_TIMEOUT", raising=False)
+        import stac
+        importlib.reload(stac)
+        assert stac._STAC_CHILD_TIMEOUT == 5
+
+    def test_fetch_concurrency_default_is_8(self, monkeypatch):
+        """With no env var set, STAC_FETCH_CONCURRENCY defaults to 8."""
+        monkeypatch.delenv("STAC_FETCH_CONCURRENCY", raising=False)
+        import stac
+        importlib.reload(stac)
+        assert stac._STAC_FETCH_CONCURRENCY == 8
+
+    def test_stac_timeout_back_compat_applies_to_both(self, monkeypatch):
+        """If only STAC_TIMEOUT is set, both root and child timeouts adopt its value."""
+        monkeypatch.setenv("STAC_TIMEOUT", "10")
+        monkeypatch.delenv("STAC_ROOT_TIMEOUT", raising=False)
+        monkeypatch.delenv("STAC_CHILD_TIMEOUT", raising=False)
+        import stac
+        importlib.reload(stac)
+        assert stac._STAC_ROOT_TIMEOUT == 10
+        assert stac._STAC_CHILD_TIMEOUT == 10
+
+    def test_new_vars_override_stac_timeout(self, monkeypatch):
+        """When set, STAC_ROOT_TIMEOUT and STAC_CHILD_TIMEOUT take precedence."""
+        monkeypatch.setenv("STAC_TIMEOUT", "10")
+        monkeypatch.setenv("STAC_ROOT_TIMEOUT", "20")
+        monkeypatch.setenv("STAC_CHILD_TIMEOUT", "3")
+        import stac
+        importlib.reload(stac)
+        assert stac._STAC_ROOT_TIMEOUT == 20
+        assert stac._STAC_CHILD_TIMEOUT == 3
+
+    def test_stac_load_errors_exists(self):
+        """Module exposes a STAC_LOAD_ERRORS dict for operators/tests to inspect."""
+        import stac
+        assert isinstance(stac.STAC_LOAD_ERRORS, dict)
+
