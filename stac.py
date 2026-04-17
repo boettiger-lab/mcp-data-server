@@ -59,6 +59,38 @@ def _fuzzy_lookup(mapping: dict, key: str):
     return None
 
 
+def _child_identifier(href: str, title_hint: str = None, fetched_id: str = None) -> str:
+    """Best-effort identifier for a STAC child — used for error reporting when the
+    real collection `id` may not be available (fetch failed before JSON parse).
+
+    Precedence:
+    1. `fetched_id` if given — the real collection id
+    2. The last path segment of the href (directory name for `.../dir/stac-collection.json`,
+       or the file stem for `.../dir/name.json` / `.../dir/name-stac.json`)
+    3. Optionally augmented with `title_hint` when present and non-redundant
+    """
+    if fetched_id:
+        return fetched_id
+    # Strip trailing slash, then take the last non-empty segment.
+    path = href.rstrip("/")
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return title_hint or href
+    tail = segments[-1]
+    # If the tail is a generic collection-json filename, use the parent directory.
+    if tail in ("stac-collection.json", "catalog.json"):
+        tail = segments[-2] if len(segments) >= 2 else tail
+    else:
+        # Strip common suffixes so "foo-stac.json" / "foo.json" become "foo-stac" / "foo".
+        for suffix in (".json",):
+            if tail.endswith(suffix):
+                tail = tail[: -len(suffix)]
+                break
+    if title_hint and title_hint.lower() not in tail.lower():
+        return f"{tail} ({title_hint})"
+    return tail
+
+
 class _TimeoutStacIO(DefaultStacIO):
     def __init__(self, token: str = None, timeout: int = None):
         self._token = token

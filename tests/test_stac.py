@@ -561,3 +561,43 @@ class TestFetchResilience:
         _, kwargs = mock_get.call_args
         assert kwargs.get("timeout") == 3
 
+    def test_child_identifier_prefers_fetched_id(self):
+        """When JSON parse succeeded and we have a real id, use it."""
+        import stac
+        assert stac._child_identifier(
+            "https://s3-west/public-foo/stac-collection.json",
+            title_hint="Foo",
+            fetched_id="real-foo-id",
+        ) == "real-foo-id"
+
+    def test_child_identifier_falls_back_to_href_tail_when_no_id(self):
+        """With no fetched id and no useful tail path, use the last segment."""
+        import stac
+        # Standard tail: the path-segment before /stac-collection.json
+        assert stac._child_identifier(
+            "https://s3-west/public-wyoming/stac-collection.json",
+            title_hint=None,
+            fetched_id=None,
+        ) == "public-wyoming"
+
+    def test_child_identifier_uses_title_when_href_tail_is_generic(self):
+        """For hrefs like .../iplc-poly-stac.json, strip trailing '-stac.json' / '.json'."""
+        import stac
+        # The href ends in a file name rather than a directory; fall back to stem.
+        assert stac._child_identifier(
+            "https://s3-west/public-indigenous/landmark/iplc-poly-stac.json",
+            title_hint=None,
+            fetched_id=None,
+        ) == "iplc-poly-stac"
+
+    def test_child_identifier_combines_tail_and_title_if_title_given(self):
+        """If a link title is available and distinct, include it for clarity."""
+        import stac
+        result = stac._child_identifier(
+            "https://s3-west/public-wyoming/stac-collection.json",
+            title_hint="Wyoming Wildlife",
+            fetched_id=None,
+        )
+        assert "public-wyoming" in result
+        assert "Wyoming Wildlife" in result
+
