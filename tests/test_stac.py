@@ -957,3 +957,38 @@ class TestFetchResilience:
         assert "⚠️" not in out
         assert "could not be loaded" not in out
 
+    def test_cache_miss_refetch_with_all_children_failing_preserves_previous_cache(self):
+        """When a refetch's root succeeds but all children fail, keep the previous
+        STAC_DATASETS — don't wipe an existing good cache during an S3 incident.
+
+        Regression guard for a final-review finding: the clear()/update() pattern
+        previously wiped module state unconditionally on refetch.
+        """
+        from unittest.mock import patch
+        import requests
+        import stac
+
+        self._reset_module_state(stac)
+        # Seed a previously-loaded cache
+        stac.STAC_DATASETS["known-dataset"] = "**Known**\nPreviously loaded"
+        stac._STAC_RAW["known-dataset"] = {"id": "known-dataset"}
+
+        cat = self._make_root_catalog([
+            "https://example.com/public-new/stac-collection.json",
+        ])
+
+        with patch("stac.pystac.Catalog.from_file", return_value=cat), \
+             patch(
+                 "stac.pystac.Collection.from_file",
+                 side_effect=requests.exceptions.Timeout("all children dead"),
+             ):
+            result = stac.fetch_stac_catalog()
+
+        # The new load returned nothing (all children failed)
+        assert result == {}
+        # But the previously-loaded cache is preserved
+        assert "known-dataset" in stac.STAC_DATASETS
+        # The failure is still recorded in errors
+        assert len(stac.STAC_LOAD_ERRORS) == 1
+        assert any("public-new" in k for k in stac.STAC_LOAD_ERRORS.keys())
+

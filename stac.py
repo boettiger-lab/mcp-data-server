@@ -459,10 +459,15 @@ def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> di
         print(f"⚠️ Child fetch failed: {ident} — {reason}", file=sys.stderr)
 
     if not catalog_url:
-        STAC_DATASETS.clear()
-        STAC_DATASETS.update(datasets)
-        _STAC_RAW.clear()
-        _STAC_RAW.update(raw)
+        # Only replace successful-load state (STAC_DATASETS / _STAC_RAW) when the new
+        # load produced something. If every child failed, keep the previous snapshot
+        # rather than wiping a working cache. Errors are always refreshed so operators
+        # and the list_datasets footer see the current failure state.
+        if datasets:
+            STAC_DATASETS.clear()
+            STAC_DATASETS.update(datasets)
+            _STAC_RAW.clear()
+            _STAC_RAW.update(raw)
         STAC_LOAD_ERRORS.clear()
         STAC_LOAD_ERRORS.update(errors)
 
@@ -524,12 +529,10 @@ def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = N
 
     # Cache miss (default catalog only): re-fetch in case datasets were added since startup
     if not catalog_url:
-        refreshed = fetch_stac_catalog()
-        if refreshed:
-            STAC_DATASETS.update(refreshed)
-            result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
-            if result is not None:
-                return result
+        fetch_stac_catalog()  # populates STAC_DATASETS in place if successful
+        result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
+        if result is not None:
+            return result
     return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
 
 
