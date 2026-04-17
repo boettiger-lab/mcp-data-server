@@ -523,3 +523,41 @@ class TestFetchResilience:
         import stac
         assert isinstance(stac.STAC_LOAD_ERRORS, dict)
 
+    def test_timeout_stac_io_uses_configured_timeout(self):
+        """_TimeoutStacIO passes its configured timeout to requests.get."""
+        from unittest.mock import patch, MagicMock
+        import stac
+
+        io = stac._TimeoutStacIO(timeout=7)
+
+        with patch("stac.requests.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.text = "{}"
+            mock_resp.raise_for_status = MagicMock()
+            mock_get.return_value = mock_resp
+            io.read_text_from_href("https://example.com/foo.json")
+
+        mock_get.assert_called_once()
+        _, kwargs = mock_get.call_args
+        assert kwargs.get("timeout") == 7
+
+    def test_timeout_stac_io_default_timeout_falls_back_to_child(self, monkeypatch):
+        """Without an explicit timeout, _TimeoutStacIO uses _STAC_CHILD_TIMEOUT."""
+        monkeypatch.setenv("STAC_CHILD_TIMEOUT", "3")
+        monkeypatch.delenv("STAC_TIMEOUT", raising=False)
+        monkeypatch.delenv("STAC_ROOT_TIMEOUT", raising=False)
+        import stac
+        importlib.reload(stac)
+
+        io = stac._TimeoutStacIO()
+
+        with patch("stac.requests.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.text = "{}"
+            mock_resp.raise_for_status = MagicMock()
+            mock_get.return_value = mock_resp
+            io.read_text_from_href("https://example.com/foo.json")
+
+        _, kwargs = mock_get.call_args
+        assert kwargs.get("timeout") == 3
+

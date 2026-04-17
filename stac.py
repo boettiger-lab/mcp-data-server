@@ -60,15 +60,16 @@ def _fuzzy_lookup(mapping: dict, key: str):
 
 
 class _TimeoutStacIO(DefaultStacIO):
-    def __init__(self, token: str = None):
+    def __init__(self, token: str = None, timeout: int = None):
         self._token = token
+        self._timeout = timeout if timeout is not None else _STAC_CHILD_TIMEOUT
 
     def read_text_from_href(self, href: str) -> str:
         if href.startswith(_S3_PUBLIC):
             href = _S3_INTERNAL + href[len(_S3_PUBLIC):]
         if href.startswith("http"):
             headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
-            resp = requests.get(href, timeout=_STAC_TIMEOUT, headers=headers)
+            resp = requests.get(href, timeout=self._timeout, headers=headers)
             resp.raise_for_status()
             return resp.text
         return super().read_text_from_href(href)
