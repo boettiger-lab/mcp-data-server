@@ -11,6 +11,7 @@ import os
 import sys
 import pystac
 import requests
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pystac.stac_io import DefaultStacIO
 
 
@@ -19,7 +20,20 @@ STAC_CATALOG_URL = os.environ.get(
     "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json",
 )
 
-_STAC_TIMEOUT = int(os.environ.get("STAC_TIMEOUT", "15"))
+# Backwards-compatible: STAC_TIMEOUT alone still works as a single knob; the two
+# new vars override it when set. Root is a hard prerequisite (generous timeout);
+# children are individually skippable (tight timeout). See
+# docs/superpowers/specs/2026-04-16-stac-catalog-resilience-design.md.
+_STAC_ROOT_TIMEOUT = int(
+    os.environ.get("STAC_ROOT_TIMEOUT", os.environ.get("STAC_TIMEOUT", "15"))
+)
+_STAC_CHILD_TIMEOUT = int(
+    os.environ.get("STAC_CHILD_TIMEOUT", os.environ.get("STAC_TIMEOUT", "5"))
+)
+_STAC_FETCH_CONCURRENCY = int(os.environ.get("STAC_FETCH_CONCURRENCY", "8"))
+
+# Legacy alias retained so external callers (if any) that read the old name still work.
+_STAC_TIMEOUT = _STAC_CHILD_TIMEOUT
 
 _S3_PUBLIC = "https://s3-west.nrp-nautilus.io/"
 _S3_INTERNAL = (
@@ -46,16 +60,49 @@ def _fuzzy_lookup(mapping: dict, key: str):
     return None
 
 
+def _child_identifier(href: str, title_hint: str = None, fetched_id: str = None) -> str:
+    """Best-effort identifier for a STAC child — used for error reporting when the
+    real collection `id` may not be available (fetch failed before JSON parse).
+
+    Precedence:
+    1. `fetched_id` if given — the real collection id
+    2. The last path segment of the href (directory name for `.../dir/stac-collection.json`,
+       or the file stem for `.../dir/name.json` / `.../dir/name-stac.json`)
+    3. Optionally augmented with `title_hint` when present and non-redundant
+    """
+    if fetched_id:
+        return fetched_id
+    # Strip trailing slash, then take the last non-empty segment.
+    path = href.rstrip("/")
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return title_hint or href
+    tail = segments[-1]
+    # If the tail is a generic collection-json filename, use the parent directory.
+    if tail in ("stac-collection.json", "catalog.json"):
+        tail = segments[-2] if len(segments) >= 2 else tail
+    else:
+        # Strip common suffixes so "foo-stac.json" / "foo.json" become "foo-stac" / "foo".
+        for suffix in (".json",):
+            if tail.endswith(suffix):
+                tail = tail[: -len(suffix)]
+                break
+    if title_hint and title_hint.lower() not in tail.lower():
+        return f"{tail} ({title_hint})"
+    return tail
+
+
 class _TimeoutStacIO(DefaultStacIO):
-    def __init__(self, token: str = None):
+    def __init__(self, token: str = None, timeout: int = None):
         self._token = token
+        self._timeout = timeout if timeout is not None else _STAC_CHILD_TIMEOUT
 
     def read_text_from_href(self, href: str) -> str:
         if href.startswith(_S3_PUBLIC):
             href = _S3_INTERNAL + href[len(_S3_PUBLIC):]
         if href.startswith("http"):
             headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
-            resp = requests.get(href, timeout=_STAC_TIMEOUT, headers=headers)
+            resp = requests.get(href, timeout=self._timeout, headers=headers)
             resp.raise_for_status()
             return resp.text
         return super().read_text_from_href(href)
@@ -260,55 +307,212 @@ def _collection_to_dict(col, sub_children=None) -> dict:
     return {k: v for k, v in result.items() if v is not None}
 
 
+def _fetch_parent(href: str, title: str | None, token: str | None):
+    """Thread-worker: fetch one top-level child Collection.
+
+    Returns a 3-tuple (col, subchild_hrefs, error):
+    - col: the parsed pystac.Collection on success, else None
+    - subchild_hrefs: list of sub-child hrefs to enqueue next (empty on failure
+      OR when the collection has no children — both cases are valid)
+    - error: None on success, or {identifier: reason} on failure
+
+    Rendering (to markdown and dict) happens in the caller after all fetches
+    complete, so that parents can be rendered with their successfully-fetched
+    sub-children in hand.
+
+    This function must NEVER raise — all exceptions are caught and translated
+    to the error dict.
+    """
+    child_io = _TimeoutStacIO(token=token, timeout=_STAC_CHILD_TIMEOUT)
+    try:
+        col = pystac.Collection.from_file(href, stac_io=child_io)
+        subchild_hrefs = [l.href for l in (col.links or []) if l.rel == "child"]
+        return col, subchild_hrefs, None
+    except Exception as e:
+        ident = _child_identifier(href, title_hint=title)
+        reason = f"{type(e).__name__}: {e}"
+        return None, [], {ident: reason}
+
+
+def _fetch_subchild(href: str, parent_id: str, token: str | None):
+    """Thread-worker: fetch one sub-child Collection (a leaf of a parent).
+
+    Returns a 2-tuple (col, error):
+    - col: the parsed pystac.Collection on success, else None
+    - error: None on success, or {identifier: reason} on failure
+
+    Never raises — all exceptions caught.
+    """
+    child_io = _TimeoutStacIO(token=token, timeout=_STAC_CHILD_TIMEOUT)
+    try:
+        col = pystac.Collection.from_file(href, stac_io=child_io)
+        return col, None
+    except Exception as e:
+        ident = _child_identifier(href, title_hint=None)
+        reason = f"{type(e).__name__}: {e}"
+        return None, {ident: reason}
+
+
 # Parallel cache of structured dicts, populated alongside STAC_DATASETS at startup.
 _STAC_RAW: dict[str, dict] = {}
 
+# Populated by fetch_stac_catalog on the default-catalog path; keys are the best
+# available identifier (real collection id when parse succeeded, else href tail),
+# values are short reason strings. Cleared on each successful default-catalog load.
+STAC_LOAD_ERRORS: dict[str, str] = {}
+
 
 def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> dict[str, str]:
-    """Fetch the STAC catalog and return {collection_id: markdown_summary}."""
+    """Fetch the STAC catalog and return {collection_id: markdown_summary}.
+
+    Resilient to slow / partially-failing S3:
+    - Root fetch uses _STAC_ROOT_TIMEOUT (generous); failure returns {} + records __root__ error.
+    - Parent and sub-child fetches run in a bounded ThreadPoolExecutor using _STAC_CHILD_TIMEOUT
+      (tight); individual failures are isolated and recorded in STAC_LOAD_ERRORS rather than
+      aborting the whole walk.
+    - For the default catalog (no catalog_url), module-level state (STAC_DATASETS, _STAC_RAW,
+      STAC_LOAD_ERRORS) is replaced after the pool drains.
+    """
     url = catalog_url or STAC_CATALOG_URL
+
+    # --- Phase 1: root fetch (must succeed) ---
+    root_io = _TimeoutStacIO(token=catalog_token, timeout=_STAC_ROOT_TIMEOUT)
     try:
-        stac_io = _TimeoutStacIO(token=catalog_token)
-        cat = pystac.Catalog.from_file(url, stac_io=stac_io)
-        datasets = {}
-        raw: dict[str, dict] = {}
-        for child in cat.get_children():
-            sub_children = list(child.get_children())
-            datasets[child.id] = _format_collection(child, sub_children=sub_children)
-            raw[child.id] = _collection_to_dict(child, sub_children=sub_children)
-            # Index child collections so get_dataset / get_collection work with child IDs
-            for sub_child in sub_children:
-                datasets[sub_child.id] = _format_collection(sub_child)
-                raw[sub_child.id] = _collection_to_dict(sub_child)
-        print(f"📂 Loaded {len(datasets)} collections from STAC: {url}", file=sys.stderr)
-        # Update module-level structured cache only for the default catalog
-        if not catalog_url:
-            _STAC_RAW.update(raw)
-        return datasets
+        cat = pystac.Catalog.from_file(url, stac_io=root_io)
     except Exception as e:
-        print(f"⚠️ Failed to load STAC catalog: {e}", file=sys.stderr)
+        reason = f"{type(e).__name__}: {e}"
+        print(f"⚠️ Failed to load STAC root catalog: {reason}", file=sys.stderr)
+        if not catalog_url:
+            STAC_LOAD_ERRORS.clear()
+            STAC_LOAD_ERRORS["__root__"] = reason
         return {}
 
+    # Enumerate parent child-links directly from the parsed root (no HTTP).
+    parent_links = [
+        (l.href, getattr(l, "title", None))
+        for l in (cat.links or [])
+        if l.rel == "child"
+    ]
 
-# Load once at startup
-STAC_DATASETS = fetch_stac_catalog()
+    # --- Phase 2: dynamic parallel fetch ---
+    # parent_cols[id] = pystac.Collection (only successfully-fetched parents)
+    # subchild_cols_by_parent[parent_col_id] = {subchild_id: pystac.Collection}
+    # errors[identifier] = reason
+    parent_cols: dict = {}
+    subchild_cols_by_parent: dict = {}
+    errors: dict = {}
+
+    with ThreadPoolExecutor(max_workers=_STAC_FETCH_CONCURRENCY) as pool:
+        # future -> ("parent", href) OR ("subchild", parent_col_id)
+        pending: dict = {}
+
+        for href, title in parent_links:
+            fut = pool.submit(_fetch_parent, href, title, catalog_token)
+            pending[fut] = ("parent", href)
+
+        while pending:
+            done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+            for fut in done:
+                kind, ctx = pending.pop(fut)
+                if kind == "parent":
+                    col, subchild_hrefs, error = fut.result()
+                    if col is not None:
+                        parent_cols[col.id] = col
+                        if subchild_hrefs:
+                            subchild_cols_by_parent[col.id] = {}
+                        for sub_href in subchild_hrefs:
+                            sub_fut = pool.submit(
+                                _fetch_subchild, sub_href, col.id, catalog_token,
+                            )
+                            pending[sub_fut] = ("subchild", col.id)
+                    if error:
+                        errors.update(error)
+                else:  # subchild
+                    parent_col_id = ctx
+                    col, error = fut.result()
+                    if col is not None:
+                        subchild_cols_by_parent.setdefault(parent_col_id, {})[col.id] = col
+                    if error:
+                        errors.update(error)
+
+    # --- Phase 3: render markdown / dicts; swap module state ---
+    datasets: dict = {}
+    raw: dict = {}
+    for parent_id, col in parent_cols.items():
+        sub_cols = list(subchild_cols_by_parent.get(parent_id, {}).values())
+        datasets[parent_id] = _format_collection(col, sub_children=sub_cols)
+        raw[parent_id] = _collection_to_dict(
+            col, sub_children=sub_cols if sub_cols else None,
+        )
+        for sub_id, sub_col in subchild_cols_by_parent.get(parent_id, {}).items():
+            # Explicit empty list so _format_collection doesn't fire another HTTP call
+            # trying to discover (absent) grandchildren.
+            datasets[sub_id] = _format_collection(sub_col, sub_children=[])
+            raw[sub_id] = _collection_to_dict(sub_col, sub_children=None)
+
+    print(
+        f"📂 Loaded {len(datasets)} collections "
+        f"({len(errors)} failed) from STAC: {url}",
+        file=sys.stderr,
+    )
+    for ident, reason in errors.items():
+        print(f"⚠️ Child fetch failed: {ident} — {reason}", file=sys.stderr)
+
+    if not catalog_url:
+        # Only replace successful-load state (STAC_DATASETS / _STAC_RAW) when the new
+        # load produced something. If every child failed, keep the previous snapshot
+        # rather than wiping a working cache. Errors are always refreshed so operators
+        # and the list_datasets footer see the current failure state.
+        if datasets:
+            STAC_DATASETS.clear()
+            STAC_DATASETS.update(datasets)
+            _STAC_RAW.clear()
+            _STAC_RAW.update(raw)
+        STAC_LOAD_ERRORS.clear()
+        STAC_LOAD_ERRORS.update(errors)
+
+    return datasets
+
+
+# Module-level caches — declared before the startup load so the loader's
+# clear()/update() pattern works on first call.
+STAC_DATASETS: dict[str, str] = {}
+
+# Kick off the initial load at import. Populates STAC_DATASETS, _STAC_RAW,
+# STAC_LOAD_ERRORS in place.
+fetch_stac_catalog()
 
 
 def list_datasets(catalog_url: str = None, catalog_token: str = None) -> str:
-    """List all available datasets from the STAC catalog."""
+    """List all available datasets from the STAC catalog.
+
+    Appends a warning footer when `STAC_LOAD_ERRORS` is non-empty, so callers
+    can distinguish "not in catalog" from "failed to load this time."
+    """
     if catalog_url:
         datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
         url = catalog_url
+        # Errors for custom catalogs are not tracked in module state; caller
+        # can detect failure via returned dict being empty or partial.
+        footer_errors: dict = {}
     else:
         datasets = STAC_DATASETS
         url = STAC_CATALOG_URL
-    if not datasets:
+        footer_errors = STAC_LOAD_ERRORS
+    if not datasets and not footer_errors:
         return f"No datasets loaded. STAC catalog: {url}"
     lines = [f"# Available Datasets ({len(datasets)} collections)\n"]
     lines.append(f"STAC catalog: `{url}`\n")
     for cid, summary in datasets.items():
         first_line = summary.split("\n")[0]
         lines.append(f"- **{cid}**: {first_line}")
+    if footer_errors:
+        lines.append("")
+        err_pairs = ", ".join(f"{k} ({v.split(':', 1)[0]})" for k, v in footer_errors.items())
+        lines.append(
+            f"⚠️ {len(footer_errors)} collection"
+            f"{'s' if len(footer_errors) != 1 else ''} could not be loaded: {err_pairs}"
+        )
     return "\n".join(lines)
 
 
@@ -325,12 +529,10 @@ def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = N
 
     # Cache miss (default catalog only): re-fetch in case datasets were added since startup
     if not catalog_url:
-        refreshed = fetch_stac_catalog()
-        if refreshed:
-            STAC_DATASETS.update(refreshed)
-            result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
-            if result is not None:
-                return result
+        fetch_stac_catalog()  # populates STAC_DATASETS in place if successful
+        result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
+        if result is not None:
+            return result
     return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
 
 
