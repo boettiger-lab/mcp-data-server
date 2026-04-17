@@ -432,7 +432,6 @@ def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> di
                     col, error = fut.result()
                     if col is not None:
                         subchild_cols_by_parent.setdefault(parent_col_id, {})[col.id] = col
-                        print(f"📥 Loaded sub-child: {col.id}", file=sys.stderr)
                     if error:
                         errors.update(error)
 
