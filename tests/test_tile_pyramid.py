@@ -78,11 +78,38 @@ class TestBuildPyramidSQL:
         # Only the finest level — no UNION ALL.
         assert "UNION ALL" not in sql
 
+    def test_count_mode_emits_count_column_no_value_cols(self):
+        sql = build_pyramid_sql(
+            user_sql="SELECT h8 FROM src",
+            finest_res=8, min_res=2, agg="COUNT",
+            value_columns=["count"], h3_column="h8",
+            output_uri="s3://public-output/hex/abc/",
+        )
+        # Parents: COUNT(*) AS count at every parent level.
+        assert "COUNT(*) AS count" in sql
+        # Finest: literal 1 AS count (no aggregation at finest level).
+        assert "1 AS count" in sql
+        # No stray references to user value columns (there are none).
+        assert 'AVG(' not in sql and 'SUM(' not in sql
+
+    def test_count_mode_finest_level_has_literal_one(self):
+        sql = build_pyramid_sql(
+            user_sql="SELECT h8 FROM src",
+            finest_res=5, min_res=2, agg="COUNT",
+            value_columns=["count"], h3_column="h8",
+            output_uri="s3://public-output/hex/abc/",
+        )
+        # Finest-level SELECT is identifiable by the "5 AS res" literal.
+        finest_select = re.search(r"SELECT[^)]*?5 AS res FROM src", sql, re.DOTALL)
+        assert finest_select is not None
+        assert "1 AS count" in finest_select.group(0)
+        assert "COUNT(*)" not in finest_select.group(0)
+
 
 import os
 import duckdb
 from pathlib import Path
-from tiles.pyramid import register_hex_tiles
+from tiles.pyramid import register_hex_tiles, _inspect_user_sql
 
 
 @pytest.fixture
@@ -103,6 +130,24 @@ def h3_conn():
     con.sql("INSTALL httpfs; LOAD httpfs")
     yield con
     con.close()
+
+
+class TestInspectUserSQL:
+    def test_allows_single_column_sql(self, h3_conn):
+        # SQL returning only the h3 index — valid input for agg="COUNT".
+        h3_col, value_cols = _inspect_user_sql(
+            h3_conn, "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5"
+        )
+        assert h3_col == "h5"
+        assert value_cols == []
+
+    def test_still_extracts_value_cols_when_present(self, h3_conn):
+        h3_col, value_cols = _inspect_user_sql(
+            h3_conn,
+            "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS v1, 2.0 AS v2",
+        )
+        assert h3_col == "h5"
+        assert value_cols == ["v1", "v2"]
 
 
 class TestRegisterHexTiles:
@@ -152,6 +197,91 @@ class TestRegisterHexTiles:
         r2 = register_hex_tiles(con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4)
         assert r1["hash"] == r2["hash"]
 
+    def test_count_agg_with_index_only_sql(self, local_bucket, h3_conn):
+        # Three rows → two map to the same res=5 cell, one to another.
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5
+            FROM (VALUES (37.8, -122.3),
+                         (37.80001, -122.30001),
+                         (40.0, -100.0)) t(lat, lng)
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql,
+            finest_res=5, min_res=2, agg="COUNT", zoom_offset=4,
+        )
+        assert result["value_columns"] == ["count"]
+        # Verify the parquet pyramid actually has the count column.
+        import duckdb as _d
+        for res in (2, 3, 4, 5):
+            uri = str(local_bucket / "hex" / result["hash"] / f"res={res}" / "*.parquet")
+            cols = _d.connect(":memory:").sql(f"SELECT * FROM read_parquet('{uri}') LIMIT 0").columns
+            assert "count" in cols, f"res={res} missing 'count' column: {cols}"
+
+    def test_count_agg_ignores_user_value_columns(self, local_bucket, h3_conn):
+        # User supplies an extra column; COUNT mode drops it.
+        user_sql = """
+            SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 'ignored' AS extra
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql,
+            finest_res=5, min_res=5, agg="COUNT", zoom_offset=4,
+        )
+        assert result["value_columns"] == ["count"]
+
+    def test_non_count_still_requires_value_columns(self, local_bucket, h3_conn):
+        with pytest.raises(ValueError, match="value column"):
+            register_hex_tiles(
+                con=h3_conn,
+                sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5",
+                finest_res=5, min_res=5, agg="AVG", zoom_offset=4,
+            )
+
+    def test_value_stats_returned_per_resolution(self, local_bucket, h3_conn):
+        # 5 rows, 3 distinct res=5 cells. At finest res the pyramid stores
+        # `1 AS count` per input row (ungrouped), so naive MIN/MAX gives
+        # {1, 1}. At coarser parent resolutions rows collapse into fewer
+        # cells and COUNT(*) produces max counts > 1.
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5
+            FROM (VALUES (37.80, -122.30),
+                         (37.80001, -122.30001),
+                         (37.80002, -122.30002),
+                         (38.00, -122.50),
+                         (40.00, -100.00)) t(lat, lng)
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql,
+            finest_res=5, min_res=3, agg="COUNT", zoom_offset=4,
+        )
+        stats = result["value_stats"]
+        assert set(stats.keys()) == {"count"}
+        by_res = stats["count"]["by_res"]
+        # Resolutions 3, 4, 5 all present (string keys).
+        assert set(by_res.keys()) == {"3", "4", "5"}
+        # Finest-res parquet carries `1 AS count` per row; MIN/MAX collapse to 1.
+        assert by_res["5"]["min"] == 1
+        assert by_res["5"]["max"] == 1
+        # Coarser resolutions aggregate via COUNT(*); at least one parent cell
+        # contains 3 of the clustered points at res=4.
+        assert by_res["4"]["max"] >= 3
+        # Coarser levels can only aggregate further — max is non-decreasing.
+        assert by_res["3"]["max"] >= by_res["4"]["max"]
+
+    def test_value_stats_for_non_count_agg(self, local_bucket, h3_conn):
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5, val
+            FROM (VALUES (37.8, -122.3, 1.0),
+                         (38.0, -122.5, 5.0)) t(lat, lng, val)
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql,
+            finest_res=5, min_res=5, agg="AVG", zoom_offset=4,
+        )
+        stats = result["value_stats"]
+        assert set(stats.keys()) == {"val"}
+        assert stats["val"]["by_res"]["5"]["min"] == 1.0
+        assert stats["val"]["by_res"]["5"]["max"] == 5.0
+
 
 import json as _json
 
@@ -170,6 +300,18 @@ class TestTilesetMetadata:
         assert meta["agg"] == "SUM"
         assert meta["zoom_offset"] == 3
         assert meta["value_columns"] == ["val"]
+
+    def test_metadata_includes_value_stats(self, local_bucket, h3_conn):
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5"
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=3, agg="COUNT", zoom_offset=4,
+        )
+        meta_path = local_bucket / "hex" / result["hash"] / "metadata.json"
+        meta = _json.loads(meta_path.read_text())
+        assert "value_stats" in meta
+        assert set(meta["value_stats"]["count"]["by_res"].keys()) == {"3", "4", "5"}
+        # Sanity: persisted stats equal the returned stats.
+        assert meta["value_stats"] == result["value_stats"]
 
 
 from tiles.db import build_tile_connection
