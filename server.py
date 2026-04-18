@@ -11,7 +11,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.session import BaseSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from stac import STAC_DATASETS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection
+from stac import STAC_DATASETS, STAC_LOAD_ERRORS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection
 
 # Workaround for https://github.com/boettiger-lab/mcp-data-server/issues/5
 # send_notification crashes with ClosedResourceError when the client disconnects
@@ -276,6 +276,19 @@ class _BearerAuthMiddleware(BaseHTTPMiddleware):
 # 10. SERVER START
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
+    # If the STAC root catalog was unreachable at startup, serving would give
+    # clients a useless empty catalog. Exit non-zero so Kubernetes restarts the
+    # pod and gets a fresh attempt against whatever S3 looks like now. Child
+    # failures (partial catalog) are fine — the resilience design serves what
+    # loaded and records the rest in STAC_LOAD_ERRORS for list_datasets's footer.
+    if "__root__" in STAC_LOAD_ERRORS:
+        print(
+            "💀 STAC root catalog unreachable at startup — exiting so k8s can "
+            f"restart and retry. Reason: {STAC_LOAD_ERRORS['__root__']}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     app = mcp.streamable_http_app()
     app.router.redirect_slashes = False
     mount_tiles(app)

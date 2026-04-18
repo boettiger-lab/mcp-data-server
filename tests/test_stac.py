@@ -541,12 +541,13 @@ class TestFetchResilience:
         importlib.reload(stac)
         assert stac._STAC_CHILD_TIMEOUT == 5
 
-    def test_fetch_concurrency_default_is_8(self, monkeypatch):
-        """With no env var set, STAC_FETCH_CONCURRENCY defaults to 8."""
+    def test_fetch_concurrency_default_is_16(self, monkeypatch):
+        """Default concurrency is 16 — sized so the main pool plus the retry pass
+        both fit in the readiness-probe budget."""
         monkeypatch.delenv("STAC_FETCH_CONCURRENCY", raising=False)
         import stac
         importlib.reload(stac)
-        assert stac._STAC_FETCH_CONCURRENCY == 8
+        assert stac._STAC_FETCH_CONCURRENCY == 16
 
     def test_stac_timeout_back_compat_applies_to_both(self, monkeypatch):
         """If only STAC_TIMEOUT is set, both root and child timeouts adopt its value."""
@@ -991,4 +992,108 @@ class TestFetchResilience:
         # The failure is still recorded in errors
         assert len(stac.STAC_LOAD_ERRORS) == 1
         assert any("public-new" in k for k in stac.STAC_LOAD_ERRORS.keys())
+
+    def test_child_retry_timeout_default_is_8(self, monkeypatch):
+        """Retry pass uses a longer per-child timeout (default 8s) to rescue borderline slow children."""
+        monkeypatch.delenv("STAC_CHILD_RETRY_TIMEOUT", raising=False)
+        import stac
+        importlib.reload(stac)
+        assert stac._STAC_CHILD_RETRY_TIMEOUT == 8
+
+    def test_retry_rescues_transient_parent_failure(self):
+        """A parent that fails the first pass but succeeds on retry ends up in the catalog
+        and out of STAC_LOAD_ERRORS."""
+        from unittest.mock import patch
+        import requests
+        import stac
+
+        self._reset_module_state(stac)
+
+        cat = self._make_root_catalog([
+            "https://example.com/public-flaky/stac-collection.json",
+        ])
+        col = self._make_leaf_collection("flaky")
+
+        # First call raises Timeout; subsequent calls return the Collection.
+        call_count = {"n": 0}
+        def flaky_from_file(href, *args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise requests.exceptions.Timeout("first pass slow")
+            return col
+
+        with patch("stac.pystac.Catalog.from_file", return_value=cat), \
+             patch("stac.pystac.Collection.from_file", side_effect=flaky_from_file):
+            result = stac.fetch_stac_catalog()
+
+        # Retry saved it
+        assert "flaky" in result
+        assert call_count["n"] == 2  # one failure + one retry
+        # Nothing in the error dict — retry cleared the first-pass failure
+        assert stac.STAC_LOAD_ERRORS == {}
+
+    def test_retry_failure_is_final(self):
+        """If both the initial attempt and the retry fail, the error stays in STAC_LOAD_ERRORS
+        and the collection is missing from the catalog."""
+        from unittest.mock import patch
+        import requests
+        import stac
+
+        self._reset_module_state(stac)
+
+        cat = self._make_root_catalog([
+            "https://example.com/public-dead/stac-collection.json",
+        ])
+
+        with patch("stac.pystac.Catalog.from_file", return_value=cat), \
+             patch(
+                 "stac.pystac.Collection.from_file",
+                 side_effect=requests.exceptions.Timeout("always slow"),
+             ):
+            result = stac.fetch_stac_catalog()
+
+        assert result == {}
+        assert len(stac.STAC_LOAD_ERRORS) == 1
+        assert any("public-dead" in k for k in stac.STAC_LOAD_ERRORS.keys())
+
+    def test_retry_uses_child_retry_timeout(self, monkeypatch):
+        """The retry pass constructs _TimeoutStacIO with _STAC_CHILD_RETRY_TIMEOUT, not _STAC_CHILD_TIMEOUT."""
+        from unittest.mock import patch, MagicMock
+        import requests
+        import stac
+
+        monkeypatch.setenv("STAC_CHILD_TIMEOUT", "5")
+        monkeypatch.setenv("STAC_CHILD_RETRY_TIMEOUT", "8")
+        importlib.reload(stac)
+        self._reset_module_state(stac)
+
+        cat = self._make_root_catalog([
+            "https://example.com/public-flaky/stac-collection.json",
+        ])
+        col = self._make_leaf_collection("flaky")
+
+        seen_timeouts = []
+        orig_TimeoutStacIO = stac._TimeoutStacIO
+
+        def capturing_stac_io(*args, **kwargs):
+            seen_timeouts.append(kwargs.get("timeout"))
+            return orig_TimeoutStacIO(*args, **kwargs)
+
+        call_count = {"n": 0}
+        def flaky_from_file(href, *args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise requests.exceptions.Timeout("slow")
+            return col
+
+        with patch("stac._TimeoutStacIO", side_effect=capturing_stac_io), \
+             patch("stac.pystac.Catalog.from_file", return_value=cat), \
+             patch("stac.pystac.Collection.from_file", side_effect=flaky_from_file):
+            stac.fetch_stac_catalog()
+
+        # Filter out the root_io construction (timeout=_STAC_ROOT_TIMEOUT=15)
+        # and look only at the child-fetch constructions.
+        child_timeouts = [t for t in seen_timeouts if t != stac._STAC_ROOT_TIMEOUT]
+        assert 5 in child_timeouts, f"expected first-pass child timeout (5s) in {child_timeouts}"
+        assert 8 in child_timeouts, f"expected retry child timeout (8s) in {child_timeouts}"
 
