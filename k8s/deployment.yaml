@@ -20,7 +20,7 @@ spec:
         args:
           - |
             apt-get update && apt-get install -y git && \
-            git clone --branch v0.3.0 https://github.com/boettiger-lab/mcp-data-server.git /app && \
+            git clone --branch v0.4.0 https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
             uv run --with "mcp" --with "duckdb" --with pandas --with uvicorn --with tabulate --with pystac --with requests server.py
         env:
