@@ -109,7 +109,7 @@ class TestBuildPyramidSQL:
 import os
 import duckdb
 from pathlib import Path
-from tiles.pyramid import register_hex_tiles
+from tiles.pyramid import register_hex_tiles, _inspect_user_sql
 
 
 @pytest.fixture
@@ -130,6 +130,24 @@ def h3_conn():
     con.sql("INSTALL httpfs; LOAD httpfs")
     yield con
     con.close()
+
+
+class TestInspectUserSQL:
+    def test_allows_single_column_sql(self, h3_conn):
+        # SQL returning only the h3 index — valid input for agg="COUNT".
+        h3_col, value_cols = _inspect_user_sql(
+            h3_conn, "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5"
+        )
+        assert h3_col == "h5"
+        assert value_cols == []
+
+    def test_still_extracts_value_cols_when_present(self, h3_conn):
+        h3_col, value_cols = _inspect_user_sql(
+            h3_conn,
+            "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS v1, 2.0 AS v2",
+        )
+        assert h3_col == "h5"
+        assert value_cols == ["v1", "v2"]
 
 
 class TestRegisterHexTiles:

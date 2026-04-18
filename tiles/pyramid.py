@@ -81,15 +81,16 @@ def _json_dumps_escaped(obj) -> str:
 
 
 def _inspect_user_sql(con: duckdb.DuckDBPyConnection, user_sql: str):
-    """Run user SQL with LIMIT 0 to extract column names without materializing data."""
+    """Run user SQL with LIMIT 0 to extract column names without materializing data.
+
+    Returns (h3_column, value_columns). value_columns may be empty — the caller
+    is responsible for validating that an empty list is acceptable for the
+    chosen aggregation (only agg="COUNT" supports it).
+    """
     columns = con.sql(f"SELECT * FROM ({user_sql}) LIMIT 0").columns
     if not columns:
         raise ValueError("user SQL returned no columns")
-    h3_column = columns[0]
-    value_columns = list(columns[1:])
-    if not value_columns:
-        raise ValueError("user SQL must return at least one value column after the H3 index")
-    return h3_column, value_columns
+    return columns[0], list(columns[1:])
 
 
 def register_hex_tiles(
