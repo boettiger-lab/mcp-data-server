@@ -236,6 +236,52 @@ class TestRegisterHexTiles:
                 finest_res=5, min_res=5, agg="AVG", zoom_offset=4,
             )
 
+    def test_value_stats_returned_per_resolution(self, local_bucket, h3_conn):
+        # 5 rows, 3 distinct res=5 cells. At finest res the pyramid stores
+        # `1 AS count` per input row (ungrouped), so naive MIN/MAX gives
+        # {1, 1}. At coarser parent resolutions rows collapse into fewer
+        # cells and COUNT(*) produces max counts > 1.
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5
+            FROM (VALUES (37.80, -122.30),
+                         (37.80001, -122.30001),
+                         (37.80002, -122.30002),
+                         (38.00, -122.50),
+                         (40.00, -100.00)) t(lat, lng)
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql,
+            finest_res=5, min_res=3, agg="COUNT", zoom_offset=4,
+        )
+        stats = result["value_stats"]
+        assert set(stats.keys()) == {"count"}
+        by_res = stats["count"]["by_res"]
+        # Resolutions 3, 4, 5 all present (string keys).
+        assert set(by_res.keys()) == {"3", "4", "5"}
+        # Finest-res parquet carries `1 AS count` per row; MIN/MAX collapse to 1.
+        assert by_res["5"]["min"] == 1
+        assert by_res["5"]["max"] == 1
+        # Coarser resolutions aggregate via COUNT(*); at least one parent cell
+        # contains 3 of the clustered points at res=4.
+        assert by_res["4"]["max"] >= 3
+        # Coarser levels can only aggregate further — max is non-decreasing.
+        assert by_res["3"]["max"] >= by_res["4"]["max"]
+
+    def test_value_stats_for_non_count_agg(self, local_bucket, h3_conn):
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5, val
+            FROM (VALUES (37.8, -122.3, 1.0),
+                         (38.0, -122.5, 5.0)) t(lat, lng, val)
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql,
+            finest_res=5, min_res=5, agg="AVG", zoom_offset=4,
+        )
+        stats = result["value_stats"]
+        assert set(stats.keys()) == {"val"}
+        assert stats["val"]["by_res"]["5"]["min"] == 1.0
+        assert stats["val"]["by_res"]["5"]["max"] == 5.0
+
 
 import json as _json
 
@@ -254,6 +300,18 @@ class TestTilesetMetadata:
         assert meta["agg"] == "SUM"
         assert meta["zoom_offset"] == 3
         assert meta["value_columns"] == ["val"]
+
+    def test_metadata_includes_value_stats(self, local_bucket, h3_conn):
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5"
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=3, agg="COUNT", zoom_offset=4,
+        )
+        meta_path = local_bucket / "hex" / result["hash"] / "metadata.json"
+        meta = _json.loads(meta_path.read_text())
+        assert "value_stats" in meta
+        assert set(meta["value_stats"]["count"]["by_res"].keys()) == {"3", "4", "5"}
+        # Sanity: persisted stats equal the returned stats.
+        assert meta["value_stats"] == result["value_stats"]
 
 
 from tiles.db import build_tile_connection

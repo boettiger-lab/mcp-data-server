@@ -5,6 +5,7 @@ Tile requests read directly from the pyramid — no coordination needed.
 """
 import json
 import os
+from decimal import Decimal
 from typing import List
 
 import duckdb
@@ -144,12 +145,33 @@ def register_hex_tiles(
         os.makedirs(output_uri, exist_ok=True)
     con.sql(pyramid_sql)
 
+    # Per-resolution min/max for every output value column.
+    def _jsonable(v):
+        # DuckDB returns DECIMAL for literal-typed numerics; coerce to float
+        # so the metadata sidecar stays JSON-serializable.
+        if isinstance(v, Decimal):
+            return float(v)
+        return v
+
+    value_stats = {}
+    for col in value_columns:
+        by_res = {}
+        for res in range(min_res, finest_res + 1):
+            uri = f"{output_uri}res={res}/*.parquet"
+            row = con.sql(
+                f'SELECT MIN("{col}") AS mn, MAX("{col}") AS mx '
+                f"FROM read_parquet('{uri}')"
+            ).fetchone()
+            by_res[str(res)] = {"min": _jsonable(row[0]), "max": _jsonable(row[1])}
+        value_stats[col] = {"by_res": by_res}
+
     metadata = {
         "finest_res": finest_res,
         "min_res": min_res,
         "agg": agg,
         "zoom_offset": zoom_offset,
         "value_columns": value_columns,
+        "value_stats": value_stats,
     }
     metadata_sql = (
         f"COPY (SELECT '{_json_dumps_escaped(metadata)}' AS j) "
@@ -177,5 +199,6 @@ def register_hex_tiles(
         "min_res": min_res,
         "zoom_offset": zoom_offset,
         "value_columns": value_columns,
+        "value_stats": value_stats,
         "feature_count_finest": feature_count,
     }
