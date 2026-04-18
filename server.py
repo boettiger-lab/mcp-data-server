@@ -247,10 +247,8 @@ def register_hex_tiles(
       properties. For agg="COUNT" this is ["count"]; otherwise the user's
       value columns.
     - `value_stats`: {<col>: {"by_res": {"<res>": {"min": <num>, "max": <num>}}}}.
-      Clients colouring across multiple zooms should match on the per-feature
-      `res` property to pick the right min/max band for each resolution, since
-      COUNT/SUM ranges differ by ~7× per H3 level.
-    - `bounds`, `finest_res`, `min_res`, `zoom_offset`, `feature_count_finest`:
+      Per-resolution min/max for each value column — pass to the map client.
+    - `hash`, `bounds`, `finest_res`, `min_res`, `zoom_offset`, `feature_count_finest`:
       tileset metadata.
 
     MapLibre usage:
