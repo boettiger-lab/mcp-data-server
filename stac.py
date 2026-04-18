@@ -30,7 +30,13 @@ _STAC_ROOT_TIMEOUT = int(
 _STAC_CHILD_TIMEOUT = int(
     os.environ.get("STAC_CHILD_TIMEOUT", os.environ.get("STAC_TIMEOUT", "5"))
 )
-_STAC_FETCH_CONCURRENCY = int(os.environ.get("STAC_FETCH_CONCURRENCY", "8"))
+_STAC_FETCH_CONCURRENCY = int(os.environ.get("STAC_FETCH_CONCURRENCY", "16"))
+
+# Child fetches that time out on the first pass are retried once, each with a
+# longer per-child timeout. Rescues tail-latency failures without leaving
+# otherwise-healthy collections out of the catalog. A persistent failure
+# (both attempts time out) stays in STAC_LOAD_ERRORS.
+_STAC_CHILD_RETRY_TIMEOUT = int(os.environ.get("STAC_CHILD_RETRY_TIMEOUT", "8"))
 
 # Legacy alias retained so external callers (if any) that read the old name still work.
 _STAC_TIMEOUT = _STAC_CHILD_TIMEOUT
@@ -307,7 +313,7 @@ def _collection_to_dict(col, sub_children=None) -> dict:
     return {k: v for k, v in result.items() if v is not None}
 
 
-def _fetch_parent(href: str, title: str | None, token: str | None):
+def _fetch_parent(href: str, title: str | None, token: str | None, timeout: int = None):
     """Thread-worker: fetch one top-level child Collection.
 
     Returns a 3-tuple (col, subchild_hrefs, error):
@@ -322,8 +328,13 @@ def _fetch_parent(href: str, title: str | None, token: str | None):
 
     This function must NEVER raise — all exceptions are caught and translated
     to the error dict.
+
+    `timeout` overrides the default child timeout; used by the retry pass.
     """
-    child_io = _TimeoutStacIO(token=token, timeout=_STAC_CHILD_TIMEOUT)
+    child_io = _TimeoutStacIO(
+        token=token,
+        timeout=timeout if timeout is not None else _STAC_CHILD_TIMEOUT,
+    )
     try:
         col = pystac.Collection.from_file(href, stac_io=child_io)
         subchild_hrefs = [l.href for l in (col.links or []) if l.rel == "child"]
@@ -334,7 +345,7 @@ def _fetch_parent(href: str, title: str | None, token: str | None):
         return None, [], {ident: reason}
 
 
-def _fetch_subchild(href: str, parent_id: str, token: str | None):
+def _fetch_subchild(href: str, parent_id: str, token: str | None, timeout: int = None):
     """Thread-worker: fetch one sub-child Collection (a leaf of a parent).
 
     Returns a 2-tuple (col, error):
@@ -342,8 +353,13 @@ def _fetch_subchild(href: str, parent_id: str, token: str | None):
     - error: None on success, or {identifier: reason} on failure
 
     Never raises — all exceptions caught.
+
+    `timeout` overrides the default child timeout; used by the retry pass.
     """
-    child_io = _TimeoutStacIO(token=token, timeout=_STAC_CHILD_TIMEOUT)
+    child_io = _TimeoutStacIO(
+        token=token,
+        timeout=timeout if timeout is not None else _STAC_CHILD_TIMEOUT,
+    )
     try:
         col = pystac.Collection.from_file(href, stac_io=child_io)
         return col, None
@@ -402,19 +418,27 @@ def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> di
     subchild_cols_by_parent: dict = {}
     errors: dict = {}
 
+    # Failed items recorded during the initial pool drain so we can retry them once
+    # below with a longer per-child timeout. Rescues tail-latency failures without
+    # leaving healthy-but-slow collections out of the catalog.
+    failed_parents: list[tuple[str, str | None]] = []      # (href, title)
+    failed_subchildren: list[tuple[str, str]] = []         # (href, parent_col_id)
+
     with ThreadPoolExecutor(max_workers=_STAC_FETCH_CONCURRENCY) as pool:
-        # future -> ("parent", href) OR ("subchild", parent_col_id)
+        # future -> ("parent", href, title) OR ("subchild", href, parent_col_id)
         pending: dict = {}
 
         for href, title in parent_links:
             fut = pool.submit(_fetch_parent, href, title, catalog_token)
-            pending[fut] = ("parent", href)
+            pending[fut] = ("parent", href, title)
 
         while pending:
             done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
             for fut in done:
-                kind, ctx = pending.pop(fut)
+                entry = pending.pop(fut)
+                kind = entry[0]
                 if kind == "parent":
+                    _, href, title = entry
                     col, subchild_hrefs, error = fut.result()
                     if col is not None:
                         parent_cols[col.id] = col
@@ -424,14 +448,67 @@ def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> di
                             sub_fut = pool.submit(
                                 _fetch_subchild, sub_href, col.id, catalog_token,
                             )
-                            pending[sub_fut] = ("subchild", col.id)
+                            pending[sub_fut] = ("subchild", sub_href, col.id)
                     if error:
                         errors.update(error)
+                        failed_parents.append((href, title))
                 else:  # subchild
-                    parent_col_id = ctx
+                    _, sub_href, parent_col_id = entry
                     col, error = fut.result()
                     if col is not None:
                         subchild_cols_by_parent.setdefault(parent_col_id, {})[col.id] = col
+                    if error:
+                        errors.update(error)
+                        failed_subchildren.append((sub_href, parent_col_id))
+
+    # --- Phase 2.5: retry failed children once with a longer timeout ---
+    # Rescues tail-latency failures (borderline-slow S3 responses). A retry that
+    # also fails leaves the original error in STAC_LOAD_ERRORS. If a previously-failed
+    # parent succeeds on retry, its sub-children are NOT re-fetched here — they
+    # weren't attempted the first time because we didn't have the parent's JSON;
+    # a cache-miss on any specific sub-child ID will trigger a fresh walk later.
+    if failed_parents or failed_subchildren:
+        with ThreadPoolExecutor(max_workers=_STAC_FETCH_CONCURRENCY) as retry_pool:
+            retry_futures: dict = {}
+            for href, title in failed_parents:
+                fut = retry_pool.submit(
+                    _fetch_parent, href, title, catalog_token, _STAC_CHILD_RETRY_TIMEOUT,
+                )
+                retry_futures[fut] = ("parent", href, title)
+            for sub_href, parent_col_id in failed_subchildren:
+                fut = retry_pool.submit(
+                    _fetch_subchild, sub_href, parent_col_id, catalog_token, _STAC_CHILD_RETRY_TIMEOUT,
+                )
+                retry_futures[fut] = ("subchild", sub_href, parent_col_id)
+            for fut in retry_futures:
+                entry = retry_futures[fut]
+                kind = entry[0]
+                if kind == "parent":
+                    _, href, title = entry
+                    col, _subchild_hrefs, error = fut.result()
+                    if col is not None:
+                        parent_cols[col.id] = col
+                        # Clear the first-pass error for this parent since retry succeeded
+                        errors.pop(_child_identifier(href, title_hint=title), None)
+                        print(
+                            f"🔁 Retry succeeded for parent: {col.id}",
+                            file=sys.stderr,
+                        )
+                    # If retry also failed, `error` carries the same identifier key as the
+                    # first-pass error; updating with it leaves the STAC_LOAD_ERRORS entry
+                    # pointing at the most-recent (retry) reason.
+                    if error:
+                        errors.update(error)
+                else:  # subchild
+                    _, sub_href, parent_col_id = entry
+                    col, error = fut.result()
+                    if col is not None:
+                        subchild_cols_by_parent.setdefault(parent_col_id, {})[col.id] = col
+                        errors.pop(_child_identifier(sub_href, title_hint=None), None)
+                        print(
+                            f"🔁 Retry succeeded for sub-child: {col.id}",
+                            file=sys.stderr,
+                        )
                     if error:
                         errors.update(error)
 
