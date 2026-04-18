@@ -232,13 +232,28 @@ def register_hex_tiles(
     roughly >100k cells, or any case where the user wants to visualize hexes
     directly on the map (rather than color an existing polygon layer).
 
-    Input SQL contract: return (h3_index, value1, value2, ...) where the first
-    column is an H3 index at resolution `finest_res`, and subsequent columns
-    are numeric values. All value columns are aggregated by `agg` (AVG, SUM, MIN,
-    MAX, COUNT) at each coarser resolution down to `min_res`.
+    Input SQL contract:
+    - First column must be an H3 index at resolution `finest_res`.
+    - For agg="COUNT": no other columns required. Output has a single `count`
+      column (row count per hex). If the user SQL returns extra columns, they
+      are ignored.
+    - For agg in {AVG, SUM, MIN, MAX}: at least one numeric value column must
+      follow the H3 index. Each is aggregated by `agg` at each coarser
+      resolution down to `min_res`.
 
-    Returns a dict with `tile_url_template` that any MapLibre client can consume
-    via:
+    Returns a dict with:
+    - `tile_url_template`: MapLibre vector tile URL with {z}/{x}/{y} placeholders.
+    - `value_columns`: list of output column names available as MVT feature
+      properties. For agg="COUNT" this is ["count"]; otherwise the user's
+      value columns.
+    - `value_stats`: {<col>: {"by_res": {"<res>": {"min": <num>, "max": <num>}}}}.
+      Clients colouring across multiple zooms should match on the per-feature
+      `res` property to pick the right min/max band for each resolution, since
+      COUNT/SUM ranges differ by ~7× per H3 level.
+    - `bounds`, `finest_res`, `min_res`, `zoom_offset`, `feature_count_finest`:
+      tileset metadata.
+
+    MapLibre usage:
         map.addSource(id, {type: 'vector', tiles: [tile_url_template], minzoom: 0, maxzoom: 14});
         map.addLayer({..., 'source-layer': 'hex', paint: {...}});
     """
