@@ -78,6 +78,33 @@ class TestBuildPyramidSQL:
         # Only the finest level — no UNION ALL.
         assert "UNION ALL" not in sql
 
+    def test_count_mode_emits_count_column_no_value_cols(self):
+        sql = build_pyramid_sql(
+            user_sql="SELECT h8 FROM src",
+            finest_res=8, min_res=2, agg="COUNT",
+            value_columns=["count"], h3_column="h8",
+            output_uri="s3://public-output/hex/abc/",
+        )
+        # Parents: COUNT(*) AS count at every parent level.
+        assert "COUNT(*) AS count" in sql
+        # Finest: literal 1 AS count (no aggregation at finest level).
+        assert "1 AS count" in sql
+        # No stray references to user value columns (there are none).
+        assert 'AVG(' not in sql and 'SUM(' not in sql
+
+    def test_count_mode_finest_level_has_literal_one(self):
+        sql = build_pyramid_sql(
+            user_sql="SELECT h8 FROM src",
+            finest_res=5, min_res=2, agg="COUNT",
+            value_columns=["count"], h3_column="h8",
+            output_uri="s3://public-output/hex/abc/",
+        )
+        # Finest-level SELECT is identifiable by the "5 AS res" literal.
+        finest_select = re.search(r"SELECT[^)]*?5 AS res FROM src", sql, re.DOTALL)
+        assert finest_select is not None
+        assert "1 AS count" in finest_select.group(0)
+        assert "COUNT(*)" not in finest_select.group(0)
+
 
 import os
 import duckdb

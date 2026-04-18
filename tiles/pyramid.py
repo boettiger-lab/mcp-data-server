@@ -23,28 +23,36 @@ def build_pyramid_sql(
 ) -> str:
     """Return the COPY ... TO SQL that writes a partitioned pyramid.
 
-    The finest-resolution level stores the user's values unaggregated; parents
-    at each coarser resolution aggregate via the user-chosen `agg` function.
+    The finest-resolution level stores raw per-row values; parent resolutions
+    aggregate via the chosen `agg` function.
+
+    When agg="COUNT", `value_columns` must be exactly ["count"] and the SQL
+    emits `COUNT(*) AS count` at parent levels and `1 AS count` at the finest
+    level. Any value columns from the user SQL are ignored — callers requesting
+    COUNT get row-count semantics, nothing else.
     """
     _VALID_AGG = {"AVG", "SUM", "MIN", "MAX", "COUNT"}
-    if agg.upper() not in _VALID_AGG:
+    agg_upper = agg.upper()
+    if agg_upper not in _VALID_AGG:
         raise ValueError(f"agg must be one of {_VALID_AGG}, got {agg!r}")
 
-    # Quote identifiers to handle column names with spaces or reserved keywords.
     qh = f'"{h3_column}"'
-    value_list_raw = ", ".join(f'"{c}"' for c in value_columns)
-    value_list_agg = ", ".join(f'{agg}("{c}") AS "{c}"' for c in value_columns)
+
+    if agg_upper == "COUNT":
+        parent_values = "COUNT(*) AS count"
+        finest_values = "1 AS count"
+    else:
+        parent_values = ", ".join(f'{agg_upper}("{c}") AS "{c}"' for c in value_columns)
+        finest_values = ", ".join(f'"{c}"' for c in value_columns)
 
     selects = []
-    # Parents: min_res .. finest_res - 1, each aggregated.
     for res in range(min_res, finest_res):
         selects.append(
             f"  SELECT h3_cell_to_parent({qh}, {res}) AS h, "
-            f"{value_list_agg}, {res} AS res FROM src GROUP BY 1"
+            f"{parent_values}, {res} AS res FROM src GROUP BY 1"
         )
-    # Finest level: raw values, no aggregation.
     selects.append(
-        f"  SELECT {qh} AS h, {value_list_raw}, {finest_res} AS res FROM src"
+        f"  SELECT {qh} AS h, {finest_values}, {finest_res} AS res FROM src"
     )
 
     body = "\n  UNION ALL\n".join(selects)
