@@ -1097,3 +1097,62 @@ class TestFetchResilience:
         assert 5 in child_timeouts, f"expected first-pass child timeout (5s) in {child_timeouts}"
         assert 8 in child_timeouts, f"expected retry child timeout (8s) in {child_timeouts}"
 
+    def test_retry_rescued_parent_fetches_its_subchildren(self):
+        """When a parent-of-children fails the first pass and succeeds on retry,
+        its sub-children must ALSO be fetched (in the retry pool). Otherwise the
+        parent ends up indexed without any of its sub-datasets — observed on the
+        2026-04-18 dev rollout where us-census retried but left 6 sub-collections
+        absent.
+        """
+        from unittest.mock import patch, MagicMock
+        import requests
+        import stac
+
+        self._reset_module_state(stac)
+
+        cat = self._make_root_catalog([
+            "https://example.com/public-census/stac-collection.json",
+        ])
+
+        # Parent has two sub-child links. Note: we must set `.links` (not just
+        # rely on get_children) because the new loader walks `.links`.
+        parent = self._make_leaf_collection("us-census")
+        sub1_link = MagicMock(); sub1_link.rel = "child"
+        sub1_link.href = "https://example.com/public-census/census-2024/state/stac-collection.json"
+        sub1_link.title = None
+        sub2_link = MagicMock(); sub2_link.rel = "child"
+        sub2_link.href = "https://example.com/public-census/census-2024/county/stac-collection.json"
+        sub2_link.title = None
+        parent.links = [sub1_link, sub2_link]
+
+        sub1 = self._make_leaf_collection("census-2024-state")
+        sub2 = self._make_leaf_collection("census-2024-county")
+
+        call_log = []
+
+        def fetch_side_effect(href, *args, **kwargs):
+            call_log.append(href)
+            # Parent fails first attempt, succeeds second.
+            if href.endswith("/public-census/stac-collection.json"):
+                parent_attempts = [h for h in call_log if h.endswith("/public-census/stac-collection.json")]
+                if len(parent_attempts) == 1:
+                    raise requests.exceptions.Timeout("parent slow first time")
+                return parent
+            if "state" in href:
+                return sub1
+            if "county" in href:
+                return sub2
+            raise ValueError(f"Unexpected href: {href}")
+
+        with patch("stac.pystac.Catalog.from_file", return_value=cat), \
+             patch("stac.pystac.Collection.from_file", side_effect=fetch_side_effect):
+            result = stac.fetch_stac_catalog()
+
+        # Parent is in the catalog (retry rescued it)
+        assert "us-census" in result, f"parent missing from result; got {list(result.keys())}"
+        # Both sub-children are indexed — this is the behavior the fix guarantees
+        assert "census-2024-state" in result, "sub-child 1 missing — retry didn't enqueue sub-children"
+        assert "census-2024-county" in result, "sub-child 2 missing — retry didn't enqueue sub-children"
+        # No errors — retry rescued everything cleanly
+        assert stac.STAC_LOAD_ERRORS == {}
+
