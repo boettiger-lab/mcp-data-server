@@ -77,6 +77,23 @@ class TestServeTile:
         r = client.get(f"/tiles/bogus/{registered_ca}/5/5/12.pbf")
         assert r.status_code == 404
 
+    def test_mvt_layer_name_matches_return(self, app_with_tiles, local_bucket):
+        con = app_with_tiles.state.tile_con
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5, 1.0 AS val
+            FROM (SELECT 36 + random()*3 AS lat, -121 - random()*3 AS lng FROM range(500))
+        """
+        result = register_hex_tiles(
+            con=con, sql=user_sql, finest_res=5, min_res=2, agg="AVG", zoom_offset=4,
+        )
+        layer_name = result["layer_name"]
+        client = TestClient(app_with_tiles)
+        r = client.get(f"/tiles/hex/{result['hash']}/5/5/12.pbf")
+        assert r.status_code == 200
+        # MVT protobuf encodes the layer name as a length-prefixed string.
+        expected = bytes([len(layer_name)]) + layer_name.encode()
+        assert expected in r.content, f"layer name {layer_name!r} not found in MVT bytes"
+
 
 class TestMetadataDriven:
     def test_endpoint_reads_finest_res_from_metadata(self, app_with_tiles, local_bucket):

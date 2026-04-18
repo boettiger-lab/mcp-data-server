@@ -248,12 +248,13 @@ def register_hex_tiles(
       value columns.
     - `value_stats`: {<col>: {"by_res": {"<res>": {"min": <num>, "max": <num>}}}}.
       Per-resolution min/max for each value column — pass to the map client.
+    - `layer_name`: the MVT source-layer name; use as `source-layer` in the client.
     - `hash`, `bounds`, `finest_res`, `min_res`, `zoom_offset`, `feature_count_finest`:
       tileset metadata.
 
     MapLibre usage:
         map.addSource(id, {type: 'vector', tiles: [tile_url_template], minzoom: 0, maxzoom: 14});
-        map.addLayer({..., 'source-layer': 'hex', paint: {...}});
+        map.addLayer({..., 'source-layer': layer_name, paint: {...}});
     """
     con = _get_tile_con()
     return _register_hex_tiles(
