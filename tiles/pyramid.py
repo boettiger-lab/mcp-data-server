@@ -104,11 +104,30 @@ def register_hex_tiles(
     """Materialize a partitioned parquet pyramid and return tile-endpoint metadata.
 
     The connection must have httpfs, spatial, and h3 extensions loaded.
+
+    Value-column contract:
+    - agg="COUNT": user SQL needs only the H3 index column. Output has a single
+      `count` column (row count per hex at parent resolutions; 1 at finest).
+      Any extra columns in the user SQL are ignored.
+    - Other aggs: user SQL must return at least one value column after the H3
+      index. Each is aggregated via `agg` at parent resolutions and passed
+      through raw at the finest level.
     """
     if finest_res < min_res:
         raise ValueError(f"finest_res ({finest_res}) must be >= min_res ({min_res})")
 
-    h3_column, value_columns = _inspect_user_sql(con, sql)
+    h3_column, sql_value_columns = _inspect_user_sql(con, sql)
+    agg_upper = agg.upper()
+    if agg_upper == "COUNT":
+        value_columns = ["count"]
+    else:
+        if not sql_value_columns:
+            raise ValueError(
+                "user SQL must return at least one value column after the H3 index "
+                "(or use agg='COUNT')"
+            )
+        value_columns = sql_value_columns
+
     h = content_hash(sql=sql, finest_res=finest_res, min_res=min_res, agg=agg, zoom_offset=zoom_offset)
     output_uri = f"{_bucket_base()}/hex/{h}/"
 
@@ -121,12 +140,10 @@ def register_hex_tiles(
         h3_column=h3_column,
         output_uri=output_uri,
     )
-    # For local filesystem URIs, DuckDB does not create intermediate directories.
     if not output_uri.startswith("s3://"):
         os.makedirs(output_uri, exist_ok=True)
     con.sql(pyramid_sql)
 
-    # Write a sidecar metadata.json so the tile handler knows finest_res / zoom_offset.
     metadata = {
         "finest_res": finest_res,
         "min_res": min_res,
@@ -140,7 +157,6 @@ def register_hex_tiles(
     )
     con.sql(metadata_sql)
 
-    # Bounds of finest-level cells (approximate via simple min/max on cell centers).
     finest_uri = f"{output_uri}res={finest_res}/*.parquet"
     bounds_row = con.sql(
         f"SELECT "

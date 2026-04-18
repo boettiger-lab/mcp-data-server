@@ -197,6 +197,45 @@ class TestRegisterHexTiles:
         r2 = register_hex_tiles(con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4)
         assert r1["hash"] == r2["hash"]
 
+    def test_count_agg_with_index_only_sql(self, local_bucket, h3_conn):
+        # Three rows → two map to the same res=5 cell, one to another.
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5
+            FROM (VALUES (37.8, -122.3),
+                         (37.80001, -122.30001),
+                         (40.0, -100.0)) t(lat, lng)
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql,
+            finest_res=5, min_res=2, agg="COUNT", zoom_offset=4,
+        )
+        assert result["value_columns"] == ["count"]
+        # Verify the parquet pyramid actually has the count column.
+        import duckdb as _d
+        for res in (2, 3, 4, 5):
+            uri = str(local_bucket / "hex" / result["hash"] / f"res={res}" / "*.parquet")
+            cols = _d.connect(":memory:").sql(f"SELECT * FROM read_parquet('{uri}') LIMIT 0").columns
+            assert "count" in cols, f"res={res} missing 'count' column: {cols}"
+
+    def test_count_agg_ignores_user_value_columns(self, local_bucket, h3_conn):
+        # User supplies an extra column; COUNT mode drops it.
+        user_sql = """
+            SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 'ignored' AS extra
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql,
+            finest_res=5, min_res=5, agg="COUNT", zoom_offset=4,
+        )
+        assert result["value_columns"] == ["count"]
+
+    def test_non_count_still_requires_value_columns(self, local_bucket, h3_conn):
+        with pytest.raises(ValueError, match="value column"):
+            register_hex_tiles(
+                con=h3_conn,
+                sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5",
+                finest_res=5, min_res=5, agg="AVG", zoom_offset=4,
+            )
+
 
 import json as _json
 
