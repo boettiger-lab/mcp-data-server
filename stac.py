@@ -463,54 +463,69 @@ def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> di
 
     # --- Phase 2.5: retry failed children once with a longer timeout ---
     # Rescues tail-latency failures (borderline-slow S3 responses). A retry that
-    # also fails leaves the original error in STAC_LOAD_ERRORS. If a previously-failed
-    # parent succeeds on retry, its sub-children are NOT re-fetched here — they
-    # weren't attempted the first time because we didn't have the parent's JSON;
-    # a cache-miss on any specific sub-child ID will trigger a fresh walk later.
+    # also fails leaves the original error in STAC_LOAD_ERRORS. When a previously-
+    # failed parent succeeds on retry, its sub-children ARE now enqueued to the
+    # same retry pool — otherwise a rescued parent would be in the catalog without
+    # any of its sub-datasets indexed (observed on dev: us-census retry rescued
+    # the parent but left its 6 census-year collections absent).
     if failed_parents or failed_subchildren:
         with ThreadPoolExecutor(max_workers=_STAC_FETCH_CONCURRENCY) as retry_pool:
-            retry_futures: dict = {}
+            retry_pending: dict = {}
             for href, title in failed_parents:
                 fut = retry_pool.submit(
                     _fetch_parent, href, title, catalog_token, _STAC_CHILD_RETRY_TIMEOUT,
                 )
-                retry_futures[fut] = ("parent", href, title)
+                retry_pending[fut] = ("parent", href, title)
             for sub_href, parent_col_id in failed_subchildren:
                 fut = retry_pool.submit(
                     _fetch_subchild, sub_href, parent_col_id, catalog_token, _STAC_CHILD_RETRY_TIMEOUT,
                 )
-                retry_futures[fut] = ("subchild", sub_href, parent_col_id)
-            for fut in retry_futures:
-                entry = retry_futures[fut]
-                kind = entry[0]
-                if kind == "parent":
-                    _, href, title = entry
-                    col, _subchild_hrefs, error = fut.result()
-                    if col is not None:
-                        parent_cols[col.id] = col
-                        # Clear the first-pass error for this parent since retry succeeded
-                        errors.pop(_child_identifier(href, title_hint=title), None)
-                        print(
-                            f"🔁 Retry succeeded for parent: {col.id}",
-                            file=sys.stderr,
-                        )
-                    # If retry also failed, `error` carries the same identifier key as the
-                    # first-pass error; updating with it leaves the STAC_LOAD_ERRORS entry
-                    # pointing at the most-recent (retry) reason.
-                    if error:
-                        errors.update(error)
-                else:  # subchild
-                    _, sub_href, parent_col_id = entry
-                    col, error = fut.result()
-                    if col is not None:
-                        subchild_cols_by_parent.setdefault(parent_col_id, {})[col.id] = col
-                        errors.pop(_child_identifier(sub_href, title_hint=None), None)
-                        print(
-                            f"🔁 Retry succeeded for sub-child: {col.id}",
-                            file=sys.stderr,
-                        )
-                    if error:
-                        errors.update(error)
+                retry_pending[fut] = ("subchild", sub_href, parent_col_id)
+            # Dynamic drain — mirrors the main pool's pattern so that sub-children of
+            # retry-rescued parents can be enqueued mid-loop.
+            while retry_pending:
+                done, _ = wait(retry_pending.keys(), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    entry = retry_pending.pop(fut)
+                    kind = entry[0]
+                    if kind == "parent":
+                        _, href, title = entry
+                        col, subchild_hrefs, error = fut.result()
+                        if col is not None:
+                            parent_cols[col.id] = col
+                            # Clear the first-pass error for this parent since retry succeeded
+                            errors.pop(_child_identifier(href, title_hint=title), None)
+                            print(
+                                f"🔁 Retry succeeded for parent: {col.id}",
+                                file=sys.stderr,
+                            )
+                            # Enqueue sub-children of the newly-rescued parent. These are
+                            # first-time fetches, not retries — they use the retry timeout
+                            # so they have the same generous budget as the rest of this pool.
+                            if subchild_hrefs:
+                                subchild_cols_by_parent.setdefault(col.id, {})
+                            for sub_href in subchild_hrefs:
+                                sub_fut = retry_pool.submit(
+                                    _fetch_subchild, sub_href, col.id, catalog_token, _STAC_CHILD_RETRY_TIMEOUT,
+                                )
+                                retry_pending[sub_fut] = ("subchild", sub_href, col.id)
+                        # If retry also failed, `error` carries the same identifier key as
+                        # the first-pass error; updating leaves STAC_LOAD_ERRORS pointing at
+                        # the most-recent (retry) reason.
+                        if error:
+                            errors.update(error)
+                    else:  # subchild
+                        _, sub_href, parent_col_id = entry
+                        col, error = fut.result()
+                        if col is not None:
+                            subchild_cols_by_parent.setdefault(parent_col_id, {})[col.id] = col
+                            errors.pop(_child_identifier(sub_href, title_hint=None), None)
+                            print(
+                                f"🔁 Retry succeeded for sub-child: {col.id}",
+                                file=sys.stderr,
+                            )
+                        if error:
+                            errors.update(error)
 
     # --- Phase 3: render markdown / dicts; swap module state ---
     datasets: dict = {}
