@@ -191,6 +191,13 @@ class TestRegisterHexTiles:
         )
         assert result["value_columns"] == ["v1", "v2"]
 
+    def test_returns_layer_name(self, local_bucket, h3_conn):
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4,
+        )
+        assert result["layer_name"] == "layer"
+
     def test_identical_inputs_same_hash(self, local_bucket, h3_conn):
         user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
         r1 = register_hex_tiles(con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4)
@@ -312,6 +319,15 @@ class TestTilesetMetadata:
         assert set(meta["value_stats"]["count"]["by_res"].keys()) == {"3", "4", "5"}
         # Sanity: persisted stats equal the returned stats.
         assert meta["value_stats"] == result["value_stats"]
+
+    def test_metadata_includes_layer_name(self, local_bucket, h3_conn):
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=5, agg="AVG", zoom_offset=4,
+        )
+        meta_path = local_bucket / "hex" / result["hash"] / "metadata.json"
+        meta = _json.loads(meta_path.read_text())
+        assert meta["layer_name"] == result["layer_name"]
 
 
 from tiles.db import build_tile_connection

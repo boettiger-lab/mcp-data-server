@@ -12,6 +12,11 @@ import duckdb
 
 from tiles.tile_math import content_hash
 
+# DuckDB's ST_AsMVT emits a single layer named "layer" (see probe in
+# tests/test_tile_pyramid.py). Clients reference this via MapLibre's
+# `source-layer` option.
+MVT_LAYER_NAME = "layer"
+
 
 def build_pyramid_sql(
     user_sql: str,
@@ -172,6 +177,7 @@ def register_hex_tiles(
         "zoom_offset": zoom_offset,
         "value_columns": value_columns,
         "value_stats": value_stats,
+        "layer_name": MVT_LAYER_NAME,
     }
     metadata_sql = (
         f"COPY (SELECT '{_json_dumps_escaped(metadata)}' AS j) "
@@ -200,5 +206,6 @@ def register_hex_tiles(
         "zoom_offset": zoom_offset,
         "value_columns": value_columns,
         "value_stats": value_stats,
+        "layer_name": MVT_LAYER_NAME,
         "feature_count_finest": feature_count,
     }
