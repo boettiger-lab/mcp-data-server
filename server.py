@@ -255,6 +255,31 @@ def register_hex_tiles(
     MapLibre usage:
         map.addSource(id, {type: 'vector', tiles: [tile_url_template], minzoom: 0, maxzoom: 14});
         map.addLayer({..., 'source-layer': layer_name, paint: {...}});
+
+    SQL patterns — pick the one matching the ask; paste exact paths from
+    get_stac_details. `<H>` is the H3 resolution, usually 8.
+
+    1. Density (count features per hex):
+
+       SELECT h<H> FROM read_parquet('<hex_path>') WHERE <filter>
+
+       Call agg="COUNT". Works for pre-indexed points (GBIF) or polygons
+       (PAD-US). For raw points with lat/lng:
+       `h3_latlng_to_cell(lat, lng, <H>) AS h<H>`.
+
+    2. Masked aggregate (value dataset inside a geographic mask):
+
+       SELECT a.h<H>, AVG(a.value) AS value         -- or MODE(class) / SUM / MAX
+       FROM read_parquet('<values_hex>', hive_partitioning = true) a
+       SEMI JOIN read_parquet('<mask_hex>', hive_partitioning = true) b
+                 USING (h<H>, h0)
+       WHERE a.value IS NOT NULL
+       GROUP BY a.h<H>;
+
+       Call agg="AVG" (or the matching op). The SEMI JOIN must sit on the
+       raw read_parquet(), upstream of GROUP BY — see h3-guide.md Problem 2.
+
+    Always pass hive_partitioning = true so the planner can prune h0=* files.
     """
     con = _get_tile_con()
     return _register_hex_tiles(
