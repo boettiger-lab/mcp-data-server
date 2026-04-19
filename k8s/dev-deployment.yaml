@@ -33,7 +33,7 @@ spec:
             memory: 2Gi
             cpu: 250m
           limits:
-            memory: 16Gi
+            memory: 32Gi
             cpu: 4
         ports:
         - containerPort: 8000
