@@ -15,14 +15,13 @@ spec:
     spec:
       containers:
       - name: server
-        image: astral/uv:python3.12-bookworm-slim
+        image: ghcr.io/boettiger-lab/mcp-data-server:latest
         command: ["/bin/sh", "-c"]
         args:
           - |
-            apt-get update && apt-get install -y git && \
             git clone https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
-            uv run --with "mcp" --with "duckdb" --with pandas --with uvicorn --with tabulate --with pystac --with requests server.py
+            python server.py
         env:
         - name: STAC_CATALOG_URL
           value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
@@ -33,7 +32,7 @@ spec:
             memory: 2Gi
             cpu: 250m
           limits:
-            memory: 16Gi
+            memory: 32Gi
             cpu: 4
         ports:
         - containerPort: 8000
