@@ -142,6 +142,29 @@ GROUP BY h8, h0
 
 Check the dataset's STAC description — it will note when aggregation is required and which method (SUM, AVG, or MODE) to use.
 
+**If you plan to mask this result against another hex dataset:** put the
+`SEMI JOIN` on the raw `read_parquet(...)` *before* `GROUP BY`, not in a
+CTE after it. Aggregation blocks DuckDB's dynamic partition pruning, so a
+post-aggregation mask forces every h0 partition of the value dataset to
+be scanned — turning a small masked query into a global one.
+
+```sql
+-- ❌ Mask after aggregation → scans every h0 file
+WITH lc_agg AS (
+    SELECT h8, h0, MODE(lc_class) AS dominant
+    FROM read_parquet('<raster_hex>', hive_partitioning = true)
+    GROUP BY h8, h0
+)
+SELECT m.h8, l.dominant FROM mask m JOIN lc_agg l USING (h8, h0);
+
+-- ✅ Mask first → only matching h0 files scanned
+SELECT a.h8, MODE(a.lc_class) AS dominant
+FROM read_parquet('<raster_hex>', hive_partitioning = true) a
+SEMI JOIN mask m USING (h8, h0)
+WHERE a.lc_class IS NOT NULL
+GROUP BY a.h8;
+```
+
 ---
 
 ### Diagnostic: check rows-per-hex before writing queries
