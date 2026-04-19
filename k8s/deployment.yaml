@@ -19,7 +19,7 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
           - |
-            git clone --branch v0.5.3 https://github.com/boettiger-lab/mcp-data-server.git /app && \
+            git clone --branch v0.5.4 https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
             python server.py
         env:
