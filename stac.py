@@ -133,13 +133,16 @@ def _format_columns(table_cols: list) -> list[str]:
         if c.get("name", "").lower() not in ("geometry", "geom", "bbox")
     ]
     h3_cols = [c for c in display_cols if c.get("name", "") in ("h0", "h8", "h9", "h10", "h11")]
-    other_cols = [c for c in display_cols if c not in h3_cols][:20]
+    other_cols = [c for c in display_cols if c not in h3_cols]
 
     lines = []
     if other_cols:
         for c in other_cols:
             desc = f" — {c['description']}" if c.get("description") else ""
             lines.append(f"    - `{c['name']}` ({c.get('type', '?')}){desc}")
+            values = c.get("values")
+            if values:
+                lines.append(f"      values: {list(values)}")
     if h3_cols:
         lines.append(f"    - H3 index columns: {', '.join(c['name'] for c in h3_cols)}")
     return lines
@@ -165,6 +168,16 @@ def _extract_parquet_assets(col) -> list[str]:
             size = asset.extra_fields.get("file:size")
             size_note = f" ({size/1024**3:.2f} GiB)" if size and size > 1024**2 else ""
             assets.append(f"  - {title}{size_note}: `read_parquet('{s3}')`")
+            # Asset-level STAC extension fields (h3, raster, vector)
+            for ext_key in (
+                "h3:native_resolution",
+                "h3:parent_resolutions",
+                "raster:bands",
+                "vector:layers",
+            ):
+                ext_val = asset.extra_fields.get(ext_key)
+                if ext_val is not None:
+                    assets.append(f"    - {ext_key}: {ext_val}")
             # Inline per-asset column schema if present
             asset_cols = asset.extra_fields.get("table:columns", [])
             col_lines = _format_columns(asset_cols)

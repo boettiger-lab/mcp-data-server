@@ -1156,3 +1156,89 @@ class TestFetchResilience:
         # No errors — retry rescued everything cleanly
         assert stac.STAC_LOAD_ERRORS == {}
 
+
+class TestFormatColumnsFullRender:
+    """`_format_columns` must render all columns (no 20-entry cap) and include
+    categorical `values` arrays. Regression test for issue #84.
+    """
+
+    def test_more_than_twenty_columns_all_rendered(self):
+        from stac import _format_columns
+        cols = [{"name": f"col_{i:02d}", "type": "varchar"} for i in range(30)]
+        lines = _format_columns(cols)
+        rendered = "\n".join(lines)
+        # All 30 columns should appear, not just the first 20
+        for i in range(30):
+            assert f"col_{i:02d}" in rendered, f"col_{i:02d} missing — renderer truncated"
+
+    def test_h3_columns_still_collapsed(self):
+        """H3 index columns collapse to one line regardless of how many non-H3 columns precede."""
+        from stac import _format_columns
+        cols = [{"name": f"col_{i:02d}", "type": "varchar"} for i in range(25)]
+        cols += [{"name": n, "type": "ubigint"} for n in ("h0", "h8", "h9", "h10")]
+        lines = _format_columns(cols)
+        rendered = "\n".join(lines)
+        assert "H3 index columns" in rendered
+        assert "h0" in rendered and "h8" in rendered and "h9" in rendered and "h10" in rendered
+
+    def test_categorical_values_rendered(self):
+        """Columns with a `values` array have those values included in output."""
+        from stac import _format_columns
+        cols = [{
+            "name": "owner_type",
+            "type": "varchar",
+            "description": "Land owner type",
+            "values": ["public", "private", "tribal", "ngo"],
+        }]
+        lines = _format_columns(cols)
+        rendered = "\n".join(lines)
+        for v in ("public", "private", "tribal", "ngo"):
+            assert v in rendered, f"value {v!r} missing from rendered output"
+
+
+class TestExtractParquetAssetsExtensions:
+    """`_extract_parquet_assets` must render H3, raster, and vector extension
+    fields from per-asset extra_fields. Regression test for issue #84.
+    """
+
+    def _make_collection_with_asset(self, asset_extra_fields: dict):
+        col = MagicMock()
+        col.id = "test-col"
+        asset = MagicMock()
+        asset.href = "https://s3-west.nrp-nautilus.io/bucket/hex/"
+        asset.media_type = "application/x-parquet"
+        asset.title = "hex"
+        asset.extra_fields = asset_extra_fields
+        col.assets = {"hex": asset}
+        return col
+
+    def test_h3_native_resolution_rendered(self):
+        from stac import _extract_parquet_assets
+        col = self._make_collection_with_asset({
+            "h3:native_resolution": 10,
+            "h3:parent_resolutions": [9, 8, 0],
+        })
+        rendered = "\n".join(_extract_parquet_assets(col))
+        assert "h3:native_resolution" in rendered
+        assert "10" in rendered
+
+    def test_h3_parent_resolutions_rendered(self):
+        from stac import _extract_parquet_assets
+        col = self._make_collection_with_asset({
+            "h3:native_resolution": 10,
+            "h3:parent_resolutions": [9, 8, 0],
+        })
+        rendered = "\n".join(_extract_parquet_assets(col))
+        assert "h3:parent_resolutions" in rendered
+        # All parent resolutions should be present
+        for r in (9, 8, 0):
+            assert str(r) in rendered
+
+    def test_no_h3_fields_when_absent(self):
+        """Asset without h3 fields should not render h3 lines."""
+        from stac import _extract_parquet_assets
+        col = self._make_collection_with_asset({})
+        rendered = "\n".join(_extract_parquet_assets(col))
+        assert "h3:native_resolution" not in rendered
+        assert "h3:parent_resolutions" not in rendered
+
