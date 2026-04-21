@@ -7,17 +7,29 @@
 
 ## Deployment
 
-The MCP server runs on the NRP Nautilus Kubernetes cluster at **`https://duckdb-mcp.nrp-nautilus.io`**.
+The MCP server runs on the NRP Nautilus Kubernetes cluster.
 
-- **2 replicas** of the `duckdb-mcp` pod, each cloning this repo at startup and running `server.py` via `uv`
+- **Prod:** `https://duckdb-mcp.nrp-nautilus.io` — 2 replicas, `k8s/deployment.yaml`
+- **Dev:** `https://dev-duckdb-mcp.nrp-nautilus.io` — 1 replica, `k8s/dev-deployment.yaml`
 - **Resources:** 16 Gi RAM requested, up to 160 Gi / 16 CPU per pod
 - **STAC catalog:** `https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json` (set via `STAC_CATALOG_URL` env var)
 - **Ingress:** HAProxy with CORS enabled, 10-minute query timeout, 1-hour SSE tunnel timeout
 
-To redeploy after pushing changes to `main`, restart the pods so they re-clone:
+### Rollout workflow
+
+**Merge to `main` → redeploy dev only:**
 ```
-kubectl rollout restart deployment/duckdb-mcp
+kubectl apply -f k8s/dev-deployment.yaml
+kubectl rollout restart deployment/dev-duckdb-mcp -n biodiversity
 ```
+
+**Tag a release → redeploy prod:**
+```
+kubectl apply -f k8s/deployment.yaml
+kubectl rollout restart deployment/duckdb-mcp -n biodiversity
+```
+
+`kubectl apply` must precede `rollout restart` — a git push alone does not update the cluster.
 
 ---
 
