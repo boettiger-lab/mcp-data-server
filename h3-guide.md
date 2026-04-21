@@ -7,7 +7,15 @@ When a dataset appears in the STAC catalog as GeoParquet, a hex-indexed version 
 
 If you browse the catalog and only find a GeoParquet with no hex equivalent, **say so** rather than falling back to spatial predicates. A missing hex version is a data pipeline gap (not something to work around silently).
 
-Small spatial operations on a **single already-retrieved geometry** are fine — e.g. `ST_Centroid` or `ST_AsText` on one result row for display or map zoom. This is different from using spatial predicates to scan or filter a dataset.
+## The H3 Data Model
+
+All datasets are already stored as H3 hex parquet in the STAC catalog — no conversion is needed. Understanding the origin of each dataset explains the structure you will encounter when you query it.
+
+**Vector datasets** (protected areas, districts, parcels) were built by tiling each source polygon into the H3 cells it covers — one row per (feature, hex-cell) pair. A single protected area covering 500 cells has 500 rows, all sharing the same `_cng_fid` and identical feature-level attributes. `_cng_fid` is the universal feature identifier added by CNG processing and is present on all vector hex datasets.
+
+**Raster datasets** (land cover, elevation, biomass) were built by assigning each pixel to its H3 cell — one row per pixel, with no aggregation during processing. These datasets have no `_cng_fid`. When the raster resolution is finer than the H3 resolution, many pixels share the same hex cell, producing multiple rows per hex with different values.
+
+All spatial operations are hex joins — two datasets overlap wherever their hex IDs match. **Never use `ST_Within`, `ST_Intersects`, `ST_Centroid`, or any spatial function.** For coordinates (e.g. to supply a map zoom), use `h3_cell_to_lat(hN)` and `h3_cell_to_lng(hN)`.
 
 ## Resolution Direction
 
@@ -84,13 +92,35 @@ JOIN gfw ON h3_cell_to_parent(wdpa.h8, 6) = gfw.h6
 
 When one side lacks h0, omit it from that side. Prefer hex-partitioned variants (with h0) when available for partition pruning.
 
-## Multiple Rows per Hex: Two Different Problems
+## Multiple Rows per Hex: Three Different Problems
 
-There are **two distinct reasons** a dataset can have multiple rows with the same `h8` value, and they require different fixes:
+There are **three distinct reasons** a dataset can have multiple rows with the same `h8` value, and they require different fixes:
 
 ---
 
-### Problem 1 — Overlapping polygons (vector datasets)
+### Problem 1 — Tiling: same feature repeated across many hexes
+
+Every vector polygon is tiled into N hex rows — one per H3 cell it covers — all sharing the same `_cng_fid` and identical feature-level attributes (name, declared acres, funding amount). Summing or counting without deduplicating by feature multiplies attribute values by N.
+
+**❌ WRONG: sums amount N times (once per hex row)**
+```sql
+SELECT SUM(amount) FROM read_parquet('<hex>') WHERE state_id = 'CA'
+```
+
+**✅ CORRECT: one amount per feature**
+```sql
+SELECT SUM(amount) FROM (
+  SELECT DISTINCT _cng_fid, amount
+  FROM read_parquet('<hex>')
+  WHERE state_id = 'CA'
+)
+```
+
+`_cng_fid` is the universal feature ID on all CNG-processed vector hex datasets. Some datasets also carry a source-specific ID (e.g. `tpl_id`, `GEOID`) for cross-collection joins — check `get_schema`.
+
+---
+
+### Problem 2 — Overlapping polygons (vector datasets)
 
 Some vector datasets store one row per *feature* (e.g. each protected area). Multiple features can cover the same hex, producing duplicate `h8` values. Fix: **deduplicate with DISTINCT** before joining.
 
@@ -118,7 +148,7 @@ Check the dataset's STAC description — it will note when DISTINCT is required.
 
 ---
 
-### Problem 2 — Raster pixels (raster-derived datasets)
+### Problem 3 — Raster pixels (raster-derived datasets)
 
 Raster datasets are converted to hex by assigning each **pixel** its H3 cell — no aggregation is applied during processing. When the raster resolution is finer than the H3 resolution, many pixels map to the same hex cell, producing many rows with the same `h8`, all with different values.
 
@@ -181,7 +211,7 @@ FROM read_parquet('<STAC_HEX_PATH_SINGLE_PARTITION>');
 
 | avg_rows_per_hex | Meaning |
 |---|---|
-| ≈ 1 | One row per hex — no aggregation needed |
+| ≈ 1 | One row per hex — check `_cng_fid` presence; if vector, tiling dedup still applies to attribute sums |
 | > 1, integer-ish | Overlapping polygons — use DISTINCT |
 | >> 1, non-integer | Raster pixels — use GROUP BY + SUM/AVG/MODE |
 
