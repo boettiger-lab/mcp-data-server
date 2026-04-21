@@ -13,6 +13,14 @@ spec:
       labels:
         app: duckdb-mcp
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/region
+                    operator: In
+                    values: ["us-west"]
       containers:
       - name: server
         image: ghcr.io/boettiger-lab/mcp-data-server:latest
