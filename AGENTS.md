@@ -5,6 +5,14 @@
 > and prompts. Editing them changes what the agent is instructed to do.
 > `README.md` is the only human-facing documentation.
 
+## Contributing
+
+This repo uses **GitHub Flow**: all changes go through a branch + PR, never committed directly to `main`. `main` has branch protection enforced — direct pushes are rejected.
+
+1. Create a branch for your change
+2. Open a PR against `main`
+3. Merge via the GitHub UI (squash merge preferred)
+
 ## Deployment
 
 The MCP server runs on the NRP Nautilus Kubernetes cluster.
