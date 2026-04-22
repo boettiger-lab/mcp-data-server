@@ -5,6 +5,11 @@
 .python-version
 .mcpregistry_*
 
+# Claude Code / superpowers tooling
+.claude/
+memory/
+docs/superpowers/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
