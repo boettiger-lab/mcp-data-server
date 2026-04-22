@@ -194,7 +194,10 @@ def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint
     """Placeholder (overwritten below)."""
     print(f"🔍 Executing: {sql_query}", file=sys.stderr)
     if _CUSTOM_BACKEND:
-        return _query_backend.execute(sql_query, s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope)
+        try:
+            return _query_backend.execute(sql_query, s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope)
+        except Exception as e:
+            return f"SQL Error: {str(e)}"
     try:
         with get_isolated_db(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope) as db:
             result = db.sql(sql_query)
