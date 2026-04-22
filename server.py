@@ -288,7 +288,8 @@ def register_hex_tiles(
     )
 
 
-mcp.tool()(register_hex_tiles)
+# register_hex_tiles is not yet ready for production — see GitHub issue
+# mcp.tool()(register_hex_tiles)
 
 
 def mount_tiles(app):
