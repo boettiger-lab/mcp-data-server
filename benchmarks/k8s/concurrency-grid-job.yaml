@@ -1,0 +1,117 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: duckdb-concurrency-grid
+  namespace: biodiversity
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      priorityClassName: opportunistic
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: feature.node.kubernetes.io/pci-10de.present
+                    operator: NotIn
+                    values: ["true"]
+      containers:
+      - name: benchmark
+        image: astral/uv:python3.12-bookworm-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            uv run --with "duckdb==1.5.0" python3 - << 'PYEOF'
+            import duckdb, time, statistics, concurrent.futures
+
+            ENDPOINT = "rook-ceph-rgw-nautiluss3.rook"
+            SETUP = """
+            SET THREADS={threads};
+            SET preserve_insertion_order=false;
+            SET enable_object_cache=false;
+            SET s3_allow_recursive_globbing=false;
+            SET temp_directory='/tmp';
+            INSTALL httpfs; LOAD httpfs;
+            INSTALL h3 FROM community; LOAD h3;
+            CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT '{endpoint}', URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '');
+            """
+
+            H0     = 577199624117288959
+            PADUS  = "s3://public-padus/padus-4-1/fee/hex/**"
+            CARBON = "s3://public-carbon/vulnerable-carbon-2024/hex/**"
+
+            # Workload: same as Phase 1 Query B (typical production join pattern).
+            # Each concurrent worker opens a fresh in-memory DuckDB connection,
+            # matching how `get_isolated_db()` works in production.
+            QUERY = f"""
+                WITH parks AS (
+                    SELECT DISTINCT h8, h0
+                    FROM read_parquet('{PADUS}')
+                    WHERE State_Nm = 'CA' AND Des_Tp = 'NP'
+                      AND h0 = {H0}
+                )
+                SELECT SUM(c.carbon)/1e6
+                FROM parks p
+                JOIN read_parquet('{CARBON}') c ON p.h8 = c.h8
+                WHERE c.h0 = {H0}
+            """
+
+            def run_one(threads):
+                """One full request: fresh connection, setup, query, close."""
+                con = duckdb.connect(":memory:")
+                con.sql(SETUP.format(threads=threads, endpoint=ENDPOINT))
+                t0 = time.time()
+                con.sql(QUERY).fetchall()
+                dt = time.time() - t0
+                con.close()
+                return dt
+
+            # Bracket thread values around production's current SET THREADS=100.
+            # Update after Phase 1 reveals the true sweet spot.
+            THREAD_VALUES = [32, 100, 200]
+            CONCURRENCIES = [1, 2, 4, 8]
+            ITERS = 3
+
+            print(f"[duckdb_version] {duckdb.__version__}", flush=True)
+
+            results = []
+            for threads in THREAD_VALUES:
+                for n in CONCURRENCIES:
+                    for i in range(ITERS):
+                        t0 = time.time()
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+                            futures = [ex.submit(run_one, threads) for _ in range(n)]
+                            latencies = [f.result() for f in futures]
+                        wall = time.time() - t0
+                        qps = n / wall
+                        p50 = statistics.median(latencies)
+                        p95 = max(latencies)
+                        results.append((threads, n, i+1, wall, qps, p50, p95))
+                        print(
+                            f"[threads={threads:>3} N={n} iter={i+1}] "
+                            f"wall={wall:.2f}s qps={qps:.2f} "
+                            f"latency p50={p50:.2f}s p95={p95:.2f}s",
+                            flush=True,
+                        )
+
+            print("", flush=True)
+            print("=" * 70, flush=True)
+            print("PHASE 2 RESULTS — concurrency × threads grid", flush=True)
+            print("=" * 70, flush=True)
+            print("threads\tN\titer\twall_s\tqps\tp50_s\tp95_s", flush=True)
+            for r in results:
+                print(
+                    f"{r[0]}\t{r[1]}\t{r[2]}\t{r[3]:.2f}\t{r[4]:.2f}\t{r[5]:.2f}\t{r[6]:.2f}",
+                    flush=True,
+                )
+            PYEOF
+        resources:
+          requests:
+            cpu: "16"
+            memory: "16Gi"
+          limits:
+            cpu: "16"
+            memory: "16Gi"

@@ -40,6 +40,22 @@ kubectl apply -f k8s/benchmark-job.yaml
 kubectl logs -l job-name=duckdb-benchmark -f
 ```
 
+### `k8s/thread-sweep-job.yaml`
+
+Phase 1 of the DuckDB thread-count tuning: sweeps `SET THREADS` across {8, 16, 32, 64, 100, 200, 400} for three representative query shapes (single-h0 SUM, two-step join, California-wide aggregation), 5 iterations each. Reports min/p50/mean/p95 wall time per (query, threads) cell. Internal endpoint, 16 CPU / 16 GiB pod, opportunistic priority. Used to find the per-query bandwidth-saturation point.
+
+### `k8s/concurrency-grid-job.yaml`
+
+Phase 2 of the thread-count tuning: holds the workload to the typical join query, varies thread count × concurrent client count (1, 2, 4, 8 concurrent fresh-connection queries). Reports per-cell wall time, throughput (qps), and p50/p95 query latency. Used to find where DuckDB internal parallelism stops helping under multi-client load. Phase 2's `THREAD_VALUES` should be retuned around the Phase 1 winner before re-running.
+
+Deploy with:
+```bash
+kubectl apply -f k8s/thread-sweep-job.yaml       # ~20–30 min
+kubectl logs -f job/duckdb-thread-sweep
+kubectl apply -f k8s/concurrency-grid-job.yaml   # ~10–15 min
+kubectl logs -f job/duckdb-concurrency-grid
+```
+
 ## Key findings
 
 1. Always include `h0` in join conditions (e.g., `ON p.h8 = c.h8 AND p.h0 = c.h0`) — this is what enables DPP file-level pruning.
