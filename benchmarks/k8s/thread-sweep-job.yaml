@@ -1,0 +1,138 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: duckdb-thread-sweep
+  namespace: biodiversity
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      priorityClassName: opportunistic
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: feature.node.kubernetes.io/pci-10de.present
+                    operator: NotIn
+                    values: ["true"]
+      containers:
+      - name: benchmark
+        image: astral/uv:python3.12-bookworm-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            uv run --with "duckdb==1.5.0" python3 - << 'PYEOF'
+            import duckdb, time, statistics
+
+            ENDPOINT = "rook-ceph-rgw-nautiluss3.rook"
+            SETUP = """
+            SET THREADS={threads};
+            SET preserve_insertion_order=false;
+            SET enable_object_cache=false;
+            SET s3_allow_recursive_globbing=false;
+            SET temp_directory='/tmp';
+            INSTALL httpfs; LOAD httpfs;
+            INSTALL h3 FROM community; LOAD h3;
+            CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT '{endpoint}', URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '');
+            """
+
+            H0      = 577199624117288959
+            PADUS   = "s3://public-padus/padus-4-1/fee/hex/**"
+            CARBON  = "s3://public-carbon/vulnerable-carbon-2024/hex/**"
+            REGIONS = "s3://public-overturemaps/hex/regions/**"
+
+            def fresh(threads):
+                c = duckdb.connect(":memory:")
+                c.sql(SETUP.format(threads=threads, endpoint=ENDPOINT))
+                return c
+
+            print(f"[duckdb_version] {duckdb.__version__}", flush=True)
+
+            # Precompute the CA h0 list once (used by Query C). This is itself
+            # a bandwidth-bound query but the cost is constant across the sweep
+            # so we don't include it in measured times.
+            print("[setup] computing CA h0 list...", flush=True)
+            con0 = fresh(16)
+            ca_h0s = [r[0] for r in con0.sql(f"""
+                SELECT DISTINCT h0 FROM read_parquet('{REGIONS}') WHERE region = 'US-CA'
+            """).fetchall()]
+            con0.close()
+            CA_H0_LIST = ", ".join(str(h) for h in ca_h0s)
+            print(f"[setup] {len(ca_h0s)} CA h0 cells", flush=True)
+
+            QUERIES = {
+                # Query A: pure I/O — single-h0 SUM, no join. Tests bandwidth
+                # saturation on a single file.
+                "A_static_sum": f"""
+                    SELECT SUM(carbon)/1e6 AS megatons
+                    FROM read_parquet('{CARBON}')
+                    WHERE h0 = {H0}
+                """,
+                # Query B: mixed — two-step join with static h0 literal. Mirrors
+                # the typical production pattern (Test 5).
+                "B_join_two_step": f"""
+                    WITH parks AS (
+                        SELECT DISTINCT h8, h0
+                        FROM read_parquet('{PADUS}')
+                        WHERE State_Nm = 'CA' AND Des_Tp = 'NP'
+                          AND h0 = {H0}
+                    )
+                    SELECT SUM(c.carbon)/1e6
+                    FROM parks p
+                    JOIN read_parquet('{CARBON}') c ON p.h8 = c.h8
+                    WHERE c.h0 = {H0}
+                """,
+                # Query C: bandwidth-hungry — California-wide aggregation across
+                # many h0 partitions. Should benefit most from high thread count.
+                "C_california_wide": f"""
+                    WITH parks AS (
+                        SELECT DISTINCT h8, h0
+                        FROM read_parquet('{PADUS}')
+                        WHERE Des_Tp = 'NP' AND h0 IN ({CA_H0_LIST})
+                    )
+                    SELECT SUM(c.carbon)/1e6
+                    FROM parks p
+                    JOIN read_parquet('{CARBON}') c ON p.h8 = c.h8
+                    WHERE c.h0 IN ({CA_H0_LIST})
+                """,
+            }
+
+            THREAD_VALUES = [8, 16, 32, 64, 100, 200, 400]
+            ITERS = 5
+
+            results = []
+            for query_name, sql in QUERIES.items():
+                for threads in THREAD_VALUES:
+                    times = []
+                    for i in range(ITERS):
+                        con = fresh(threads)
+                        t0 = time.time()
+                        con.sql(sql).fetchall()
+                        dt = time.time() - t0
+                        con.close()
+                        times.append(dt)
+                        print(f"[{query_name} threads={threads:>3} iter={i+1}] {dt:.2f}s", flush=True)
+                    p50  = statistics.median(times)
+                    mean = statistics.mean(times)
+                    p95  = sorted(times)[-1]  # n=5, max is a reasonable upper bound
+                    pmin = min(times)
+                    results.append((query_name, threads, len(times), pmin, p50, mean, p95))
+
+            print("", flush=True)
+            print("=" * 70, flush=True)
+            print("PHASE 1 RESULTS — single-query thread sweep (seconds)", flush=True)
+            print("=" * 70, flush=True)
+            print("query\tthreads\tn\tmin\tp50\tmean\tp95", flush=True)
+            for r in results:
+                print(f"{r[0]}\t{r[1]}\t{r[2]}\t{r[3]:.2f}\t{r[4]:.2f}\t{r[5]:.2f}\t{r[6]:.2f}", flush=True)
+            PYEOF
+        resources:
+          requests:
+            cpu: "16"
+            memory: "16Gi"
+          limits:
+            cpu: "16"
+            memory: "16Gi"

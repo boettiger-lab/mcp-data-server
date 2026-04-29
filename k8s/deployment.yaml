@@ -4,7 +4,7 @@ metadata:
   name: duckdb-mcp
   namespace: biodiversity
 spec:
-  replicas: 2
+  replicas: 6
   selector:
     matchLabels:
       app: duckdb-mcp
@@ -27,7 +27,7 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
           - |
-            git clone --branch v0.5.5 https://github.com/boettiger-lab/mcp-data-server.git /app && \
+            git clone --branch v0.5.6 https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
             python server.py
         env:
@@ -35,11 +35,14 @@ spec:
           value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
         - name: MCP_PUBLIC_BASE_URL
           value: "https://duckdb-mcp.nrp-nautilus.io"
-        resources:   
+        resources:
+          # Requests intentionally kept small (≤2 GiB memory, ≤1 CPU) to land in
+          # NRP's "Ignored" bucket for utilization violations. Limits stay high so
+          # legitimate large queries (~100 GiB memory, multi-CPU) can still burst.
           requests:
-            memory: 16Gi
-            cpu: 1
-          limits: 
+            memory: 2Gi
+            cpu: 250m
+          limits:
             memory: 160Gi
             cpu: 16
         ports:
