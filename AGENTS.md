@@ -9,9 +9,22 @@
 
 This repo uses **GitHub Flow**: all changes go through a branch + PR, never committed directly to `main`. `main` has branch protection enforced — direct pushes are rejected.
 
-1. Create a branch for your change
+1. Create a branch for your change (`git switch -c <branch>`) **before** the first commit. Never commit on `main` and open a PR afterward — the squash-merge will leave local `main` permanently diverged from `origin/main`.
 2. Open a PR against `main`
 3. Merge via the GitHub UI (squash merge preferred)
+
+### After a PR merges
+
+This repo squash-merges, so the merged commit on `origin/main` has a different SHA than the local feature commits. Clean up with reset, not pull:
+
+```
+git switch main
+git fetch origin
+git reset --hard origin/main
+git branch -D <feature-branch>
+```
+
+Do **not** `git pull` on `main` when local `main` has commits matching the just-merged PR — `pull` will create a merge commit because the squash changed the SHA. If you must `pull`, use `git pull --ff-only` so divergence fails loudly instead of silently merging.
 
 ## Deployment
 
