@@ -291,11 +291,15 @@ class TestCollectionToDict:
         assert result["assets"]["data"]["file:size"] == 1073741824
 
     def test_children_populated_when_provided(self):
-        sub = MagicMock()
+        # Contract (issue #105): children are emitted as nested dicts so the
+        # output round-trips back into get_collection(collection=...).
+        sub = self._make_collection()
         sub.id = "child-1"
         col = self._make_collection()
         result = _collection_to_dict(col, sub_children=[sub])
-        assert result["children"] == ["child-1"]
+        assert isinstance(result["children"], list)
+        assert isinstance(result["children"][0], dict)
+        assert result["children"][0]["id"] == "child-1"
 
     def test_children_absent_when_not_provided(self):
         col = self._make_collection()
@@ -417,7 +421,8 @@ class TestGetCollection:
         with patch('stac.pystac.Catalog.from_file', return_value=mock_catalog):
             result = get_collection("parent-col",
                                     catalog_url="https://example.com/catalog.json")
-        assert result["children"] == ["child-col"]
+        assert isinstance(result["children"], list)
+        assert result["children"][0]["id"] == "child-col"
 
     def test_finds_sub_child_by_exact_id(self):
         """get_collection finds a sub-child without iterating the whole catalog."""
@@ -1194,6 +1199,162 @@ class TestFormatColumnsFullRender:
         rendered = "\n".join(lines)
         for v in ("public", "private", "tribal", "ngo"):
             assert v in rendered, f"value {v!r} missing from rendered output"
+
+
+class TestInlineCollectionContent:
+    """Inline `collection=` / `catalog=` parameters bypass the HTTP fetch — caller
+    hands the already-loaded JSON over instead of letting the server re-fetch via
+    `catalog_url`. See issue #105."""
+
+    def _minimal_collection_dict(self, cid="inline-col", title="Inline", children=None):
+        d = {
+            "id": cid,
+            "title": title,
+            "description": "Provided inline.",
+            "license": "CC-BY-4.0",
+            "extent": {
+                "spatial": {"bbox": [[-180, -90, 180, 90]]},
+                "temporal": {"interval": [["2020-01-01T00:00:00+00:00", None]]},
+            },
+            "links": [],
+            "assets": {
+                "data": {
+                    "href": "s3://bucket/data.parquet",
+                    "type": "application/x-parquet",
+                    "title": "Data",
+                }
+            },
+        }
+        if children is not None:
+            d["children"] = children
+        return d
+
+    def test_get_collection_inline_returns_dict_no_http(self):
+        with patch("stac.requests.get") as mock_get, \
+             patch("stac.pystac.Catalog.from_file") as mock_cat, \
+             patch("stac.pystac.Collection.from_file") as mock_col_file:
+            result = get_collection(
+                "inline-col",
+                collection=self._minimal_collection_dict(),
+            )
+            mock_get.assert_not_called()
+            mock_cat.assert_not_called()
+            mock_col_file.assert_not_called()
+        assert isinstance(result, dict)
+        assert result["id"] == "inline-col"
+        assert result["assets"]["data"]["href"] == "s3://bucket/data.parquet"
+
+    def test_get_collection_inline_with_children_renders_nested(self):
+        """Embedded children dicts surface as nested dicts in the result."""
+        child = self._minimal_collection_dict(cid="child-a", title="Child A")
+        parent = self._minimal_collection_dict(cid="parent-x", title="Parent X", children=[child])
+        with patch("stac.requests.get") as mock_get, \
+             patch("stac.pystac.Catalog.from_file") as mock_cat:
+            result = get_collection("parent-x", collection=parent)
+            mock_get.assert_not_called()
+            mock_cat.assert_not_called()
+        assert result["id"] == "parent-x"
+        # Contract change: children is a list of nested dicts (not just IDs)
+        assert isinstance(result["children"], list)
+        assert isinstance(result["children"][0], dict)
+        assert result["children"][0]["id"] == "child-a"
+
+    def test_get_dataset_inline_returns_markdown_no_http(self):
+        with patch("stac.requests.get") as mock_get, \
+             patch("stac.pystac.Catalog.from_file") as mock_cat, \
+             patch("stac.pystac.Collection.from_file") as mock_col_file:
+            result = get_dataset(
+                "inline-col",
+                collection=self._minimal_collection_dict(title="Inline Markdown"),
+            )
+            mock_get.assert_not_called()
+            mock_cat.assert_not_called()
+            mock_col_file.assert_not_called()
+        assert isinstance(result, str)
+        assert "Inline Markdown" in result
+        assert "s3://bucket/data.parquet" in result
+
+    def test_get_dataset_inline_with_children_renders_sub_datasets(self):
+        child = self._minimal_collection_dict(cid="child-a", title="Child A")
+        parent = self._minimal_collection_dict(cid="parent-x", title="Parent X", children=[child])
+        result = get_dataset("parent-x", collection=parent)
+        assert "Sub-datasets" in result
+        assert "Child A" in result or "child-a" in result
+
+    def test_list_datasets_inline_catalog_no_http(self):
+        """list_datasets(catalog=<dict>) renders without any HTTP fetch and
+        indexes both parent and sub-collection IDs."""
+        sub = self._minimal_collection_dict(cid="sub-a", title="Sub A")
+        parent = self._minimal_collection_dict(cid="parent-x", title="Parent X", children=[sub])
+        standalone = self._minimal_collection_dict(cid="standalone-y", title="Standalone Y")
+        catalog = {
+            "id": "inline-catalog",
+            "title": "Inline Catalog",
+            "description": "Provided inline",
+            "children": [parent, standalone],
+        }
+        with patch("stac.requests.get") as mock_get, \
+             patch("stac.pystac.Catalog.from_file") as mock_cat:
+            result = list_datasets(catalog=catalog)
+            mock_get.assert_not_called()
+            mock_cat.assert_not_called()
+        assert "parent-x" in result
+        assert "sub-a" in result
+        assert "standalone-y" in result
+
+    def test_collection_to_dict_output_round_trips_through_inline(self):
+        """The dict emitted by `_collection_to_dict` (with sub_children) is
+        accepted as inline input to `get_collection` and reproduces the
+        same identity / children IDs."""
+        sub_col = MagicMock()
+        sub_col.id = "sub-x"
+        sub_col.title = "Sub X"
+        sub_col.description = "Sub"
+        sub_col.license = None
+        sub_col.keywords = []
+        sub_col.providers = []
+        sub_col.links = []
+        sub_col.summaries = None
+        sub_col.extra_fields = {}
+        sub_col.assets = {}
+        from datetime import datetime, timezone
+        spatial = MagicMock(); spatial.bboxes = [[-180, -90, 180, 90]]
+        temporal = MagicMock(); temporal.intervals = [[datetime(2020, 1, 1, tzinfo=timezone.utc), None]]
+        ext = MagicMock(); ext.spatial = spatial; ext.temporal = temporal
+        sub_col.extent = ext
+
+        parent_col = MagicMock()
+        parent_col.id = "parent-x"
+        parent_col.title = "Parent X"
+        parent_col.description = "Parent"
+        parent_col.license = "CC-BY-4.0"
+        parent_col.keywords = []
+        parent_col.providers = []
+        parent_col.links = []
+        parent_col.summaries = None
+        parent_col.extra_fields = {}
+        parent_col.assets = {}
+        parent_col.extent = ext
+
+        emitted = _collection_to_dict(parent_col, sub_children=[sub_col])
+
+        # Feed the emitted dict back through the inline path
+        round_tripped = get_collection("parent-x", collection=emitted)
+        assert round_tripped["id"] == "parent-x"
+        assert round_tripped["children"][0]["id"] == "sub-x"
+
+    def test_get_collection_inline_precedence_over_catalog_url(self):
+        """When both `collection` and `catalog_url` are passed, inline wins (no fetch)."""
+        with patch("stac.requests.get") as mock_get, \
+             patch("stac.pystac.Catalog.from_file") as mock_cat:
+            result = get_collection(
+                "inline-col",
+                catalog_url="https://example.com/catalog.json",
+                collection=self._minimal_collection_dict(),
+            )
+            mock_get.assert_not_called()
+            mock_cat.assert_not_called()
+        assert result["id"] == "inline-col"
 
 
 class TestExtractParquetAssetsExtensions:

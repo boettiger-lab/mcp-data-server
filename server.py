@@ -123,31 +123,54 @@ def catalog_dataset(dataset_id: str) -> str:
 # 6. MCP TOOLS — Dataset Discovery
 # -------------------------------------------------------------------------
 @mcp.tool()
-def browse_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> str:
+def browse_stac_catalog(
+    catalog_url: str = None,
+    catalog_token: str = None,
+    catalog: dict = None,
+) -> str:
     """Browse the full public STAC catalog to discover datasets not already loaded in your app.
     Use when the user asks about data outside your pre-configured layers.
     Optionally provide catalog_url to use a custom STAC catalog instead of the server default.
-    Optionally provide catalog_token (Bearer token) if the catalog requires authentication."""
-    return _stac_list(catalog_url, catalog_token)
+    Optionally provide catalog_token (Bearer token) if the catalog requires authentication.
+    Optionally provide catalog inline (a Catalog dict with nested `children: [<collection dict>, ...]`)
+    to skip the HTTP fetch entirely — useful for OAuth-walled deployments where the
+    client already has the catalog content cached."""
+    return _stac_list(catalog_url, catalog_token, catalog=catalog)
 
 @mcp.tool()
-def get_stac_details(dataset_id: str, catalog_url: str = None, catalog_token: str = None) -> str:
+def get_stac_details(
+    dataset_id: str,
+    catalog_url: str = None,
+    catalog_token: str = None,
+    collection: dict = None,
+) -> str:
     """Fetch metadata (parquet paths, column schemas) for any STAC collection by ID.
     Returns markdown formatted for LLM consumption (use get_collection for structured JSON).
-    Optionally provide catalog_url and catalog_token if using a private STAC catalog."""
-    return _stac_get(dataset_id, catalog_url, catalog_token)
+    Optionally provide catalog_url and catalog_token if using a private STAC catalog.
+    Optionally provide collection inline (a Collection dict, optionally with embedded
+    `children: [<sub-collection dict>, ...]`) to skip the HTTP fetch entirely."""
+    return _stac_get(dataset_id, catalog_url, catalog_token, collection=collection)
 
 @mcp.tool()
-def get_collection(collection_id: str, catalog_url: str = None, catalog_token: str = None) -> dict:
+def get_collection(
+    collection_id: str,
+    catalog_url: str = None,
+    catalog_token: str = None,
+    collection: dict = None,
+) -> dict:
     """Return structured STAC collection metadata as JSON for programmatic use.
 
     Unlike get_stac_details (markdown for LLM consumption), this returns the
     raw collection dict with all assets (parquet, PMTiles, COG, GeoJSON),
     per-asset STAC extension fields (table:columns, raster:bands, vector:layers),
-    full collection metadata, and child collection IDs. S3 paths are pre-resolved.
+    full collection metadata, and nested child collections. S3 paths are pre-resolved.
+
+    Optionally provide collection inline (a Collection dict, optionally with embedded
+    `children: [<sub-collection dict>, ...]`) to skip the HTTP fetch — output round-trips
+    back into the same parameter.
 
     Intended for app code that builds map layers and system prompts programmatically."""
-    return _stac_get_collection(collection_id, catalog_url, catalog_token)
+    return _stac_get_collection(collection_id, catalog_url, catalog_token, collection=collection)
 
 # -------------------------------------------------------------------------
 # 7. MCP PROMPTS (Personas for Smart Clients)

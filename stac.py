@@ -319,9 +319,11 @@ def _collection_to_dict(col, sub_children=None) -> dict:
         if val is not None:
             result[ext_key] = val
 
-    # Child collection IDs — only populated when sub_children are provided
+    # Child collections — only populated when sub_children are provided. Emitted
+    # as a list of nested dicts (not just IDs) so the output round-trips back
+    # into the inline `collection=` parameter; see issue #105.
     if sub_children is not None:
-        result["children"] = [sc.id for sc in sub_children]
+        result["children"] = [_collection_to_dict(sc) for sc in sub_children]
 
     return {k: v for k, v in result.items() if v is not None}
 
@@ -588,12 +590,48 @@ STAC_DATASETS: dict[str, str] = {}
 fetch_stac_catalog()
 
 
-def list_datasets(catalog_url: str = None, catalog_token: str = None) -> str:
+def _render_inline_catalog(catalog: dict) -> dict[str, str]:
+    """Build a {collection_id: markdown} dict from an inline catalog dict.
+
+    Mirrors the parent-then-sub-children indexing of `fetch_stac_catalog`:
+    each parent contributes one entry, each embedded sub-child contributes
+    its own entry. Goes one level deep — matches the existing renderer.
+    """
+    datasets: dict[str, str] = {}
+    for child_dict in catalog.get("children", []) or []:
+        col = _coerce_inline_collection(child_dict)
+        sub_dicts = child_dict.get("children") or []
+        sub_cols = [_coerce_inline_collection(s) for s in sub_dicts]
+        datasets[col.id] = _format_collection(col, sub_children=sub_cols)
+        for sub_dict, sub_col in zip(sub_dicts, sub_cols):
+            datasets[sub_col.id] = _format_collection(sub_col, sub_children=[])
+    return datasets
+
+
+def list_datasets(
+    catalog_url: str = None,
+    catalog_token: str = None,
+    catalog: dict = None,
+) -> str:
     """List all available datasets from the STAC catalog.
 
     Appends a warning footer when `STAC_LOAD_ERRORS` is non-empty, so callers
     can distinguish "not in catalog" from "failed to load this time."
+
+    Resolution order: `catalog` (inline, no fetch) → `catalog_url` (fetch) →
+    server default. See issue #105.
     """
+    if catalog is not None:
+        datasets = _render_inline_catalog(catalog)
+        url = catalog.get("id") or "<inline>"
+        footer_errors: dict = {}
+        lines = [f"# Available Datasets ({len(datasets)} collections)\n"]
+        lines.append(f"STAC catalog: `{url}` (provided inline)\n")
+        for cid, summary in datasets.items():
+            first_line = summary.split("\n")[0]
+            lines.append(f"- **{cid}**: {first_line}")
+        return "\n".join(lines)
+
     if catalog_url:
         datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
         url = catalog_url
@@ -621,8 +659,24 @@ def list_datasets(catalog_url: str = None, catalog_token: str = None) -> str:
     return "\n".join(lines)
 
 
-def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = None) -> str:
-    """Get detailed metadata for a specific dataset."""
+def get_dataset(
+    dataset_id: str,
+    catalog_url: str = None,
+    catalog_token: str = None,
+    collection: dict = None,
+) -> str:
+    """Get detailed metadata for a specific dataset.
+
+    Resolution order: `collection` (inline, no fetch) → `catalog_url` (fetch) →
+    server default. Embedded `children: [<dict>, ...]` in the inline dict are
+    rendered as sub-datasets. See issue #105.
+    """
+    if collection is not None:
+        col = _coerce_inline_collection(collection)
+        child_dicts = collection.get("children") or []
+        sub_children = [_coerce_inline_collection(c) for c in child_dicts]
+        return _format_collection(col, sub_children=sub_children)
+
     if catalog_url:
         datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
     else:
@@ -641,7 +695,30 @@ def get_dataset(dataset_id: str, catalog_url: str = None, catalog_token: str = N
     return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
 
 
-def get_collection(collection_id: str, catalog_url: str = None, catalog_token: str = None) -> dict:
+def _coerce_inline_collection(d: dict):
+    """Parse an inline STAC collection dict into a pystac.Collection.
+
+    Tolerates dicts that omit STAC envelope fields (`type`, `stac_version`) so
+    that `_collection_to_dict` output can round-trip back through the inline
+    `collection=` parameter. The `children` key is consumed by the caller and
+    must be stripped before pystac sees the dict.
+    """
+    payload = {k: v for k, v in d.items() if k != "children"}
+    payload.setdefault("type", "Collection")
+    payload.setdefault("stac_version", "1.0.0")
+    # STAC marks `license` as required, but `_collection_to_dict` strips None
+    # values — so a license-less collection round-tripped through this path
+    # would crash pystac's parser. "various" is the STAC-recommended placeholder.
+    payload.setdefault("license", "various")
+    return pystac.Collection.from_dict(payload)
+
+
+def get_collection(
+    collection_id: str,
+    catalog_url: str = None,
+    catalog_token: str = None,
+    collection: dict = None,
+) -> dict:
     """Return structured STAC collection metadata for programmatic use.
 
     Unlike get_stac_details (which returns markdown for LLM consumption),
@@ -649,11 +726,23 @@ def get_collection(collection_id: str, catalog_url: str = None, catalog_token: s
     - All assets (parquet, PMTiles, COG, GeoJSON) with hrefs converted to s3://
     - Per-asset STAC extension fields (table:columns, raster:bands, vector:layers)
     - Full collection metadata (providers, extent, license, keywords, links)
-    - Child collection IDs for parent containers
+    - Child collections (nested dicts) for parent containers
+
+    Resolution order:
+      1. If `collection` is provided, render directly (no fetch). Embedded
+         `children: [<dict>, ...]` are surfaced as nested child dicts.
+      2. Else if `catalog_url` is provided, walk that catalog as today.
+      3. Else use the server's default STAC_CATALOG_URL.
 
     Intended for app code (e.g. geo-agent) that builds map layers and system
     prompts programmatically from structured data.
     """
+    if collection is not None:
+        col = _coerce_inline_collection(collection)
+        child_dicts = collection.get("children") or []
+        sub_children = [_coerce_inline_collection(c) for c in child_dicts] or None
+        return _collection_to_dict(col, sub_children=sub_children)
+
     if catalog_url:
         # On-demand fetch for non-default catalogs — avoid full-catalog iteration.
         stac_io = _TimeoutStacIO(token=catalog_token)
