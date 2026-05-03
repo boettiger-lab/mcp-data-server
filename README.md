@@ -174,17 +174,19 @@ The deployment:
 - Uses `uv` for fast dependency installation
 - Includes readiness probes for safe rollouts
 
-### Verifying a production rollout
+### Releases and production rollouts
 
-The pod image is just a runtime base; the actual application source is `git clone`d at pod startup from a tag pinned in `k8s/deployment.yaml` (`git clone --branch vX.Y.Z ...`). To confirm prod is running the latest tagged release, compare the cluster's pinned tag against the latest git tag (not `gh release`, which can lag), then confirm pods have been recreated since the bump commit:
+The pod image is just a runtime base; the actual application source is `git clone`d at pod startup from a tag pinned in `k8s/deployment.yaml` (`git clone --branch vX.Y.Z ...`). The convention is **every tag is a GitHub Release** — when you cut a new version, push the tag *and* publish a release with notes (`gh release create vX.Y.Z --title "..." --notes "..."`). The latest GitHub Release is the source of truth for "what should be running in prod."
+
+To confirm prod is on the latest release:
 
 ```bash
 # Tag the cluster is configured to clone:
 kubectl -n biodiversity get deploy duckdb-mcp \
   -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -oP 'branch \K[^ ]+'
 
-# Latest tag in the repo:
-git fetch --tags && git tag --sort=-version:refname | head -1
+# Latest published release:
+gh release view -R boettiger-lab/mcp-data-server --json tagName -q .tagName
 
 # Pod ages — must be newer than the k8s/deployment.yaml bump commit:
 kubectl -n biodiversity get pods -l app=duckdb-mcp \
