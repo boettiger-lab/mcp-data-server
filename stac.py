@@ -132,19 +132,14 @@ def _format_columns(table_cols: list) -> list[str]:
         c for c in table_cols
         if c.get("name", "").lower() not in ("geometry", "geom", "bbox")
     ]
-    h3_cols = [c for c in display_cols if c.get("name", "") in ("h0", "h8", "h9", "h10", "h11")]
-    other_cols = [c for c in display_cols if c not in h3_cols]
 
     lines = []
-    if other_cols:
-        for c in other_cols:
-            desc = f" — {c['description']}" if c.get("description") else ""
-            lines.append(f"    - `{c['name']}` ({c.get('type', '?')}){desc}")
-            values = c.get("values")
-            if values:
-                lines.append(f"      values: {list(values)}")
-    if h3_cols:
-        lines.append(f"    - H3 index columns: {', '.join(c['name'] for c in h3_cols)}")
+    for c in display_cols:
+        desc = f" — {c['description']}" if c.get("description") else ""
+        lines.append(f"    - `{c['name']}` ({c.get('type', '?')}){desc}")
+        values = c.get("values")
+        if values:
+            lines.append(f"      values: {list(values)}")
     return lines
 
 
