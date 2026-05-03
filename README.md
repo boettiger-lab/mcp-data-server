@@ -174,6 +174,27 @@ The deployment:
 - Uses `uv` for fast dependency installation
 - Includes readiness probes for safe rollouts
 
+### Releases and production rollouts
+
+The pod image is just a runtime base; the actual application source is `git clone`d at pod startup from a tag pinned in `k8s/deployment.yaml` (`git clone --branch vX.Y.Z ...`). The convention is **every tag is a GitHub Release** — when you cut a new version, push the tag *and* publish a release with notes (`gh release create vX.Y.Z --title "..." --notes "..."`). The latest GitHub Release is the source of truth for "what should be running in prod."
+
+To confirm prod is on the latest release:
+
+```bash
+# Tag the cluster is configured to clone:
+kubectl -n biodiversity get deploy duckdb-mcp \
+  -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -oP 'branch \K[^ ]+'
+
+# Latest published release:
+gh release view -R boettiger-lab/mcp-data-server --json tagName -q .tagName
+
+# Pod ages — must be newer than the k8s/deployment.yaml bump commit:
+kubectl -n biodiversity get pods -l app=duckdb-mcp \
+  -o custom-columns=NAME:.metadata.name,CREATED:.metadata.creationTimestamp
+```
+
+If the first two commands print the same tag and the pods are newer than the bump commit, prod is current.
+
 ## MCP Protocol Features
 
 ### Tools
