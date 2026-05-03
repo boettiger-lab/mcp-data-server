@@ -139,6 +139,32 @@ SELECT SUM(amount) FROM (
 
 `_cng_fid` is the universal feature ID on all CNG-processed vector hex datasets. Some datasets also carry a source-specific ID (e.g. `tpl_id`, `GEOID`) for cross-collection joins — check `get_schema`.
 
+**Cross-collection case: flat table joined to a hex table for spatial assignment**
+
+When the aggregate value lives in a flat (non-hex) table, joining it to a hex table replicates it across N hex rows. Apply the same principle — deduplicate by feature ID — but the `DISTINCT` must be on `(feature_id, geography_id)`, not on hex coordinates:
+
+```sql
+-- ❌ WRONG: DISTINCT on hex coords doesn't help — they're already unique per row
+tx_sites_hex AS (
+  SELECT DISTINCT s.h10, s.h0, f.total_federal   -- still N rows per tpl_id
+  FROM flat_funding f
+  JOIN read_parquet('<sites_hex>') s USING (tpl_id)
+)
+
+-- ✅ CORRECT: DISTINCT on (feature_id, geography_id) gives one row per assignment
+site_district AS (
+  SELECT DISTINCT s.tpl_id, c.GEOID
+  FROM read_parquet('<sites_hex>') s
+  JOIN read_parquet('<cd_hex>') c ON s.h10 = c.h10 AND s.h0 = c.h0
+)
+SELECT sd.GEOID, SUM(f.total_federal) AS total
+FROM site_district sd
+JOIN flat_funding f USING (tpl_id)
+GROUP BY sd.GEOID
+```
+
+The flat table is joined **last**, after the spatial assignment is deduplicated.
+
 ---
 
 ### Problem 2 — Overlapping polygons (vector datasets)
