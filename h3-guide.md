@@ -28,8 +28,8 @@ All spatial operations are hex joins — two datasets overlap wherever their hex
 ## Key Facts
 
 - Always report **areas** (km², acres, etc.), never raw hex counts
-- Use `APPROX_COUNT_DISTINCT(hN)` when counting hexes — avoids double-counting
-- **Never SUM area columns** (ACRES, GIS_Acres, area_ha, etc.) on hex data. These store the source polygon's total area repeated on every hex row. `SUM(ACRES)` = polygon_area × num_hex_cells — wrong by 10³–10⁶×. Always compute area from hex cells instead. Note: `DISTINCT` deduplication removes duplicate rows for the same feature but does not resolve overlapping features — two features covering the same ground still sum their acreages independently. `APPROX_COUNT_DISTINCT(hN) * area_per_cell` is the only method immune to this, since it counts physical cells rather than feature declarations.
+- For nationwide/global aggregates over millions of cells, `APPROX_COUNT_DISTINCT(hN)` is fast and accurate to ~1–2%. For per-group breakdowns (per-state, per-class, per-county, per-district) where each group has fewer than ~1M distinct cells, use `COUNT(DISTINCT hN)` instead — DuckDB's HLL error grows steeply at smaller cardinalities and compounds inside `GROUP BY` (real-world per-group errors of +30% have been observed). Total scan size matters less than per-group cell count.
+- **Never SUM area columns** (ACRES, GIS_Acres, area_ha, etc.) on hex data. These store the source polygon's total area repeated on every hex row. `SUM(ACRES)` = polygon_area × num_hex_cells — wrong by 10³–10⁶×. Always compute area from hex cells instead. Note: `DISTINCT` deduplication removes duplicate rows for the same feature but does not resolve overlapping features — two features covering the same ground still sum their acreages independently. Counting distinct hex cells × `area_per_cell` is the only method immune to this, since it counts physical cells rather than feature declarations (see the previous bullet for `APPROX` vs exact `COUNT DISTINCT`).
 
 ## Area Conversion
 
@@ -41,11 +41,13 @@ All spatial operations are hex joins — two datasets overlap wherever their hex
 | h10 | 0.01505 | 3.718 |
 
 ```sql
--- Example: area from h8 hexes
+-- Global aggregate (millions of cells, ~1% error acceptable):
 SELECT APPROX_COUNT_DISTINCT(h8) * 0.7373 AS area_km2 FROM ...
 
--- Example: area from h5 hexes
-SELECT APPROX_COUNT_DISTINCT(h5) * 252.9 AS area_km2 FROM ...
+-- Per-group breakdown (per-state, per-class, etc.) — use exact COUNT DISTINCT:
+SELECT state, COUNT(DISTINCT h8) * 0.7373 AS area_km2
+FROM ...
+GROUP BY state
 ```
 
 ## Coordinates from H3 Cells
