@@ -1176,15 +1176,26 @@ class TestFormatColumnsFullRender:
         for i in range(30):
             assert f"col_{i:02d}" in rendered, f"col_{i:02d} missing — renderer truncated"
 
-    def test_h3_columns_still_collapsed(self):
-        """H3 index columns collapse to one line regardless of how many non-H3 columns precede."""
+    def test_h3_columns_render_with_descriptions(self):
+        """H3 index columns render inline with name/type/description like other columns,
+        so models see the partition-key role of h0 instead of treating it as a small ordinal."""
         from stac import _format_columns
         cols = [{"name": f"col_{i:02d}", "type": "varchar"} for i in range(25)]
-        cols += [{"name": n, "type": "ubigint"} for n in ("h0", "h8", "h9", "h10")]
+        cols += [
+            {"name": "h0", "type": "ubigint",
+             "description": "H3 cell ID at resolution 0, used as the partition key for hive-partitioned reads."},
+            {"name": "h8", "type": "ubigint",
+             "description": "H3 cell ID at resolution 8."},
+            {"name": "h9", "type": "ubigint", "description": "H3 cell ID at resolution 9."},
+            {"name": "h10", "type": "ubigint", "description": "H3 cell ID at resolution 10."},
+        ]
         lines = _format_columns(cols)
         rendered = "\n".join(lines)
-        assert "H3 index columns" in rendered
-        assert "h0" in rendered and "h8" in rendered and "h9" in rendered and "h10" in rendered
+        assert "H3 index columns:" not in rendered, "H3 columns must not be collapsed to a name-only line"
+        assert "`h0` (ubigint) — H3 cell ID at resolution 0" in rendered
+        assert "`h8` (ubigint) — H3 cell ID at resolution 8" in rendered
+        assert "`h9` (ubigint) — H3 cell ID at resolution 9" in rendered
+        assert "`h10` (ubigint) — H3 cell ID at resolution 10" in rendered
 
     def test_categorical_values_rendered(self):
         """Columns with a `values` array have those values included in output."""
