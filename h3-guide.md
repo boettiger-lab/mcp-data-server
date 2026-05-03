@@ -48,6 +48,25 @@ SELECT APPROX_COUNT_DISTINCT(h8) * 0.7373 AS area_km2 FROM ...
 SELECT APPROX_COUNT_DISTINCT(h5) * 252.9 AS area_km2 FROM ...
 ```
 
+## Coordinates from H3 Cells
+
+To get latitude/longitude from a hex column (e.g. to supply a `fly_to` map
+center), call `h3_cell_to_lat(hN)` / `h3_cell_to_lng(hN)` on the cell **column**.
+For a feature spanning many hexes, average:
+
+```sql
+SELECT AVG(h3_cell_to_lat(h8)) AS lat,
+       AVG(h3_cell_to_lng(h8)) AS lng
+FROM read_parquet('<hex parquet path>')
+WHERE <feature filter>;
+```
+
+**Always pass the column** (`h8`, `h0`) — never copy a displayed h3 ID as a
+literal. Markdown table output may render the BIGINT in scientific notation
+(e.g. `6.15323e+17`), which DuckDB parses as DOUBLE (function rejects it) and
+which loses precision even when accepted. Accepted argument types are
+`VARCHAR`, `UBIGINT`, and `BIGINT`.
+
 ## Joining Different Resolutions
 
 **Always join by converting the finer (higher-numbered) dataset to the coarser resolution — never look for child columns on the coarser dataset.**
