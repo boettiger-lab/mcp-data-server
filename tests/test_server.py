@@ -273,12 +273,12 @@ class TestTileRouteMounted:
         paths = [getattr(r, "path", None) or getattr(r, "path_format", None) for r in app.routes]
         assert any(p and "/tiles/" in p for p in paths)
 
-    def test_register_hex_tiles_is_disabled(self):
-        """register_hex_tiles is intentionally not exposed until ready for production (#97)."""
+    def test_register_hex_tiles_is_exposed(self):
+        """register_hex_tiles is exposed as an MCP tool."""
         from server import mcp
         import anyio
         tool_names = [t.name for t in anyio.run(mcp.list_tools)]
-        assert "register_hex_tiles" not in tool_names
+        assert "register_hex_tiles" in tool_names
 
 
 if __name__ == "__main__":
