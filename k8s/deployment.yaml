@@ -27,7 +27,7 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
           - |
-            git clone --branch v0.5.7 https://github.com/boettiger-lab/mcp-data-server.git /app && \
+            git clone --branch v0.6.0 https://github.com/boettiger-lab/mcp-data-server.git /app && \
             cd /app && \
             python server.py
         env:
@@ -44,7 +44,7 @@ spec:
             cpu: 250m
           limits:
             memory: 160Gi
-            cpu: 16
+            cpu: 64
         ports:
         - containerPort: 8000
         readinessProbe:
