@@ -173,6 +173,26 @@ class TestRegisterHexTiles:
             assert partition.exists(), f"Missing res={res}"
             assert any(partition.iterdir()), f"Empty res={res}"
 
+    def test_auto_detects_finest_res_from_h3_column(self, local_bucket, h3_conn):
+        # No finest_res passed — should be detected via h3_get_resolution
+        # on the H3 column. h3_latlng_to_cell at res 6 → finest_res=6.
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 6) AS h6, 1.0 AS val"
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, min_res=3, agg="AVG", zoom_offset=-1,
+        )
+        assert result["finest_res"] == 6
+
+    def test_auto_detect_raises_on_empty_sql(self, local_bucket, h3_conn):
+        # SQL filters to zero rows — auto-detect can't sample a cell.
+        user_sql = (
+            "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val "
+            "WHERE 1 = 0"
+        )
+        with pytest.raises(ValueError, match="auto-detect"):
+            register_hex_tiles(
+                con=h3_conn, sql=user_sql, min_res=2, agg="COUNT",
+            )
+
     def test_tile_url_template_uses_public_base(self, local_bucket, h3_conn):
         user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
         result = register_hex_tiles(
