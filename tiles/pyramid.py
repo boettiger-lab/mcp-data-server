@@ -57,9 +57,20 @@ def build_pyramid_sql(
             f"  SELECT h3_cell_to_parent({qh}, {res}) AS h, "
             f"{parent_values}, {res} AS res FROM src GROUP BY 1"
         )
-    selects.append(
-        f"  SELECT {qh} AS h, {finest_values}, {finest_res} AS res FROM src"
-    )
+    if agg_upper == "COUNT":
+        # Aggregate at finest too — otherwise raw rows pass through and a cell
+        # with N occurrences becomes N MVT features. Tiles balloon (e.g., 126M
+        # rows for 2.3M unique cells on GBIF CA → 54× duplication).
+        selects.append(
+            f"  SELECT {qh} AS h, COUNT(*) AS count, "
+            f"{finest_res} AS res FROM src GROUP BY 1"
+        )
+    else:
+        # Non-COUNT aggs preserve raw per-row values at finest by design — the
+        # caller may have pre-aggregated upstream, or want per-row visibility.
+        selects.append(
+            f"  SELECT {qh} AS h, {finest_values}, {finest_res} AS res FROM src"
+        )
 
     body = "\n  UNION ALL\n".join(selects)
 
