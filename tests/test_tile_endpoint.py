@@ -106,6 +106,25 @@ class TestServeTile:
         assert expected in r.content, f"layer name {layer_name!r} not found in MVT bytes"
 
 
+class TestH0Pruning:
+    def test_build_tile_sql_filters_by_h0(self):
+        # Per-tile pruning depends on the SQL restricting reads to the h0
+        # partitions overlapping the tile bbox. The exact predicate shape
+        # is flexible (literal IN list, SEMI JOIN, or IN subquery) but the
+        # query must reference h0 and use a recursive glob so hive_partitioning
+        # can populate it.
+        from tiles.endpoint import _build_tile_sql
+        sql = _build_tile_sql(
+            namespace="hex", name="abc",
+            z=8, x=42, y=98,
+            target_res=8, finest_res=8,
+        )
+        # Recursive glob (** ) so hive partition columns are discovered.
+        assert "**" in sql or "hive_partitioning" in sql.lower()
+        # Some restriction on h0 must be present.
+        assert "h0" in sql
+
+
 class TestMetadataDriven:
     def test_endpoint_reads_finest_res_from_metadata(self, app_with_tiles, local_bucket):
         """After registering with finest_res=4, a tile request should use res=4 max."""

@@ -96,16 +96,23 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
 
     Strategy:
       1. Compute the tile's lng/lat bbox and web-mercator BOX_2D (Python-side).
-      2. Filter pyramid rows where the cell's center lat/lng falls inside the
+      2. Restrict the parquet scan to the h0 partitions overlapping the tile
+         bbox. SEMI JOIN against a `bbox_h0` CTE lets DuckDB hive-prune the
+         partitioned pyramid to a handful of files instead of scanning the
+         entire globe at the target resolution.
+      3. Filter pyramid rows where the cell's center lat/lng falls inside the
          tile bbox. Each cell is rendered by exactly one tile (the one
-         containing its center) — same boundary behavior as the previous
-         polygon-cells join, without enumerating cells at target_res.
-      3. Project cell geometries with ST_AsMVTGeom then aggregate with ST_AsMVT.
+         containing its center).
+      4. Project cell geometries with ST_AsMVTGeom then aggregate with ST_AsMVT.
 
-    Why not `h3_polygon_wkt_to_cells(tile_wkt, target_res)`? Cost is linear in
-    output cells; at high target_res over a tile-sized polygon that runs into
-    six-figure cell counts per request and dominates render time. The bbox
-    filter on h3_cell_to_lat/lng is O(pyramid rows) instead.
+    bbox_h0 candidate-cell derivation:
+      H3's polygon_wkt_to_cells uses "center inside polygon" semantics. At
+      res=0 a single base cell is ~1700 km wide, so any tile smaller than that
+      contains no h0 centers and the polygon call returns nothing. Instead we
+      sample h3_latlng_to_cell across a grid covering the bbox. At z<=2 the
+      tile is large enough that grid sampling can still miss h0s in the gaps
+      (sample spacing > h0 diameter), so we fall back to the full set of 122
+      base cells — cheap at low zoom because the target partition is small.
 
     Notes:
     - ST_AsMVTGeom requires BOX_2D (not GEOMETRY). We build it as a struct cast.
@@ -117,9 +124,32 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
     mx_e = _lng_to_merc_x(east)
     my_s = _lat_to_merc_y(south)
     my_n = _lat_to_merc_y(north)
+
+    if z <= 2:
+        bbox_h0_sql = "SELECT CAST(UNNEST(h3_get_res0_cells()) AS BIGINT) AS h0"
+    else:
+        # 8x8 grid → sample spacing ~tile_width/7. At z>=3 tile width <= 45°
+        # while h0 diameter is ~15° (Earth/12 cells), so every overlapping h0
+        # cell receives at least one sample point.
+        bbox_h0_sql = (
+            "SELECT DISTINCT CAST(h3_latlng_to_cell(\n"
+            f"  {south} + (i/7.0) * ({north} - {south}),\n"
+            f"  {west} + (j/7.0) * ({east} - {west}),\n"
+            "  0\n"
+            ") AS BIGINT) AS h0\n"
+            "FROM range(8) t1(i), range(8) t2(j)"
+        )
+
     return f"""
-        WITH src AS (
-          SELECT p.* FROM read_parquet('{tileset}/res={target_res}/*.parquet') p
+        WITH bbox_h0 AS (
+          {bbox_h0_sql}
+        ),
+        src AS (
+          SELECT p.* FROM read_parquet(
+            '{tileset}/res={target_res}/**/*.parquet',
+            hive_partitioning=true
+          ) p
+          SEMI JOIN bbox_h0 USING (h0)
           WHERE h3_cell_to_lat(p.h) BETWEEN {south} AND {north}
             AND h3_cell_to_lng(p.h) BETWEEN {west} AND {east}
         ),
@@ -129,7 +159,7 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
               ST_Transform(h3_cell_to_boundary_wkt(h)::GEOMETRY, 'EPSG:4326', 'EPSG:3857', true),
               {{'min_x': {mx_w}, 'min_y': {my_s}, 'max_x': {mx_e}, 'max_y': {my_n}}}::BOX_2D
             ) AS geom,
-            src.* EXCLUDE (h)
+            src.* EXCLUDE (h, h0)
           FROM src
         )
         SELECT ST_AsMVT(projected) FROM projected WHERE geom IS NOT NULL

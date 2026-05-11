@@ -29,10 +29,12 @@ class TestBuildPyramidSQL:
             output_uri="s3://public-output/hex/abc/",
         )
         # The finest-res SELECT should NOT have AVG/SUM wrapping the value column.
-        # Look for the "... AS res" marker equal to finest_res.
-        finest_select = re.search(r"SELECT[^)]*?8 AS res FROM src", sql, re.DOTALL)
-        assert finest_select is not None
-        assert "AVG" not in finest_select.group(0)
+        # The finest SELECT for a non-COUNT agg has no GROUP BY (preserves raw values).
+        # Take the substring after the last "UNION ALL" — that's the finest level.
+        finest_select = sql.rsplit("UNION ALL", 1)[-1]
+        assert "8 AS res FROM src" in finest_select
+        assert "AVG" not in finest_select
+        assert "GROUP BY" not in finest_select
 
     def test_parent_levels_aggregate(self):
         sql = build_pyramid_sql(
@@ -47,16 +49,30 @@ class TestBuildPyramidSQL:
         # Parent selects use SUM("val") — column names are quoted
         assert 'SUM("val")' in sql
 
-    def test_partitions_by_res(self):
+    def test_partitions_by_res_and_h0(self):
         sql = build_pyramid_sql(
             user_sql="SELECT h8, val FROM src",
             finest_res=8, min_res=2, agg="AVG",
             value_columns=["val"], h3_column="h8",
             output_uri="s3://public-output/hex/abc/",
         )
-        assert "PARTITION_BY (res)" in sql
+        assert "PARTITION_BY (res, h0)" in sql
         assert "OVERWRITE_OR_IGNORE" in sql
         assert "FORMAT PARQUET" in sql
+
+    def test_emits_h0_column_at_every_level(self):
+        # Every SELECT in the UNION needs an h0 column so PARTITION_BY (res, h0)
+        # can route rows to per-h0 subdirectories. h0 = h3_cell_to_parent(cell, 0).
+        sql = build_pyramid_sql(
+            user_sql="SELECT h8, val FROM src",
+            finest_res=8, min_res=2, agg="AVG",
+            value_columns=["val"], h3_column="h8",
+            output_uri="s3://public-output/hex/abc/",
+        )
+        # 7 selects (res=2..8), each must emit h0.
+        select_count = sql.count(" AS res FROM src")
+        assert select_count == 7
+        assert sql.count(" AS h0") == 7
 
     def test_multiple_value_columns(self):
         sql = build_pyramid_sql(
@@ -98,9 +114,13 @@ class TestBuildPyramidSQL:
             output_uri="s3://public-output/hex/abc/",
         )
         # COUNT mode must GROUP BY at finest too so duplicate source rows
-        # collapse to one row per cell with the real count. The finest
-        # SELECT uses the bare h3_column (not h3_cell_to_parent) and "5 AS res".
-        assert 'SELECT "h8" AS h, COUNT(*) AS count, 5 AS res FROM src GROUP BY 1' in sql
+        # collapse to one row per cell with the real count. The finest SELECT
+        # uses the bare h3_column (not h3_cell_to_parent), emits h0 alongside
+        # h, and groups by both (h0 is functionally determined by h).
+        finest_select = sql.rsplit("UNION ALL", 1)[-1]
+        assert '"h8" AS h' in finest_select
+        assert "COUNT(*) AS count" in finest_select
+        assert "5 AS res FROM src GROUP BY 1, 2" in finest_select
 
 
 import os
@@ -148,6 +168,40 @@ class TestInspectUserSQL:
 
 
 class TestRegisterHexTiles:
+    def test_writes_h0_subpartitions(self, local_bucket, h3_conn):
+        # h0 partitioning enables file-level pruning when tile requests filter
+        # by candidate h0 cells. Verify both that the on-disk layout includes
+        # h0=... subdirectories and that h0 is recoverable when reading back
+        # with hive_partitioning=true (matches what the tile endpoint does).
+        # Use lat/lng spans that span multiple h0 cells so the partition split
+        # is observable.
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 4) AS h4, val
+            FROM (VALUES (37.8, -122.3, 1.0),
+                         (0.0, 0.0, 2.0),
+                         (-30.0, 140.0, 3.0)) t(lat, lng, val)
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=4, min_res=2,
+            agg="AVG", zoom_offset=-1,
+        )
+        # At least 2 h0 partitions under each res= directory.
+        for res in (2, 3, 4):
+            res_dir = local_bucket / "hex" / result["hash"] / f"res={res}"
+            h0_subdirs = [p for p in res_dir.iterdir() if p.is_dir() and p.name.startswith("h0=")]
+            assert len(h0_subdirs) >= 2, f"res={res} expected ≥2 h0 partitions, got {[p.name for p in h0_subdirs]}"
+        # h0 column comes back via hive_partitioning and equals h3_cell_to_parent(h, 0).
+        uri = str(local_bucket / "hex" / result["hash"] / "res=4" / "**" / "*.parquet")
+        cols = h3_conn.sql(
+            f"SELECT * FROM read_parquet('{uri}', hive_partitioning=true) LIMIT 1"
+        ).columns
+        assert "h0" in cols
+        mismatches = h3_conn.sql(
+            f"SELECT COUNT(*) FROM read_parquet('{uri}', hive_partitioning=true) "
+            "WHERE h0::BIGINT != h3_cell_to_parent(h, 0)::BIGINT"
+        ).fetchone()[0]
+        assert mismatches == 0
+
     def test_writes_pyramid_partitions(self, local_bucket, h3_conn):
         # Source: 5 cells at r5 around a point.
         user_sql = """
@@ -268,10 +322,11 @@ class TestRegisterHexTiles:
             finest_res=5, min_res=2, agg="COUNT", zoom_offset=4,
         )
         assert result["value_columns"] == ["count"]
-        # Verify the parquet pyramid actually has the count column.
+        # Verify the parquet pyramid actually has the count column. Files now
+        # live under res=N/h0=X/ — use a recursive glob.
         import duckdb as _d
         for res in (2, 3, 4, 5):
-            uri = str(local_bucket / "hex" / result["hash"] / f"res={res}" / "*.parquet")
+            uri = str(local_bucket / "hex" / result["hash"] / f"res={res}" / "**" / "*.parquet")
             cols = _d.connect(":memory:").sql(f"SELECT * FROM read_parquet('{uri}') LIMIT 0").columns
             assert "count" in cols, f"res={res} missing 'count' column: {cols}"
 
