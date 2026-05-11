@@ -85,25 +85,22 @@ class TestBuildPyramidSQL:
             value_columns=["count"], h3_column="h8",
             output_uri="s3://public-output/hex/abc/",
         )
-        # Parents: COUNT(*) AS count at every parent level.
+        # COUNT(*) AS count at every level — parents and finest.
         assert "COUNT(*) AS count" in sql
-        # Finest: literal 1 AS count (no aggregation at finest level).
-        assert "1 AS count" in sql
         # No stray references to user value columns (there are none).
         assert 'AVG(' not in sql and 'SUM(' not in sql
 
-    def test_count_mode_finest_level_has_literal_one(self):
+    def test_count_mode_finest_level_aggregates(self):
         sql = build_pyramid_sql(
             user_sql="SELECT h8 FROM src",
             finest_res=5, min_res=2, agg="COUNT",
             value_columns=["count"], h3_column="h8",
             output_uri="s3://public-output/hex/abc/",
         )
-        # Finest-level SELECT is identifiable by the "5 AS res" literal.
-        finest_select = re.search(r"SELECT[^)]*?5 AS res FROM src", sql, re.DOTALL)
-        assert finest_select is not None
-        assert "1 AS count" in finest_select.group(0)
-        assert "COUNT(*)" not in finest_select.group(0)
+        # COUNT mode must GROUP BY at finest too so duplicate source rows
+        # collapse to one row per cell with the real count. The finest
+        # SELECT uses the bare h3_column (not h3_cell_to_parent) and "5 AS res".
+        assert 'SELECT "h8" AS h, COUNT(*) AS count, 5 AS res FROM src GROUP BY 1' in sql
 
 
 import os
@@ -265,11 +262,11 @@ class TestRegisterHexTiles:
         by_res = stats["count"]["by_res"]
         # Resolutions 3, 4, 5 all present (string keys).
         assert set(by_res.keys()) == {"3", "4", "5"}
-        # Finest-res parquet carries `1 AS count` per row; MIN/MAX collapse to 1.
+        # Finest-res parquet aggregates via COUNT(*); the three clustered
+        # points share the same h5 cell, so max is 3 there too.
         assert by_res["5"]["min"] == 1
-        assert by_res["5"]["max"] == 1
-        # Coarser resolutions aggregate via COUNT(*); at least one parent cell
-        # contains 3 of the clustered points at res=4.
+        assert by_res["5"]["max"] == 3
+        # Coarser resolutions aggregate further; the same cluster at res=4.
         assert by_res["4"]["max"] >= 3
         # Coarser levels can only aggregate further — max is non-decreasing.
         assert by_res["3"]["max"] >= by_res["4"]["max"]
