@@ -13,6 +13,14 @@ spec:
       labels:
         app: dev-duckdb-mcp
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/region
+                    operator: In
+                    values: ["us-west"]
       containers:
       - name: server
         image: ghcr.io/boettiger-lab/mcp-data-server:latest
@@ -28,12 +36,15 @@ spec:
         - name: MCP_PUBLIC_BASE_URL
           value: "https://dev-duckdb-mcp.nrp-nautilus.io"
         resources:
+          # Requests intentionally kept small (≤2 GiB memory, ≤1 CPU) to land in
+          # NRP's "Ignored" bucket for utilization violations. Limits stay high so
+          # legitimate large queries (~100 GiB memory, multi-CPU) can still burst.
           requests:
             memory: 2Gi
             cpu: 250m
           limits:
-            memory: 32Gi
-            cpu: 4
+            memory: 160Gi
+            cpu: 16
         ports:
         - containerPort: 8000
         readinessProbe:
