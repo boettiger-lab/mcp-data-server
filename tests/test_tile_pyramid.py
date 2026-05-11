@@ -61,18 +61,37 @@ class TestBuildPyramidSQL:
         assert "FORMAT PARQUET" in sql
 
     def test_emits_h0_column_at_every_level(self):
-        # Every SELECT in the UNION needs an h0 column so PARTITION_BY (res, h0)
-        # can route rows to per-h0 subdirectories. h0 = h3_cell_to_parent(cell, 0).
+        # Every SELECT in the UNION needs to carry h0 forward so
+        # PARTITION_BY (res, h0) can route rows to per-h0 subdirectories.
+        # h0 is computed once in src and propagated by name through each
+        # branch — verify each branch SELECT references h0.
         sql = build_pyramid_sql(
             user_sql="SELECT h8, val FROM src",
             finest_res=8, min_res=2, agg="AVG",
             value_columns=["val"], h3_column="h8",
             output_uri="s3://public-output/hex/abc/",
         )
-        # 7 selects (res=2..8), each must emit h0.
-        select_count = sql.count(" AS res FROM src")
-        assert select_count == 7
-        assert sql.count(" AS h0") == 7
+        # 7 selects (res=2..8), each must reference h0 as an output column.
+        # Split on UNION ALL to find branch boundaries; first chunk includes
+        # the src CTE and branch 1.
+        branches = sql.split("UNION ALL")
+        assert len(branches) == 7  # 7 branches → 6 UNION ALLs between
+        for i, b in enumerate(branches):
+            assert " h0," in b or " h0 " in b, f"branch {i} missing h0 column: {b}"
+
+    def test_h0_computed_once_in_src_cte(self):
+        # h0 must be computed once in the src CTE and reused across all UNION
+        # branches; recomputing h3_cell_to_parent(cell, 0) per row per branch
+        # is ~6× wasted work on multi-resolution pyramids and pushes large-
+        # dataset builds past MCP client timeouts.
+        sql = build_pyramid_sql(
+            user_sql="SELECT h8, val FROM src",
+            finest_res=8, min_res=2, agg="AVG",
+            value_columns=["val"], h3_column="h8",
+            output_uri="s3://public-output/hex/abc/",
+        )
+        # h0 is the res-0 parent — that exact call pattern appears exactly once.
+        assert sql.count('h3_cell_to_parent("h8", 0)') == 1
 
     def test_multiple_value_columns(self):
         sql = build_pyramid_sql(

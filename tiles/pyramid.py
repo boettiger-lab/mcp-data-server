@@ -51,41 +51,45 @@ def build_pyramid_sql(
         parent_values = ", ".join(f'{agg_upper}("{c}") AS "{c}"' for c in value_columns)
         finest_values = ", ".join(f'"{c}"' for c in value_columns)
 
-    # h0 = H3 base cell (res=0 parent) of every row, cast to BIGINT so it round-
-    # trips through hive partition directories. All 122 base cells fit in
-    # signed 64-bit. The column is added to PARTITION_BY so tile requests can
-    # prune to the small set of h0 partitions overlapping the tile bbox.
-    h0_expr = f"CAST(h3_cell_to_parent({qh}, 0) AS BIGINT) AS h0"
-
     selects = []
     for res in range(min_res, finest_res):
         # GROUP BY 1, 2 — h0 is functionally determined by h, so adding it to
         # the group key doesn't change cardinality.
         selects.append(
             f"  SELECT h3_cell_to_parent({qh}, {res}) AS h, "
-            f"{h0_expr}, {parent_values}, {res} AS res FROM src GROUP BY 1, 2"
+            f"h0, {parent_values}, {res} AS res FROM src GROUP BY 1, 2"
         )
     if agg_upper == "COUNT":
         # Aggregate at finest too — otherwise raw rows pass through and a cell
         # with N occurrences becomes N MVT features. Tiles balloon (e.g., 126M
         # rows for 2.3M unique cells on GBIF CA → 54× duplication).
         selects.append(
-            f"  SELECT {qh} AS h, {h0_expr}, COUNT(*) AS count, "
+            f"  SELECT {qh} AS h, h0, COUNT(*) AS count, "
             f"{finest_res} AS res FROM src GROUP BY 1, 2"
         )
     else:
         # Non-COUNT aggs preserve raw per-row values at finest by design — the
         # caller may have pre-aggregated upstream, or want per-row visibility.
         selects.append(
-            f"  SELECT {qh} AS h, {h0_expr}, {finest_values}, "
+            f"  SELECT {qh} AS h, h0, {finest_values}, "
             f"{finest_res} AS res FROM src"
         )
 
     body = "\n  UNION ALL\n".join(selects)
 
+    # h0 = H3 base cell (res=0 parent) of every row, cast to BIGINT so it round-
+    # trips through hive partition directories. All 122 base cells fit in
+    # signed 64-bit. Computed once in the src CTE and reused across every
+    # UNION ALL branch — recomputing per branch costs ~6× extra H3 calls per
+    # row on a 7-level pyramid, which pushes large-dataset builds past MCP
+    # client timeouts. PARTITION_BY (res, h0) routes rows to per-h0 sub-
+    # directories so tile requests can hive-prune to the bbox-overlapping set.
     return (
         "COPY (\n"
-        f"  WITH src AS (\n{user_sql}\n  )\n"
+        f"  WITH src AS (\n"
+        f"    SELECT *, CAST(h3_cell_to_parent({qh}, 0) AS BIGINT) AS h0\n"
+        f"    FROM (\n{user_sql}\n    )\n"
+        f"  )\n"
         f"{body}\n"
         f") TO '{output_uri}' "
         f"(FORMAT PARQUET, PARTITION_BY (res, h0), OVERWRITE_OR_IGNORE)"
