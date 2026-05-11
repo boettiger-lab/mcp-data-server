@@ -182,6 +182,40 @@ class TestRegisterHexTiles:
         )
         assert result["finest_res"] == 6
 
+    def test_metadata_persists_bounds_and_feature_count(self, local_bucket, h3_conn):
+        # bounds and feature_count_finest must be inside metadata.json so the
+        # next call with identical inputs can short-circuit.
+        import json
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5, val
+            FROM (VALUES (37.8, -122.3, 1.0), (38.0, -122.5, 2.0)) t(lat, lng, val)
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=3, agg="AVG", zoom_offset=-1,
+        )
+        meta_path = local_bucket / "hex" / result["hash"] / "metadata.json"
+        with open(meta_path) as f:
+            meta = json.loads(f.read().strip())
+        assert "bounds" in meta and len(meta["bounds"]) == 4
+        assert meta["feature_count_finest"] == 2
+
+    def test_cache_hit_short_circuits_repeat_registration(self, local_bucket, h3_conn):
+        # Second registration with identical inputs reads metadata.json and
+        # returns cache_hit=True without re-running the build.
+        user_sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        first = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=2, agg="AVG", zoom_offset=-1,
+        )
+        assert first.get("cache_hit") is not True
+        second = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=2, agg="AVG", zoom_offset=-1,
+        )
+        assert second.get("cache_hit") is True
+        # Identical observable fields across both calls.
+        for key in ("hash", "bounds", "finest_res", "min_res", "value_columns",
+                    "value_stats", "layer_name", "feature_count_finest"):
+            assert second[key] == first[key], f"{key} differs across cache hit"
+
     def test_auto_detect_raises_on_empty_sql(self, local_bucket, h3_conn):
         # SQL filters to zero rows — auto-detect can't sample a cell.
         user_sql = (

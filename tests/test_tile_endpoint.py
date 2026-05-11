@@ -67,6 +67,17 @@ class TestServeTile:
         if r.status_code == 200:
             assert len(r.content) < 100  # empty MVT is very small
 
+    def test_response_has_immutable_cache_control(self, app_with_tiles, registered_ca):
+        # Tile content is deterministic per (hash, z, x, y); we tell intermediate
+        # caches (browser, CDN, HAProxy) they can serve repeats without revalidation.
+        client = TestClient(app_with_tiles)
+        r = client.get(f"/tiles/hex/{registered_ca}/5/5/12.pbf")
+        assert r.status_code in (200, 204)
+        cc = r.headers.get("cache-control", "")
+        assert "immutable" in cc
+        assert "max-age=" in cc
+        assert "public" in cc
+
     def test_unknown_hash_returns_404(self, app_with_tiles):
         client = TestClient(app_with_tiles)
         r = client.get("/tiles/hex/0000000000000000/5/5/12.pbf")

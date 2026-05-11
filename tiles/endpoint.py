@@ -21,6 +21,12 @@ from tiles.tile_math import tile_xyz_to_lnglat_bounds, zoom_to_h3_res
 
 MVT_CONTENT_TYPE = "application/vnd.mapbox-vector-tile"
 
+# Tile content is deterministic per (hash, z, x, y): the hash is content-addressed
+# from the registration inputs, so the same URL always produces the same bytes
+# unless the tileset is explicitly purged and rebuilt. "immutable" tells browsers
+# and CDNs to serve cached responses without revalidation.
+TILE_CACHE_CONTROL = "public, max-age=86400, immutable"
+
 
 def _lng_to_merc_x(lng: float) -> float:
     """Convert longitude (degrees) to Web Mercator X (EPSG:3857)."""
@@ -170,5 +176,9 @@ async def serve_tile(request: Request) -> Response:
         return Response(status_code=500)
 
     if not mvt_bytes:
-        return Response(status_code=204)
-    return Response(content=mvt_bytes, media_type=MVT_CONTENT_TYPE)
+        return Response(status_code=204, headers={"Cache-Control": TILE_CACHE_CONTROL})
+    return Response(
+        content=mvt_bytes,
+        media_type=MVT_CONTENT_TYPE,
+        headers={"Cache-Control": TILE_CACHE_CONTROL},
+    )
