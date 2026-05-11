@@ -110,6 +110,25 @@ def _inspect_user_sql(con: duckdb.DuckDBPyConnection, user_sql: str):
     return columns[0], list(columns[1:])
 
 
+def _read_existing_metadata(con: duckdb.DuckDBPyConnection, output_uri: str):
+    """Return the cached metadata dict if metadata.json exists at output_uri,
+    else None. Mirrors endpoint._read_metadata for s3 vs local paths.
+    """
+    uri = f"{output_uri}metadata.json"
+    try:
+        if not uri.startswith("s3://") and not uri.startswith("http"):
+            if not os.path.exists(uri):
+                return None
+            with open(uri, "r") as f:
+                return json.loads(f.read().strip())
+        row = con.sql(f"SELECT content FROM read_text('{uri}')").fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+    except Exception:
+        return None
+
+
 def register_hex_tiles(
     con: duckdb.DuckDBPyConnection,
     sql: str,
@@ -166,6 +185,27 @@ def register_hex_tiles(
 
     h = content_hash(sql=sql, finest_res=finest_res, min_res=min_res, agg=agg, zoom_offset=zoom_offset)
     output_uri = f"{_bucket_base()}/hex/{h}/"
+    tile_url_template = f"{_public_base_url()}/tiles/hex/{h}/{{z}}/{{x}}/{{y}}.pbf"
+
+    # Cache short-circuit: if an identical registration already exists, skip
+    # the COPY (which would re-scan the source) and return the persisted
+    # metadata. Hash is content-addressed, so a hit means the parquet pyramid
+    # on disk reflects exactly this registration's inputs.
+    cached = _read_existing_metadata(con, output_uri)
+    if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
+        return {
+            "tile_url_template": tile_url_template,
+            "hash": h,
+            "bounds": cached["bounds"],
+            "finest_res": cached["finest_res"],
+            "min_res": cached["min_res"],
+            "zoom_offset": cached["zoom_offset"],
+            "value_columns": cached["value_columns"],
+            "value_stats": cached["value_stats"],
+            "layer_name": cached.get("layer_name", MVT_LAYER_NAME),
+            "feature_count_finest": cached["feature_count_finest"],
+            "cache_hit": True,
+        }
 
     pyramid_sql = build_pyramid_sql(
         user_sql=sql,
@@ -200,21 +240,6 @@ def register_hex_tiles(
             by_res[str(res)] = {"min": _jsonable(row[0]), "max": _jsonable(row[1])}
         value_stats[col] = {"by_res": by_res}
 
-    metadata = {
-        "finest_res": finest_res,
-        "min_res": min_res,
-        "agg": agg,
-        "zoom_offset": zoom_offset,
-        "value_columns": value_columns,
-        "value_stats": value_stats,
-        "layer_name": MVT_LAYER_NAME,
-    }
-    metadata_sql = (
-        f"COPY (SELECT '{_json_dumps_escaped(metadata)}' AS j) "
-        f"TO '{output_uri}metadata.json' (FORMAT CSV, HEADER false, QUOTE '')"
-    )
-    con.sql(metadata_sql)
-
     finest_uri = f"{output_uri}res={finest_res}/*.parquet"
     bounds_row = con.sql(
         f"SELECT "
@@ -225,7 +250,25 @@ def register_hex_tiles(
     ).fetchone()
     w, s, e, n, feature_count = bounds_row[2], bounds_row[0], bounds_row[3], bounds_row[1], bounds_row[4]
 
-    tile_url_template = f"{_public_base_url()}/tiles/hex/{h}/{{z}}/{{x}}/{{y}}.pbf"
+    # bounds + feature_count_finest persisted in metadata.json so the next
+    # registration with identical inputs can short-circuit without
+    # re-aggregating the source data.
+    metadata = {
+        "finest_res": finest_res,
+        "min_res": min_res,
+        "agg": agg,
+        "zoom_offset": zoom_offset,
+        "value_columns": value_columns,
+        "value_stats": value_stats,
+        "layer_name": MVT_LAYER_NAME,
+        "bounds": [w, s, e, n],
+        "feature_count_finest": feature_count,
+    }
+    metadata_sql = (
+        f"COPY (SELECT '{_json_dumps_escaped(metadata)}' AS j) "
+        f"TO '{output_uri}metadata.json' (FORMAT CSV, HEADER false, QUOTE '')"
+    )
+    con.sql(metadata_sql)
 
     return {
         "tile_url_template": tile_url_template,
