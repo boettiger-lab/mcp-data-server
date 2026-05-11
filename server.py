@@ -246,7 +246,7 @@ def register_hex_tiles(
     finest_res: int,
     min_res: int = 2,
     agg: str = "AVG",
-    zoom_offset: int = 1,
+    zoom_offset: int = -1,
 ) -> dict:
     """Materialize a partitioned H3 hex pyramid to public object storage and return
     a MapLibre-compatible vector tile URL template.
