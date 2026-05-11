@@ -20,11 +20,17 @@ def zoom_to_h3_res(z: int, min_res: int, finest_res: int, zoom_offset: int = -1)
     return max(min_res, min(finest_res, target))
 
 
+# Bump when the pyramid on-disk layout changes in a way that the tile endpoint
+# can't read with the old logic — forces a fresh registration directory so old
+# parquet files written under a previous layout are never served by new code.
+_LAYOUT_VERSION = "v2-h0"
+
+
 def content_hash(sql: str, finest_res: int, min_res: int, agg: str, zoom_offset: int) -> str:
     """Deterministic 16-char hex hash of the registration inputs.
 
     Used as the <name> component of tile URLs so identical registrations
     dedupe naturally and URLs are CDN-friendly.
     """
-    canonical = f"{sql}\0{finest_res}\0{min_res}\0{agg}\0{zoom_offset}"
+    canonical = f"{_LAYOUT_VERSION}\0{sql}\0{finest_res}\0{min_res}\0{agg}\0{zoom_offset}"
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]

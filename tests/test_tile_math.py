@@ -71,3 +71,15 @@ class TestContentHash:
         h = content_hash(sql="x", finest_res=8, min_res=2, agg="AVG", zoom_offset=4)
         assert len(h) == 16
         assert all(c in "0123456789abcdef" for c in h)
+
+    def test_h0_partition_layout_does_not_collide_with_pre_h0_hashes(self):
+        # The pyramid layout changed from PARTITION_BY (res) to (res, h0) — files
+        # written under the new layout must NOT be served via the same content
+        # hash a pre-h0 registration would have produced. Pin the old hash here
+        # so any future hash-input change is a deliberate decision.
+        pre_h0_hash = "b5f7ba93d53a0f19"  # produced by the pre-h0-partition code
+        new_hash = content_hash(
+            sql="SELECT 1 AS h, 2 AS v",
+            finest_res=8, min_res=2, agg="AVG", zoom_offset=-1,
+        )
+        assert new_hash != pre_h0_hash

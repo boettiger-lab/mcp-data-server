@@ -51,25 +51,34 @@ def build_pyramid_sql(
         parent_values = ", ".join(f'{agg_upper}("{c}") AS "{c}"' for c in value_columns)
         finest_values = ", ".join(f'"{c}"' for c in value_columns)
 
+    # h0 = H3 base cell (res=0 parent) of every row, cast to BIGINT so it round-
+    # trips through hive partition directories. All 122 base cells fit in
+    # signed 64-bit. The column is added to PARTITION_BY so tile requests can
+    # prune to the small set of h0 partitions overlapping the tile bbox.
+    h0_expr = f"CAST(h3_cell_to_parent({qh}, 0) AS BIGINT) AS h0"
+
     selects = []
     for res in range(min_res, finest_res):
+        # GROUP BY 1, 2 — h0 is functionally determined by h, so adding it to
+        # the group key doesn't change cardinality.
         selects.append(
             f"  SELECT h3_cell_to_parent({qh}, {res}) AS h, "
-            f"{parent_values}, {res} AS res FROM src GROUP BY 1"
+            f"{h0_expr}, {parent_values}, {res} AS res FROM src GROUP BY 1, 2"
         )
     if agg_upper == "COUNT":
         # Aggregate at finest too — otherwise raw rows pass through and a cell
         # with N occurrences becomes N MVT features. Tiles balloon (e.g., 126M
         # rows for 2.3M unique cells on GBIF CA → 54× duplication).
         selects.append(
-            f"  SELECT {qh} AS h, COUNT(*) AS count, "
-            f"{finest_res} AS res FROM src GROUP BY 1"
+            f"  SELECT {qh} AS h, {h0_expr}, COUNT(*) AS count, "
+            f"{finest_res} AS res FROM src GROUP BY 1, 2"
         )
     else:
         # Non-COUNT aggs preserve raw per-row values at finest by design — the
         # caller may have pre-aggregated upstream, or want per-row visibility.
         selects.append(
-            f"  SELECT {qh} AS h, {finest_values}, {finest_res} AS res FROM src"
+            f"  SELECT {qh} AS h, {h0_expr}, {finest_values}, "
+            f"{finest_res} AS res FROM src"
         )
 
     body = "\n  UNION ALL\n".join(selects)
@@ -79,7 +88,7 @@ def build_pyramid_sql(
         f"  WITH src AS (\n{user_sql}\n  )\n"
         f"{body}\n"
         f") TO '{output_uri}' "
-        f"(FORMAT PARQUET, PARTITION_BY (res), OVERWRITE_OR_IGNORE)"
+        f"(FORMAT PARQUET, PARTITION_BY (res, h0), OVERWRITE_OR_IGNORE)"
     )
 
 
@@ -232,7 +241,8 @@ def register_hex_tiles(
     for col in value_columns:
         by_res = {}
         for res in range(min_res, finest_res + 1):
-            uri = f"{output_uri}res={res}/*.parquet"
+            # Recursive glob — h0 hive sub-partitions live under res=N/.
+            uri = f"{output_uri}res={res}/**/*.parquet"
             row = con.sql(
                 f'SELECT MIN("{col}") AS mn, MAX("{col}") AS mx '
                 f"FROM read_parquet('{uri}')"
@@ -240,7 +250,7 @@ def register_hex_tiles(
             by_res[str(res)] = {"min": _jsonable(row[0]), "max": _jsonable(row[1])}
         value_stats[col] = {"by_res": by_res}
 
-    finest_uri = f"{output_uri}res={finest_res}/*.parquet"
+    finest_uri = f"{output_uri}res={finest_res}/**/*.parquet"
     bounds_row = con.sql(
         f"SELECT "
         f"MIN(h3_cell_to_lat(h)) AS s, MAX(h3_cell_to_lat(h)) AS n, "
