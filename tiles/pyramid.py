@@ -105,7 +105,7 @@ def register_hex_tiles(
     finest_res: int,
     min_res: int = 2,
     agg: str = "AVG",
-    zoom_offset: int = 1,
+    zoom_offset: int = -1,
 ) -> dict:
     """Materialize a partitioned parquet pyramid and return tile-endpoint metadata.
 

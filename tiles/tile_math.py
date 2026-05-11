@@ -14,7 +14,7 @@ def tile_xyz_to_lnglat_bounds(z: int, x: int, y: int) -> Tuple[float, float, flo
     return (west, lat_s, east, lat_n)
 
 
-def zoom_to_h3_res(z: int, min_res: int, finest_res: int, zoom_offset: int = 1) -> int:
+def zoom_to_h3_res(z: int, min_res: int, finest_res: int, zoom_offset: int = -1) -> int:
     """Clamp(z - zoom_offset, min_res, finest_res) — coarser hexes at lower zooms."""
     target = z - zoom_offset
     return max(min_res, min(finest_res, target))
