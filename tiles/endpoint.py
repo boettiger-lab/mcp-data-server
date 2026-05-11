@@ -89,10 +89,17 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
     """Produce the SQL that returns a single BLOB row (the MVT for this tile).
 
     Strategy:
-      1. Compute the tile's web-mercator bounds as a BOX_2D struct (Python-side).
-      2. Compute H3 cells at target_res covering the tile's lng/lat polygon.
-      3. Select rows from the pyramid partition whose cell is in that set.
-      4. Project cell geometries with ST_AsMVTGeom then aggregate with ST_AsMVT.
+      1. Compute the tile's lng/lat bbox and web-mercator BOX_2D (Python-side).
+      2. Filter pyramid rows where the cell's center lat/lng falls inside the
+         tile bbox. Each cell is rendered by exactly one tile (the one
+         containing its center) — same boundary behavior as the previous
+         polygon-cells join, without enumerating cells at target_res.
+      3. Project cell geometries with ST_AsMVTGeom then aggregate with ST_AsMVT.
+
+    Why not `h3_polygon_wkt_to_cells(tile_wkt, target_res)`? Cost is linear in
+    output cells; at high target_res over a tile-sized polygon that runs into
+    six-figure cell counts per request and dominates render time. The bbox
+    filter on h3_cell_to_lat/lng is O(pyramid rows) instead.
 
     Notes:
     - ST_AsMVTGeom requires BOX_2D (not GEOMETRY). We build it as a struct cast.
@@ -100,24 +107,15 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
     """
     west, south, east, north = tile_xyz_to_lnglat_bounds(z, x, y)
     tileset = _tileset_dir(namespace, name)
-    tile_wkt = (
-        f"POLYGON(("
-        f"{west} {south}, {east} {south}, {east} {north}, "
-        f"{west} {north}, {west} {south}))"
-    )
-    # Pre-compute web-mercator bounds in Python — avoids ST_Transform inside SQL
-    # for the envelope, and lets us pass a literal BOX_2D struct.
     mx_w = _lng_to_merc_x(west)
     mx_e = _lng_to_merc_x(east)
     my_s = _lat_to_merc_y(south)
     my_n = _lat_to_merc_y(north)
     return f"""
-        WITH cells AS (
-          SELECT UNNEST(h3_polygon_wkt_to_cells('{tile_wkt}', {target_res})) AS cell
-        ),
-        src AS (
+        WITH src AS (
           SELECT p.* FROM read_parquet('{tileset}/res={target_res}/*.parquet') p
-          SEMI JOIN cells c ON p.h = c.cell
+          WHERE h3_cell_to_lat(p.h) BETWEEN {south} AND {north}
+            AND h3_cell_to_lng(p.h) BETWEEN {west} AND {east}
         ),
         projected AS (
           SELECT
