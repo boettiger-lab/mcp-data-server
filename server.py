@@ -251,9 +251,31 @@ def register_hex_tiles(
     """Materialize a partitioned H3 hex pyramid to public object storage and return
     a MapLibre-compatible vector tile URL template.
 
-    Use this tool for H3 hex datasets too large to return as markdown table —
-    roughly >100k cells, or any case where the user wants to visualize hexes
-    directly on the map (rather than color an existing polygon layer).
+    WHEN TO USE — only when the user explicitly asks for an aggregate
+    density / heatmap / hex-grid visualization over a region. Trigger phrases:
+    "hex map", "density map", "heatmap", "show density of X", "hex grid",
+    "aggregate X by hex", "visualize density of X", "map the count of X per
+    area". If the user did not ask for one of these, do NOT use this tool.
+
+    WHEN NOT TO USE — most map/data questions are NOT hex-tile questions.
+    Do NOT use this tool for:
+      - Counting / summing / averaging questions that return a number or
+        short table ("how many protected areas in CA?" → use the `query`
+        tool and answer with the number).
+      - Listing or looking up individual features ("what species are in
+        Yosemite?", "list the largest fires last year" → use `query`).
+      - Navigating, framing, or zooming the map ("show me Yosemite",
+        "zoom to LA" → use the map client's fly-to / curated layer
+        controls, not this tool).
+      - Styling or filtering an existing curated layer ("color counties
+        by population", "filter parks to GAP 1" → use the map client's
+        set_style / set_filter on the existing layer; do NOT create a
+        new hex tileset for this).
+      - "Showing" or "displaying" a dataset whose layer is already in the
+        catalog — use the curated layer rather than rebuilding it as hexes.
+
+    If the user's intent is ambiguous, do NOT silently create a hex tileset.
+    Ask whether they want a density / heatmap visualization first.
 
     Input SQL contract:
     - First column must be an H3 index at resolution `finest_res`.
