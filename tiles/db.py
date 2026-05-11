@@ -19,8 +19,11 @@ def build_tile_connection() -> duckdb.DuckDBPyConnection:
     con.sql("INSTALL spatial; LOAD spatial")
     con.sql("INSTALL h3 FROM community; LOAD h3")
 
-    # Performance tuning — match the query tool settings.
-    con.sql("SET THREADS=100")
+    # Cap per-query parallelism so several concurrent tile requests can run side
+    # by side instead of one query monopolizing the pod. With CPU limit 64 and
+    # THREADS=16, ~4 concurrent tile queries saturate cleanly; pyramid builds
+    # (which share this connection) are bandwidth-bound on S3 anyway.
+    con.sql("SET THREADS=16")
     con.sql("SET preserve_insertion_order=false")
     con.sql("SET enable_object_cache=true")
     con.sql("SET temp_directory='/tmp'")
