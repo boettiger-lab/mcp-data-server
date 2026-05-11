@@ -113,7 +113,7 @@ def _inspect_user_sql(con: duckdb.DuckDBPyConnection, user_sql: str):
 def register_hex_tiles(
     con: duckdb.DuckDBPyConnection,
     sql: str,
-    finest_res: int,
+    finest_res: int | None = None,
     min_res: int = 2,
     agg: str = "AVG",
     zoom_offset: int = -1,
@@ -121,6 +121,11 @@ def register_hex_tiles(
     """Materialize a partitioned parquet pyramid and return tile-endpoint metadata.
 
     The connection must have httpfs, spatial, and h3 extensions loaded.
+
+    When finest_res is None (the LLM-facing path), it's auto-detected from the
+    H3 column's actual resolution via h3_get_resolution on a one-row probe.
+    Pass an explicit finest_res only from test / REPL code where you need to
+    force a specific value.
 
     Value-column contract:
     - agg="COUNT": user SQL needs only the H3 index column. Output has a single
@@ -130,10 +135,24 @@ def register_hex_tiles(
       index. Each is aggregated via `agg` at parent resolutions and passed
       through raw at the finest level.
     """
+    h3_column, sql_value_columns = _inspect_user_sql(con, sql)
+    if finest_res is None:
+        # Read one cell from the user SQL and ask H3 what its resolution is.
+        # Avoids forcing the LLM to invent a finest_res — the data already knows.
+        probe = con.sql(
+            f'SELECT h3_get_resolution("{h3_column}") FROM ({sql}) LIMIT 1'
+        ).fetchone()
+        if probe is None or probe[0] is None:
+            raise ValueError(
+                "Cannot auto-detect finest_res: user SQL returned no rows, or "
+                f"the first column ({h3_column!r}) is not an H3 cell. Narrow "
+                "the SQL until it returns at least one row whose first column "
+                "is an H3 index."
+            )
+        finest_res = int(probe[0])
     if finest_res < min_res:
         raise ValueError(f"finest_res ({finest_res}) must be >= min_res ({min_res})")
 
-    h3_column, sql_value_columns = _inspect_user_sql(con, sql)
     agg_upper = agg.upper()
     if agg_upper == "COUNT":
         value_columns = ["count"]

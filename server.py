@@ -241,11 +241,21 @@ def _get_tile_con():
     return _tile_con
 
 
+# Deliberate API design: only `sql` and `agg` are documented for the LLM.
+# `finest_res`, `min_res`, `zoom_offset` are kept in the Python signature as
+# optional kwargs for tests / REPL overrides, but NOT mentioned in the
+# docstring — the MCP framework derives the LLM-facing tool schema from the
+# docstring, so they stay invisible to the agent. Auto-detection (in
+# tiles.pyramid.register_hex_tiles) reads the H column's resolution to set
+# finest_res; min_res=2 and zoom_offset=-1 are the only sensible values for
+# the current tile rendering. Adding `finest_res` etc. to the docstring is
+# almost certainly a mistake — see #125 for the trigger-tightening rationale
+# and the surrounding discussion about parameter surface.
 def register_hex_tiles(
     sql: str,
-    finest_res: int,
+    agg: str = "COUNT",
+    finest_res: int | None = None,
     min_res: int = 2,
-    agg: str = "AVG",
     zoom_offset: int = -1,
 ) -> dict:
     """Materialize a partitioned H3 hex pyramid to public object storage and return
@@ -277,14 +287,17 @@ def register_hex_tiles(
     If the user's intent is ambiguous, do NOT silently create a hex tileset.
     Ask whether they want a density / heatmap visualization first.
 
-    Input SQL contract:
-    - First column must be an H3 index at resolution `finest_res`.
-    - For agg="COUNT": no other columns required. Output has a single `count`
-      column (row count per hex). If the user SQL returns extra columns, they
-      are ignored.
-    - For agg in {AVG, SUM, MIN, MAX}: at least one numeric value column must
-      follow the H3 index. Each is aggregated by `agg` at each coarser
-      resolution down to `min_res`.
+    Parameters:
+    - `sql`: a SELECT whose first column is an H3 index. The tool reads that
+      column's H3 resolution and uses it as the pyramid's finest level. To get
+      a coarser tileset, project upstream in the SQL (e.g.
+      `SELECT h3_cell_to_parent(h10, 6) AS h6, ...`).
+    - `agg`: aggregation applied at each coarser pyramid level.
+        - "COUNT" (default): SQL needs only the H3 column; output property
+          is `count` (row count per hex).
+        - "AVG" / "SUM" / "MIN" / "MAX": SQL must return at least one
+          numeric value column after the H3 index; each is aggregated by
+          `agg` at every coarser level.
 
     Returns a dict with:
     - `tile_url_template`: MapLibre vector tile URL with {z}/{x}/{y} placeholders.
@@ -294,8 +307,7 @@ def register_hex_tiles(
     - `value_stats`: {<col>: {"by_res": {"<res>": {"min": <num>, "max": <num>}}}}.
       Per-resolution min/max for each value column — pass to the map client.
     - `layer_name`: the MVT source-layer name; use as `source-layer` in the client.
-    - `hash`, `bounds`, `finest_res`, `min_res`, `zoom_offset`, `feature_count_finest`:
-      tileset metadata.
+    - `hash`, `bounds`, `finest_res`, `feature_count_finest`: tileset metadata.
 
     MapLibre usage:
         map.addSource(id, {type: 'vector', tiles: [tile_url_template], minzoom: 0, maxzoom: 14});
@@ -328,8 +340,8 @@ def register_hex_tiles(
     """
     con = _get_tile_con()
     return _register_hex_tiles(
-        con=con, sql=sql, finest_res=finest_res, min_res=min_res,
-        agg=agg, zoom_offset=zoom_offset,
+        con=con, sql=sql, agg=agg,
+        finest_res=finest_res, min_res=min_res, zoom_offset=zoom_offset,
     )
 
 
