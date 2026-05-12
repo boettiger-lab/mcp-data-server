@@ -165,7 +165,36 @@ def _read_existing_metadata(con: duckdb.DuckDBPyConnection, output_uri: str):
         return None
 
 
-def register_hex_tiles(
+def tile_paths_for_hash(h: str) -> dict:
+    """Return {output_uri, tile_url_template} for a content hash."""
+    return {
+        "output_uri": f"{_bucket_base()}/hex/{h}/",
+        "tile_url_template": f"{_public_base_url()}/tiles/hex/{h}/{{z}}/{{x}}/{{y}}.pbf",
+    }
+
+
+def read_existing_metadata(con: duckdb.DuckDBPyConnection, output_uri: str):
+    """Public alias for _read_existing_metadata — server.py reads this directly."""
+    return _read_existing_metadata(con, output_uri)
+
+
+def cached_result_dict(plan: dict, cached: dict) -> dict:
+    return {
+        "tile_url_template": plan["tile_url_template"],
+        "hash": plan["hash"],
+        "bounds": cached["bounds"],
+        "finest_res": cached["finest_res"],
+        "min_res": cached["min_res"],
+        "zoom_offset": cached["zoom_offset"],
+        "value_columns": cached["value_columns"],
+        "value_stats": cached["value_stats"],
+        "layer_name": cached.get("layer_name", MVT_LAYER_NAME),
+        "feature_count_finest": cached["feature_count_finest"],
+        "cache_hit": True,
+    }
+
+
+def prepare_hex_tiles(
     con: duckdb.DuckDBPyConnection,
     sql: str,
     finest_res: int | None = None,
@@ -173,7 +202,8 @@ def register_hex_tiles(
     agg: str = "AVG",
     zoom_offset: int = -1,
 ) -> dict:
-    """Materialize a partitioned parquet pyramid and return tile-endpoint metadata.
+    """Inspect user SQL, resolve finest_res, compute the content hash, and
+    check the S3 cache. Fast — no COPY runs here.
 
     The connection must have httpfs, spatial, and h3 extensions loaded.
 
@@ -189,6 +219,10 @@ def register_hex_tiles(
     - Other aggs: user SQL must return at least one value column after the H3
       index. Each is aggregated via `agg` at every resolution including the finest
       (one row per (h, h0) cell at every level).
+
+    Returns a "plan" dict with everything build_hex_tiles needs, plus a
+    `cached` field that is the persisted metadata if the tileset already
+    exists on disk (otherwise None).
     """
     h3_column, sql_value_columns = _inspect_user_sql(con, sql)
     if finest_res is None:
@@ -208,8 +242,7 @@ def register_hex_tiles(
     if finest_res < min_res:
         raise ValueError(f"finest_res ({finest_res}) must be >= min_res ({min_res})")
 
-    agg_upper = agg.upper()
-    if agg_upper == "COUNT":
+    if agg.upper() == "COUNT":
         value_columns = ["count"]
     else:
         if not sql_value_columns:
@@ -220,28 +253,46 @@ def register_hex_tiles(
         value_columns = sql_value_columns
 
     h = content_hash(sql=sql, finest_res=finest_res, min_res=min_res, agg=agg, zoom_offset=zoom_offset)
-    output_uri = f"{_bucket_base()}/hex/{h}/"
-    tile_url_template = f"{_public_base_url()}/tiles/hex/{h}/{{z}}/{{x}}/{{y}}.pbf"
+    paths = tile_paths_for_hash(h)
+    output_uri = paths["output_uri"]
 
-    # Cache short-circuit: if an identical registration already exists, skip
-    # the COPY (which would re-scan the source) and return the persisted
-    # metadata. Hash is content-addressed, so a hit means the parquet pyramid
-    # on disk reflects exactly this registration's inputs.
     cached = _read_existing_metadata(con, output_uri)
-    if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
-        return {
-            "tile_url_template": tile_url_template,
-            "hash": h,
-            "bounds": cached["bounds"],
-            "finest_res": cached["finest_res"],
-            "min_res": cached["min_res"],
-            "zoom_offset": cached["zoom_offset"],
-            "value_columns": cached["value_columns"],
-            "value_stats": cached["value_stats"],
-            "layer_name": cached.get("layer_name", MVT_LAYER_NAME),
-            "feature_count_finest": cached["feature_count_finest"],
-            "cache_hit": True,
-        }
+    if cached is not None and not ("bounds" in cached and "feature_count_finest" in cached):
+        cached = None  # metadata.json is malformed — treat as miss, will rebuild.
+
+    return {
+        "hash": h,
+        "output_uri": output_uri,
+        "tile_url_template": paths["tile_url_template"],
+        "sql": sql,
+        "agg": agg,
+        "finest_res": finest_res,
+        "min_res": min_res,
+        "zoom_offset": zoom_offset,
+        "h3_column": h3_column,
+        "value_columns": value_columns,
+        "cached": cached,
+    }
+
+
+def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
+    """Run the COPY, compute per-resolution stats and bounds, and write
+    metadata.json. Returns the same shape as register_hex_tiles minus
+    cache_hit (caller decides whether to add that key).
+
+    The connection must have httpfs, spatial, and h3 extensions loaded and
+    SHOULD be exclusive to this build — DuckDB serialises queries on a
+    connection, so sharing a connection with other writers will block them
+    for the duration of the COPY.
+    """
+    sql = plan["sql"]
+    agg = plan["agg"]
+    finest_res = plan["finest_res"]
+    min_res = plan["min_res"]
+    zoom_offset = plan["zoom_offset"]
+    h3_column = plan["h3_column"]
+    value_columns = plan["value_columns"]
+    output_uri = plan["output_uri"]
 
     statements = build_pyramid_statements(
         user_sql=sql,
@@ -257,7 +308,6 @@ def register_hex_tiles(
     for stmt in statements:
         con.sql(stmt)
 
-    # Per-resolution min/max for every output value column.
     def _jsonable(v):
         # DuckDB returns DECIMAL for literal-typed numerics; coerce to float
         # so the metadata sidecar stays JSON-serializable.
@@ -288,9 +338,6 @@ def register_hex_tiles(
     ).fetchone()
     w, s, e, n, feature_count = bounds_row[2], bounds_row[0], bounds_row[3], bounds_row[1], bounds_row[4]
 
-    # bounds + feature_count_finest persisted in metadata.json so the next
-    # registration with identical inputs can short-circuit without
-    # re-aggregating the source data.
     metadata = {
         "finest_res": finest_res,
         "min_res": min_res,
@@ -309,8 +356,8 @@ def register_hex_tiles(
     con.sql(metadata_sql)
 
     return {
-        "tile_url_template": tile_url_template,
-        "hash": h,
+        "tile_url_template": plan["tile_url_template"],
+        "hash": plan["hash"],
         "bounds": [w, s, e, n],
         "finest_res": finest_res,
         "min_res": min_res,
@@ -320,3 +367,40 @@ def register_hex_tiles(
         "layer_name": MVT_LAYER_NAME,
         "feature_count_finest": feature_count,
     }
+
+
+def register_hex_tiles(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    finest_res: int | None = None,
+    min_res: int = 2,
+    agg: str = "AVG",
+    zoom_offset: int = -1,
+) -> dict:
+    """Materialize a partitioned parquet pyramid and return tile-endpoint metadata.
+
+    Synchronous: prepare → (cached return | full build) on the calling thread.
+    The MCP server wraps this with a background-executor pattern so the agent
+    sees a quick "running" response on long jobs; library callers (tests,
+    REPL) keep the simple sync semantics.
+
+    The connection must have httpfs, spatial, and h3 extensions loaded.
+
+    When finest_res is None (the LLM-facing path), it's auto-detected from the
+    H3 column's actual resolution via h3_get_resolution on a one-row probe.
+
+    Value-column contract:
+    - agg="COUNT": user SQL needs only the H3 index column. Output has a single
+      `count` column (row count per hex at parent resolutions; 1 at finest).
+      Any extra columns in the user SQL are ignored.
+    - Other aggs: user SQL must return at least one value column after the H3
+      index. Each is aggregated via `agg` at parent resolutions and passed
+      through raw at the finest level.
+    """
+    plan = prepare_hex_tiles(
+        con=con, sql=sql, finest_res=finest_res,
+        min_res=min_res, agg=agg, zoom_offset=zoom_offset,
+    )
+    if plan["cached"] is not None:
+        return cached_result_dict(plan, plan["cached"])
+    return build_hex_tiles(con, plan)
