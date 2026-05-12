@@ -530,3 +530,143 @@ class TestBuildTileConnection:
             assert "client_s3" not in names
         finally:
             con.close()
+
+
+class TestPyramidMathCorrectness:
+    """Assert mathematical invariants on built pyramids — independent of
+    SQL shape. Each test registers a small multi-h0 synthetic dataset and
+    checks that parent values are correct rollups of child values.
+    """
+
+    def _seed_sql(self, points):
+        """Build a user_sql VALUES clause from a list of (lat, lng, val) tuples."""
+        rows = ", ".join(f"({lat}, {lng}, {val})" for lat, lng, val in points)
+        return f"""
+            SELECT h3_latlng_to_cell(lat, lng, 5) AS h5, val
+            FROM (VALUES {rows}) t(lat, lng, val)
+        """
+
+    def test_count_total_at_parent_equals_total_at_finest(self, local_bucket, h3_conn):
+        # COUNT mode: SUM of all count values at any res equals the total
+        # number of source rows (the dataset's true count).
+        points = [
+            (37.8, -122.3, 1.0), (37.80001, -122.30001, 2.0),  # same cluster
+            (38.0, -122.5, 3.0),
+            (40.0, -100.0, 4.0),
+            (-30.0, 140.0, 5.0),  # different h0
+        ]
+        result = register_hex_tiles(
+            con=h3_conn, sql=self._seed_sql(points),
+            finest_res=5, min_res=2, agg="COUNT", zoom_offset=-1,
+        )
+        for res in (2, 3, 4, 5):
+            uri = str(local_bucket / "hex" / result["hash"] / f"res={res}" / "**" / "*.parquet")
+            total = h3_conn.sql(
+                f"SELECT SUM(count) FROM read_parquet('{uri}', hive_partitioning=true)"
+            ).fetchone()[0]
+            assert total == len(points), f"res={res}: SUM(count)={total}, expected {len(points)}"
+
+    def test_sum_total_at_parent_equals_total_at_finest(self, local_bucket, h3_conn):
+        # SUM mode: conservation across resolutions.
+        points = [
+            (37.8, -122.3, 10.0), (37.80001, -122.30001, 5.0),
+            (38.0, -122.5, 7.0),
+            (40.0, -100.0, 3.0),
+        ]
+        result = register_hex_tiles(
+            con=h3_conn, sql=self._seed_sql(points),
+            finest_res=5, min_res=2, agg="SUM", zoom_offset=-1,
+        )
+        for res in (2, 3, 4, 5):
+            uri = str(local_bucket / "hex" / result["hash"] / f"res={res}" / "**" / "*.parquet")
+            total = h3_conn.sql(
+                f'SELECT SUM("val") FROM read_parquet(\'{uri}\', hive_partitioning=true)'
+            ).fetchone()[0]
+            assert total == 25.0, f"res={res}: SUM(val)={total}, expected 25.0"
+
+    def test_min_at_parent_is_min_of_children(self, local_bucket, h3_conn):
+        # MIN mode: per-cell parent.MIN equals MIN over its res+1 children.
+        points = [
+            (37.8, -122.3, 10.0), (37.80001, -122.30001, 2.0),
+            (37.80002, -122.30002, 7.0),
+            (40.0, -100.0, 3.0),
+        ]
+        result = register_hex_tiles(
+            con=h3_conn, sql=self._seed_sql(points),
+            finest_res=5, min_res=3, agg="MIN", zoom_offset=-1,
+        )
+        # For each (h@res=4) cell, the parent MIN should equal MIN of children.
+        child_uri = str(local_bucket / "hex" / result["hash"] / "res=5" / "**" / "*.parquet")
+        parent_uri = str(local_bucket / "hex" / result["hash"] / "res=4" / "**" / "*.parquet")
+        children_min_by_parent = h3_conn.sql(
+            f"""
+            SELECT h3_cell_to_parent(h, 4) AS ph, MIN("val") AS min_v
+            FROM read_parquet('{child_uri}', hive_partitioning=true)
+            GROUP BY 1
+            """
+        ).fetchdf()
+        parents = h3_conn.sql(
+            f'SELECT h AS ph, "val" AS min_v FROM read_parquet(\'{parent_uri}\', hive_partitioning=true)'
+        ).fetchdf()
+        merged = parents.merge(children_min_by_parent, on="ph", suffixes=("_p", "_c"))
+        assert (merged["min_v_p"] == merged["min_v_c"]).all()
+
+    def test_max_at_parent_is_max_of_children(self, local_bucket, h3_conn):
+        # Mirror of the MIN test.
+        points = [
+            (37.8, -122.3, 10.0), (37.80001, -122.30001, 2.0),
+            (37.80002, -122.30002, 7.0),
+            (40.0, -100.0, 3.0),
+        ]
+        result = register_hex_tiles(
+            con=h3_conn, sql=self._seed_sql(points),
+            finest_res=5, min_res=3, agg="MAX", zoom_offset=-1,
+        )
+        child_uri = str(local_bucket / "hex" / result["hash"] / "res=5" / "**" / "*.parquet")
+        parent_uri = str(local_bucket / "hex" / result["hash"] / "res=4" / "**" / "*.parquet")
+        children_max_by_parent = h3_conn.sql(
+            f"""
+            SELECT h3_cell_to_parent(h, 4) AS ph, MAX("val") AS max_v
+            FROM read_parquet('{child_uri}', hive_partitioning=true)
+            GROUP BY 1
+            """
+        ).fetchdf()
+        parents = h3_conn.sql(
+            f'SELECT h AS ph, "val" AS max_v FROM read_parquet(\'{parent_uri}\', hive_partitioning=true)'
+        ).fetchdf()
+        merged = parents.merge(children_max_by_parent, on="ph", suffixes=("_p", "_c"))
+        assert (merged["max_v_p"] == merged["max_v_c"]).all()
+
+    def test_avg_at_parent_is_weighted_source_mean(self, local_bucket, h3_conn):
+        # AVG mode: parent.val equals the row-weighted mean of source rows
+        # falling under that parent. Two cells with different cardinalities
+        # produce different parent means under correct weighting; an
+        # unweighted mean-of-means would give a wrong answer here.
+        # Cluster A: 4 rows mapping to one h5 cell, values [10, 20, 30, 40] (mean 25).
+        # Cluster B: 1 row mapping to a sibling h5 cell, value [100] (mean 100).
+        # Both share the same h4 parent.
+        # Unweighted mean-of-means = (25 + 100) / 2 = 62.5  ← WRONG
+        # Correctly weighted mean = (10+20+30+40+100) / 5 = 40.0
+        points = [
+            (37.80000, -122.30000, 10.0),
+            (37.80001, -122.30001, 20.0),
+            (37.80002, -122.30002, 30.0),
+            (37.80003, -122.30003, 40.0),
+            (37.80100, -122.30100, 100.0),
+        ]
+        result = register_hex_tiles(
+            con=h3_conn, sql=self._seed_sql(points),
+            finest_res=5, min_res=4, agg="AVG", zoom_offset=-1,
+        )
+        # All 5 points share the same h4 parent — find it and check its AVG.
+        parent_uri = str(local_bucket / "hex" / result["hash"] / "res=4" / "**" / "*.parquet")
+        rows = h3_conn.sql(
+            f'SELECT h, "val" FROM read_parquet(\'{parent_uri}\', hive_partitioning=true)'
+        ).fetchall()
+        # All five points map to the same (lat, lng) area at h4 → one parent row.
+        assert len(rows) == 1, f"expected 1 parent cell, got {len(rows)}: {rows}"
+        parent_val = rows[0][1]
+        assert abs(parent_val - 40.0) < 1e-9, (
+            f"parent AVG = {parent_val}, expected weighted mean 40.0 "
+            f"(unweighted mean-of-means would be 62.5)"
+        )
