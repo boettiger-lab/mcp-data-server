@@ -8,7 +8,8 @@
 # Claude Code / superpowers tooling
 .claude/
 memory/
-docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
