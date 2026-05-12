@@ -239,13 +239,25 @@ mcp.tool()(query)
 # -------------------------------------------------------------------------
 # 8b. TILE ENDPOINT — dynamic MVT for H3 hex visualization (see issue #4)
 # -------------------------------------------------------------------------
+import concurrent.futures
+import threading
+import time
 from tiles.endpoint import serve_tile
 from tiles.db import build_tile_connection
-from tiles.pyramid import register_hex_tiles as _register_hex_tiles
+from tiles.pyramid import (
+    MVT_LAYER_NAME,
+    prepare_hex_tiles,
+    build_hex_tiles,
+    cached_result_dict,
+    read_existing_metadata,
+    tile_paths_for_hash,
+)
 
 
-# Module-level persistent connection. Initialized lazily at first use OR
-# at startup via the lifespan in mount_tiles().
+# Module-level persistent connection used for READS ONLY (tile-serve GETs +
+# the fast prepare-phase probes for register_hex_tiles). Pyramid builds get
+# their own connections via the executor below so a long-running COPY can't
+# block tile-serve reads.
 _tile_con = None
 
 
@@ -254,6 +266,44 @@ def _get_tile_con():
     if _tile_con is None:
         _tile_con = build_tile_connection()
     return _tile_con
+
+
+# Background pyramid builds. Each submitted job gets a fresh DuckDB
+# connection so writes don't serialise behind each other or behind reads.
+_BUILD_MAX_CONCURRENCY = int(os.environ.get("TILE_BUILD_MAX_CONCURRENCY", "2"))
+_BUILD_INLINE_WAIT_SECONDS = float(os.environ.get("TILE_BUILD_INLINE_WAIT_SECONDS", "5"))
+_build_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_BUILD_MAX_CONCURRENCY,
+    thread_name_prefix="tile-build",
+)
+_jobs_lock = threading.Lock()
+# hash -> {"future": Future, "started_at": float}. Entries persist after
+# completion so get_hex_tile_status can return "failed" with the error
+# string; "done" status reads metadata.json directly so the job dict
+# isn't authoritative for success.
+_jobs: dict = {}
+
+
+def _submit_build(plan: dict) -> concurrent.futures.Future:
+    """Submit (or join) a background pyramid build for this plan. Dedups
+    within-process: if a job for the same hash is already in flight, returns
+    that future instead of starting a duplicate build."""
+    h = plan["hash"]
+    with _jobs_lock:
+        existing = _jobs.get(h)
+        if existing is not None and not existing["future"].done():
+            return existing["future"]
+
+        def _do_build():
+            build_con = build_tile_connection()
+            try:
+                return build_hex_tiles(build_con, plan)
+            finally:
+                build_con.close()
+
+        future = _build_executor.submit(_do_build)
+        _jobs[h] = {"future": future, "started_at": time.time()}
+        return future
 
 
 # Deliberate API design: only `sql` and `agg` are documented for the LLM.
@@ -314,15 +364,21 @@ def register_hex_tiles(
           numeric value column after the H3 index; each is aggregated by
           `agg` at every coarser level.
 
-    Returns a dict with:
-    - `tile_url_template`: MapLibre vector tile URL with {z}/{x}/{y} placeholders.
-    - `value_columns`: list of output column names available as MVT feature
-      properties. For agg="COUNT" this is ["count"]; otherwise the user's
-      value columns.
-    - `value_stats`: {<col>: {"by_res": {"<res>": {"min": <num>, "max": <num>}}}}.
-      Per-resolution min/max for each value column — pass to the map client.
-    - `layer_name`: the MVT source-layer name; use as `source-layer` in the client.
-    - `hash`, `bounds`, `finest_res`, `feature_count_finest`: tileset metadata.
+    Returns a dict with `status` ∈ {"done", "running", "failed"}:
+    - status="done" (cache hit or fast build): full metadata is included —
+      `tile_url_template` (MapLibre vector tile URL with {z}/{x}/{y}),
+      `value_columns` (MVT feature properties: ["count"] for agg="COUNT",
+      otherwise your value columns), `value_stats` ({<col>: {"by_res":
+      {"<res>": {"min", "max"}}}} for client-side palette domain),
+      `layer_name` (use as `source-layer`), plus `hash`, `bounds`,
+      `finest_res`, `feature_count_finest`.
+    - status="running": pyramid is being built in the background. You get
+      `hash` and `tile_url_template` only. Call `get_hex_tile_status(hash)`
+      to poll. Do NOT retry register_hex_tiles with different parameters —
+      the original build will still finish, and re-submitting queues more
+      work without cancelling the first one.
+    - status="failed": build raised an error inline. `error` field has the
+      exception message. Safe to re-submit with adjusted parameters.
 
     MapLibre usage:
         map.addSource(id, {type: 'vector', tiles: [tile_url_template], minzoom: 0, maxzoom: 14});
@@ -353,14 +409,95 @@ def register_hex_tiles(
 
     Always pass hive_partitioning = true so the planner can prune h0=* files.
     """
-    con = _get_tile_con()
-    return _register_hex_tiles(
-        con=con, sql=sql, agg=agg,
+    read_con = _get_tile_con()
+    plan = prepare_hex_tiles(
+        con=read_con, sql=sql, agg=agg,
         finest_res=finest_res, min_res=min_res, zoom_offset=zoom_offset,
     )
+    if plan["cached"] is not None:
+        result = cached_result_dict(plan, plan["cached"])
+        result["status"] = "done"
+        return result
+
+    future = _submit_build(plan)
+    try:
+        result = future.result(timeout=_BUILD_INLINE_WAIT_SECONDS)
+        result["status"] = "done"
+        return result
+    except concurrent.futures.TimeoutError:
+        return {
+            "hash": plan["hash"],
+            "tile_url_template": plan["tile_url_template"],
+            "status": "running",
+        }
+    except Exception as e:
+        return {
+            "hash": plan["hash"],
+            "tile_url_template": plan["tile_url_template"],
+            "status": "failed",
+            "error": str(e),
+        }
 
 
 mcp.tool()(register_hex_tiles)
+
+
+def get_hex_tile_status(hash: str) -> dict:
+    """Poll the status of a pyramid build started by register_hex_tiles.
+
+    Call this when register_hex_tiles returned {status: "running"}. Returns
+    one of:
+    - {hash, tile_url_template, status: "done", bounds, value_stats, ...} —
+      pyramid is on disk and renderable. Use bounds + value_stats with the
+      map client (fit_bounds, palette domain).
+    - {hash, tile_url_template, status: "running", elapsed_seconds} —
+      still building; poll again in a few seconds.
+    - {hash, tile_url_template, status: "failed", error} — build raised.
+      You may re-submit register_hex_tiles with adjusted parameters.
+    - {hash, tile_url_template, status: "unknown"} — no record of this hash
+      in the current server process and no completed tileset on disk. The
+      hash may be for a different server, or the build may never have
+      started. Re-submit register_hex_tiles to (re-)start it.
+
+    Idempotent — safe to call repeatedly. Hash is the value returned by
+    register_hex_tiles.
+    """
+    paths = tile_paths_for_hash(hash)
+    base = {"hash": hash, "tile_url_template": paths["tile_url_template"]}
+
+    cached = read_existing_metadata(_get_tile_con(), paths["output_uri"])
+    if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
+        return {
+            **base,
+            "status": "done",
+            "bounds": cached["bounds"],
+            "finest_res": cached["finest_res"],
+            "min_res": cached["min_res"],
+            "zoom_offset": cached["zoom_offset"],
+            "value_columns": cached["value_columns"],
+            "value_stats": cached["value_stats"],
+            "layer_name": cached.get("layer_name", MVT_LAYER_NAME),
+            "feature_count_finest": cached["feature_count_finest"],
+        }
+
+    with _jobs_lock:
+        job = _jobs.get(hash)
+    if job is None:
+        return {**base, "status": "unknown"}
+    future = job["future"]
+    if future.done():
+        exc = future.exception()
+        if exc is not None:
+            return {**base, "status": "failed", "error": str(exc)}
+        # Future done without exception, but metadata.json wasn't readable
+        # above — race or transient S3 read failure. Re-read may succeed.
+        return {**base, "status": "running",
+                "elapsed_seconds": round(time.time() - job["started_at"], 1)}
+    return {**base, "status": "running",
+            "elapsed_seconds": round(time.time() - job["started_at"], 1)}
+
+
+mcp.tool()(get_hex_tile_status)
 
 
 def mount_tiles(app):

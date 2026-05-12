@@ -23,9 +23,13 @@ def build_tile_connection() -> duckdb.DuckDBPyConnection:
     # parallel S3 readers / hash-aggregation workers to push Phase 1 of the
     # pyramid build past its previous ~30 MB/s effective S3 read ceiling
     # (the bottleneck observed on the global irrecoverable-carbon build,
-    # which took ~6 min at THREADS=16). Headroom of 16 of the 64-core
-    # CPU limit is left for concurrent tile-serving requests that hit the
-    # same connection while a pyramid build is in flight.
+    # which took ~6 min at THREADS=16). The same setting applies to the
+    # shared read connection (tile-serve GETs + prepare-phase probes); on
+    # that connection the higher thread count is harmless because the
+    # queries are tiny (LIMIT 0 / LIMIT 1, single-tile reads). Pyramid
+    # builds run on their own connections from this factory (see
+    # server._build_executor), so a long-running COPY doesn't block tile
+    # reads.
     con.sql("SET THREADS=48")
     con.sql("SET preserve_insertion_order=false")
     con.sql("SET enable_object_cache=true")

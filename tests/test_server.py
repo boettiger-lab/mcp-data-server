@@ -280,6 +280,172 @@ class TestTileRouteMounted:
         tool_names = [t.name for t in anyio.run(mcp.list_tools)]
         assert "register_hex_tiles" in tool_names
 
+    def test_get_hex_tile_status_is_exposed(self):
+        from server import mcp
+        import anyio
+        tool_names = [t.name for t in anyio.run(mcp.list_tools)]
+        assert "get_hex_tile_status" in tool_names
+
+
+@pytest.fixture
+def isolated_jobs(monkeypatch, tmp_path):
+    """Reset the module-level _jobs dict and point the tile bucket at tmp_path
+    so each test starts with a clean slate and never touches S3."""
+    import server
+    monkeypatch.setenv("TILE_BUCKET_BASE", str(tmp_path / "tiles"))
+    monkeypatch.setenv("MCP_PUBLIC_BASE_URL", "http://test.local")
+    # Reset the shared read connection so it picks up the env on next access.
+    monkeypatch.setattr(server, "_tile_con", None)
+    monkeypatch.setattr(server, "_jobs", {})
+    yield
+
+
+class TestRegisterHexTilesAsync:
+    def test_fast_build_returns_done_inline(self, isolated_jobs, monkeypatch):
+        """A build that finishes within the inline wait returns status=done
+        with full metadata (preserves today's UX for fast jobs)."""
+        import server
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        result = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert result["status"] == "done"
+        assert "bounds" in result
+        assert "value_stats" in result
+        assert result["finest_res"] == 5
+
+    def test_slow_build_returns_running(self, isolated_jobs, monkeypatch):
+        """If the build doesn't finish within the inline wait, the tool
+        returns status=running with hash + tile_url_template so the agent
+        can poll."""
+        import server, tiles.pyramid as pyramid
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 0.05)
+
+        # Make the build phase slow so the inline wait expires.
+        import time
+        orig_build = pyramid.build_hex_tiles
+        def slow_build(con, plan):
+            time.sleep(0.5)
+            return orig_build(con, plan)
+        monkeypatch.setattr(server, "build_hex_tiles", slow_build)
+
+        result = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert result["status"] == "running"
+        assert "hash" in result
+        assert "tile_url_template" in result
+
+        # Drain the in-flight future so the test doesn't leak threads.
+        h = result["hash"]
+        server._jobs[h]["future"].result(timeout=10)
+
+    def test_cache_hit_returns_done_with_cache_hit_flag(self, isolated_jobs, monkeypatch):
+        """Second registration with identical args short-circuits via
+        metadata.json — status=done, cache_hit=True, no background job."""
+        import server
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        first = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert first["status"] == "done"
+
+        # Reset jobs so the second call has no in-flight future to find;
+        # the cache-hit path must work purely from metadata.json on disk.
+        server._jobs.clear()
+        second = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert second["status"] == "done"
+        assert second.get("cache_hit") is True
+
+    def test_concurrent_calls_for_same_hash_dedupe(self, isolated_jobs, monkeypatch):
+        """Two register_hex_tiles calls with identical args while the first
+        is still running should share one background future, not start two
+        builds."""
+        import server, tiles.pyramid as pyramid
+        import threading, time
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 0.05)
+
+        build_calls = []
+        orig_build = pyramid.build_hex_tiles
+        def slow_counting_build(con, plan):
+            build_calls.append(plan["hash"])
+            time.sleep(0.5)
+            return orig_build(con, plan)
+        monkeypatch.setattr(server, "build_hex_tiles", slow_counting_build)
+
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        r1 = server.register_hex_tiles(sql=sql, agg="AVG")
+        r2 = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert r1["status"] == "running"
+        assert r2["status"] == "running"
+        assert r1["hash"] == r2["hash"]
+
+        # Drain.
+        server._jobs[r1["hash"]]["future"].result(timeout=10)
+        assert len(build_calls) == 1, f"expected one build, got {len(build_calls)}"
+
+
+class TestGetHexTileStatus:
+    def test_unknown_for_unrecognised_hash(self, isolated_jobs):
+        import server
+        result = server.get_hex_tile_status(hash="0000000000000000")
+        assert result["status"] == "unknown"
+        assert result["hash"] == "0000000000000000"
+        assert "tile_url_template" in result
+
+    def test_running_while_job_active(self, isolated_jobs, monkeypatch):
+        import server, tiles.pyramid as pyramid
+        import time
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 0.05)
+        orig_build = pyramid.build_hex_tiles
+        def slow_build(con, plan):
+            time.sleep(0.5)
+            return orig_build(con, plan)
+        monkeypatch.setattr(server, "build_hex_tiles", slow_build)
+
+        sub = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert sub["status"] == "running"
+        status = server.get_hex_tile_status(hash=sub["hash"])
+        assert status["status"] == "running"
+        assert "elapsed_seconds" in status
+
+        server._jobs[sub["hash"]]["future"].result(timeout=10)
+
+    def test_done_when_metadata_exists(self, isolated_jobs, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        sub = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert sub["status"] == "done"
+        status = server.get_hex_tile_status(hash=sub["hash"])
+        assert status["status"] == "done"
+        assert "bounds" in status
+        assert "value_stats" in status
+
+    def test_failed_when_build_raises(self, isolated_jobs, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        def boom(con, plan):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(server, "build_hex_tiles", boom)
+
+        result = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert result["status"] == "failed"
+        assert "boom" in result["error"]
+
+        status = server.get_hex_tile_status(hash=result["hash"])
+        assert status["status"] == "failed"
+        assert "boom" in status["error"]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
