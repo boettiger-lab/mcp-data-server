@@ -639,31 +639,40 @@ class TestPyramidMathCorrectness:
 
     def test_avg_at_parent_is_weighted_source_mean(self, local_bucket, h3_conn):
         # AVG mode: parent.val equals the row-weighted mean of source rows
-        # falling under that parent. Two cells with different cardinalities
-        # produce different parent means under correct weighting; an
-        # unweighted mean-of-means would give a wrong answer here.
-        # Cluster A: 4 rows mapping to one h5 cell, values [10, 20, 30, 40] (mean 25).
-        # Cluster B: 1 row mapping to a sibling h5 cell, value [100] (mean 100).
-        # Both share the same h4 parent.
-        # Unweighted mean-of-means = (25 + 100) / 2 = 62.5  ← WRONG
-        # Correctly weighted mean = (10+20+30+40+100) / 5 = 40.0
+        # falling under that parent. The test is meaningful only when the
+        # parent has TWO OR MORE distinct children at finest res — otherwise
+        # the Phase-2 SUM(v*w)/SUM(w) collapses to the single child's mean
+        # and an incorrect formula like AVG(v) would also pass.
+        #
+        # (37.0, -122.0) and (37.2, -122.0) map to two distinct h5 cells
+        # that share the same h4 parent.
+        # Cluster A: 4 rows at h5 cell A, values [10, 20, 30, 40] (cell mean 25, count 4).
+        # Cluster B: 1 row at h5 cell B, value [100] (cell mean 100, count 1).
+        # Unweighted mean-of-means at h4 = (25 + 100) / 2 = 62.5  ← WRONG
+        # Correctly weighted mean       = (4*25 + 1*100) / 5 = 40.0
         points = [
-            (37.80000, -122.30000, 10.0),
-            (37.80001, -122.30001, 20.0),
-            (37.80002, -122.30002, 30.0),
-            (37.80003, -122.30003, 40.0),
-            (37.80100, -122.30100, 100.0),
+            (37.0, -122.0, 10.0),
+            (37.0, -122.0, 20.0),
+            (37.0, -122.0, 30.0),
+            (37.0, -122.0, 40.0),
+            (37.2, -122.0, 100.0),
         ]
         result = register_hex_tiles(
             con=h3_conn, sql=self._seed_sql(points),
             finest_res=5, min_res=4, agg="AVG", zoom_offset=-1,
         )
-        # All 5 points share the same h4 parent — find it and check its AVG.
+        # Sanity: confirm the finest level really has 2 distinct h5 cells
+        # under one h4 parent — otherwise the test is checking nothing useful.
+        finest_uri = str(local_bucket / "hex" / result["hash"] / "res=5" / "**" / "*.parquet")
+        child_count = h3_conn.sql(
+            f"SELECT COUNT(DISTINCT h) FROM read_parquet('{finest_uri}', hive_partitioning=true)"
+        ).fetchone()[0]
+        assert child_count == 2, f"fixture must produce 2 distinct h5 cells, got {child_count}"
+
         parent_uri = str(local_bucket / "hex" / result["hash"] / "res=4" / "**" / "*.parquet")
         rows = h3_conn.sql(
             f'SELECT h, "val" FROM read_parquet(\'{parent_uri}\', hive_partitioning=true)'
         ).fetchall()
-        # All five points map to the same (lat, lng) area at h4 → one parent row.
         assert len(rows) == 1, f"expected 1 parent cell, got {len(rows)}: {rows}"
         parent_val = rows[0][1]
         assert abs(parent_val - 40.0) < 1e-9, (
