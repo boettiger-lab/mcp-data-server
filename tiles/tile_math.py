@@ -23,7 +23,7 @@ def zoom_to_h3_res(z: int, min_res: int, finest_res: int, zoom_offset: int = -1)
 # Bump when the pyramid on-disk layout changes in a way that the tile endpoint
 # can't read with the old logic — forces a fresh registration directory so old
 # parquet files written under a previous layout are never served by new code.
-_LAYOUT_VERSION = "v2-h0"
+_LAYOUT_VERSION = "v3-iterative"
 
 
 def content_hash(sql: str, finest_res: int, min_res: int, agg: str, zoom_offset: int) -> str:
