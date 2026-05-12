@@ -373,10 +373,12 @@ def register_hex_tiles(
       `layer_name` (use as `source-layer`), plus `hash`, `bounds`,
       `finest_res`, `feature_count_finest`.
     - status="running": pyramid is being built in the background. You get
-      `hash` and `tile_url_template` only. Call `get_hex_tile_status(hash)`
-      to poll. Do NOT retry register_hex_tiles with different parameters —
-      the original build will still finish, and re-submitting queues more
-      work without cancelling the first one.
+      `hash` and `tile_url_template` only. Call
+      `get_hex_tile_status(hash, wait_seconds=30)` to poll — that long-polls
+      server-side, so one call returns either the final result or a single
+      "still running" response. Do NOT retry register_hex_tiles with
+      different parameters; the original build will still finish, and
+      re-submitting queues more work without cancelling the first one.
     - status="failed": build raised an error inline. `error` field has the
       exception message. Safe to re-submit with adjusted parameters.
 
@@ -442,16 +444,45 @@ def register_hex_tiles(
 mcp.tool()(register_hex_tiles)
 
 
-def get_hex_tile_status(hash: str) -> dict:
+_STATUS_POLL_MAX_WAIT_SECONDS = 60
+
+
+def _done_response(base: dict, source: dict) -> dict:
+    """Build a status='done' response from either an S3 metadata dict or
+    a build_hex_tiles return value — both have the same shape."""
+    return {
+        **base,
+        "status": "done",
+        "bounds": source["bounds"],
+        "finest_res": source["finest_res"],
+        "min_res": source["min_res"],
+        "zoom_offset": source["zoom_offset"],
+        "value_columns": source["value_columns"],
+        "value_stats": source["value_stats"],
+        "layer_name": source.get("layer_name", MVT_LAYER_NAME),
+        "feature_count_finest": source["feature_count_finest"],
+    }
+
+
+def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
     """Poll the status of a pyramid build started by register_hex_tiles.
 
-    Call this when register_hex_tiles returned {status: "running"}. Returns
-    one of:
+    Call this when register_hex_tiles returned {status: "running"}.
+
+    Long-poll: pass `wait_seconds` (clamped to [0, 60]) to let the server
+    block until either the build finishes OR the wait expires. Use
+    wait_seconds=30 as a default — you get the final result if it finishes
+    in that window, otherwise one "still running" response so you know to
+    call again. Do NOT poll faster than this; rapid polling wastes turns
+    without giving the build time to make progress. wait_seconds=0 returns
+    immediately (the legacy non-blocking poll).
+
+    Returns one of:
     - {hash, tile_url_template, status: "done", bounds, value_stats, ...} —
       pyramid is on disk and renderable. Use bounds + value_stats with the
       map client (fit_bounds, palette domain).
     - {hash, tile_url_template, status: "running", elapsed_seconds} —
-      still building; poll again in a few seconds.
+      still building. Call again with wait_seconds=30.
     - {hash, tile_url_template, status: "failed", error} — build raised.
       You may re-submit register_hex_tiles with adjusted parameters.
     - {hash, tile_url_template, status: "unknown"} — no record of this hash
@@ -462,37 +493,35 @@ def get_hex_tile_status(hash: str) -> dict:
     Idempotent — safe to call repeatedly. Hash is the value returned by
     register_hex_tiles.
     """
+    wait_seconds = max(0, min(int(wait_seconds or 0), _STATUS_POLL_MAX_WAIT_SECONDS))
     paths = tile_paths_for_hash(hash)
     base = {"hash": hash, "tile_url_template": paths["tile_url_template"]}
 
     cached = read_existing_metadata(_get_tile_con(), paths["output_uri"])
     if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
-        return {
-            **base,
-            "status": "done",
-            "bounds": cached["bounds"],
-            "finest_res": cached["finest_res"],
-            "min_res": cached["min_res"],
-            "zoom_offset": cached["zoom_offset"],
-            "value_columns": cached["value_columns"],
-            "value_stats": cached["value_stats"],
-            "layer_name": cached.get("layer_name", MVT_LAYER_NAME),
-            "feature_count_finest": cached["feature_count_finest"],
-        }
+        return _done_response(base, cached)
 
     with _jobs_lock:
         job = _jobs.get(hash)
     if job is None:
         return {**base, "status": "unknown"}
     future = job["future"]
+
+    if not future.done() and wait_seconds > 0:
+        try:
+            result = future.result(timeout=wait_seconds)
+            return _done_response(base, result)
+        except concurrent.futures.TimeoutError:
+            pass  # still running — fall through to the standard branch below
+        except Exception as e:
+            return {**base, "status": "failed", "error": str(e)}
+
     if future.done():
         exc = future.exception()
         if exc is not None:
             return {**base, "status": "failed", "error": str(exc)}
-        # Future done without exception, but metadata.json wasn't readable
-        # above — race or transient S3 read failure. Re-read may succeed.
-        return {**base, "status": "running",
-                "elapsed_seconds": round(time.time() - job["started_at"], 1)}
+        return _done_response(base, future.result())
+
     return {**base, "status": "running",
             "elapsed_seconds": round(time.time() - job["started_at"], 1)}
 
