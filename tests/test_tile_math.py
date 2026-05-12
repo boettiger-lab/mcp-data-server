@@ -83,3 +83,14 @@ class TestContentHash:
             finest_res=8, min_res=2, agg="AVG", zoom_offset=-1,
         )
         assert new_hash != pre_h0_hash
+
+    def test_two_phase_layout_does_not_collide_with_v2_h0_hashes(self):
+        # v3-iterative layout (PR for two-phase pyramid) writes a different
+        # on-disk pyramid for the same user inputs. Bump the layout version
+        # so the new hash never overlaps a v2-h0 pyramid on S3.
+        v2_h0_hash = "847ee176a3fd805e"  # v2-h0 layout hash
+        new_hash = content_hash(
+            sql="SELECT 1 AS h, 2 AS v",
+            finest_res=8, min_res=2, agg="AVG", zoom_offset=-1,
+        )
+        assert new_hash != v2_h0_hash
