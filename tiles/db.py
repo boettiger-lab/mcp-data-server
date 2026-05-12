@@ -19,11 +19,14 @@ def build_tile_connection() -> duckdb.DuckDBPyConnection:
     con.sql("INSTALL spatial; LOAD spatial")
     con.sql("INSTALL h3 FROM community; LOAD h3")
 
-    # Cap per-query parallelism so several concurrent tile requests can run side
-    # by side instead of one query monopolizing the pod. With CPU limit 64 and
-    # THREADS=16, ~4 concurrent tile queries saturate cleanly; pyramid builds
-    # (which share this connection) are bandwidth-bound on S3 anyway.
-    con.sql("SET THREADS=16")
+    # Per-query parallelism. THREADS=48 gives register_hex_tiles enough
+    # parallel S3 readers / hash-aggregation workers to push Phase 1 of the
+    # pyramid build past its previous ~30 MB/s effective S3 read ceiling
+    # (the bottleneck observed on the global irrecoverable-carbon build,
+    # which took ~6 min at THREADS=16). Headroom of 16 of the 64-core
+    # CPU limit is left for concurrent tile-serving requests that hit the
+    # same connection while a pyramid build is in flight.
+    con.sql("SET THREADS=48")
     con.sql("SET preserve_insertion_order=false")
     con.sql("SET enable_object_cache=true")
     con.sql("SET temp_directory='/tmp'")
