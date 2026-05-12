@@ -104,6 +104,21 @@ class TestBuildPyramidStatements:
         for s in stmts[1:]:
             assert 'SUM("val") AS "val"' in s
 
+    def test_sum_mode_with_multiple_value_columns(self):
+        # Verify the join across multiple value columns produces well-formed SQL
+        # for SUM mode (analogous to the existing AVG multi-column test).
+        stmts = build_pyramid_statements(
+            user_sql="SELECT h5, v1, v2 FROM src",
+            finest_res=5, min_res=2, agg="SUM",
+            value_columns=["v1", "v2"], h3_column="h5",
+            output_uri="s3://public-output/hex/abc/",
+        )
+        assert 'SUM("v1") AS "v1"' in stmts[0]
+        assert 'SUM("v2") AS "v2"' in stmts[0]
+        for s in stmts[1:]:
+            assert 'SUM("v1") AS "v1"' in s
+            assert 'SUM("v2") AS "v2"' in s
+
     def test_min_max_modes_use_min_max_at_every_level(self):
         for agg in ("MIN", "MAX"):
             stmts = build_pyramid_statements(
@@ -116,7 +131,7 @@ class TestBuildPyramidStatements:
             for s in stmts[1:]:
                 assert f'{agg}("val") AS "val"' in s
 
-    def test_avg_mode_phase_1_includes_count_alongside_avg(self):
+    def test_avg_mode_phase_1_includes_weight_alongside_avg(self):
         # AVG mode needs COUNT(*) at finest so parent rollups can compute
         # weighted averages — `AVG of AVGs` is wrong when child cardinalities differ.
         stmts = build_pyramid_statements(
@@ -126,7 +141,7 @@ class TestBuildPyramidStatements:
             output_uri="s3://public-output/hex/abc/",
         )
         assert 'AVG("val") AS "val"' in stmts[0]
-        assert "COUNT(*) AS count" in stmts[0]
+        assert "COUNT(*) AS __pyramid_weight" in stmts[0]
 
     def test_avg_mode_phase_2_uses_weighted_average(self):
         stmts = build_pyramid_statements(
@@ -136,12 +151,12 @@ class TestBuildPyramidStatements:
             output_uri="s3://public-output/hex/abc/",
         )
         for s in stmts[1:]:
-            assert 'SUM("val" * count) / SUM(count) AS "val"' in s
-            # count must propagate so further rollups can keep weighting correctly.
-            assert "SUM(count) AS count" in s
+            assert 'SUM("val" * __pyramid_weight) / SUM(__pyramid_weight) AS "val"' in s
+            # weight must propagate so further rollups can keep weighting correctly.
+            assert "SUM(__pyramid_weight) AS __pyramid_weight" in s
 
     def test_avg_mode_with_multiple_value_columns(self):
-        # Single shared `count` for all value columns at every level.
+        # Single shared `__pyramid_weight` for all value columns at every level.
         stmts = build_pyramid_statements(
             user_sql="SELECT h5, v1, v2 FROM src",
             finest_res=5, min_res=2, agg="AVG",
@@ -150,11 +165,11 @@ class TestBuildPyramidStatements:
         )
         assert 'AVG("v1") AS "v1"' in stmts[0]
         assert 'AVG("v2") AS "v2"' in stmts[0]
-        assert "COUNT(*) AS count" in stmts[0]
-        # Parent rollup weights each value column by the same count.
-        assert 'SUM("v1" * count) / SUM(count) AS "v1"' in stmts[1]
-        assert 'SUM("v2" * count) / SUM(count) AS "v2"' in stmts[1]
-        assert "SUM(count) AS count" in stmts[1]
+        assert "COUNT(*) AS __pyramid_weight" in stmts[0]
+        # Parent rollup weights each value column by the same weight.
+        assert 'SUM("v1" * __pyramid_weight) / SUM(__pyramid_weight) AS "v1"' in stmts[1]
+        assert 'SUM("v2" * __pyramid_weight) / SUM(__pyramid_weight) AS "v2"' in stmts[1]
+        assert "SUM(__pyramid_weight) AS __pyramid_weight" in stmts[1]
 
     def test_invalid_agg_raises(self):
         import pytest

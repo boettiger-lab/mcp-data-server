@@ -37,8 +37,8 @@ def build_pyramid_statements(
         small) and writes res. Working set per Phase 2 step is bounded by the
         cardinality of the previous res, which shrinks ~7x per step.
 
-    AVG mode stores an internal `count` column alongside the aggregate so
-    parent rollups produce correctly weighted averages instead of an
+    AVG mode stores an internal `__pyramid_weight` column alongside the aggregate
+    so parent rollups produce correctly weighted averages instead of an
     unweighted mean-of-means.
     """
     _VALID_AGG = {"AVG", "SUM", "MIN", "MAX", "COUNT"}
@@ -71,14 +71,14 @@ def build_pyramid_statements(
         # Phase 1: average raw source rows + carry COUNT for weighted parents.
         phase1_values = (
             ", ".join(f'AVG("{c}") AS "{c}"' for c in value_columns)
-            + ", COUNT(*) AS count"
+            + ", COUNT(*) AS __pyramid_weight"
         )
-        # Phase 2: weighted average = SUM(v*count) / SUM(count). Propagate count.
+        # Phase 2: weighted average = SUM(v*weight) / SUM(weight). Propagate weight.
         phase2_values = (
             ", ".join(
-                f'SUM("{c}" * count) / SUM(count) AS "{c}"' for c in value_columns
+                f'SUM("{c}" * __pyramid_weight) / SUM(__pyramid_weight) AS "{c}"' for c in value_columns
             )
-            + ", SUM(count) AS count"
+            + ", SUM(__pyramid_weight) AS __pyramid_weight"
         )
 
     # Phase 1: scan user_sql, derive h0 once in the src CTE, aggregate at finest.
@@ -187,8 +187,8 @@ def register_hex_tiles(
       `count` column (row count per hex at parent resolutions; 1 at finest).
       Any extra columns in the user SQL are ignored.
     - Other aggs: user SQL must return at least one value column after the H3
-      index. Each is aggregated via `agg` at parent resolutions and passed
-      through raw at the finest level.
+      index. Each is aggregated via `agg` at every resolution including the finest
+      (one row per (h, h0) cell at every level).
     """
     h3_column, sql_value_columns = _inspect_user_sql(con, sql)
     if finest_res is None:
