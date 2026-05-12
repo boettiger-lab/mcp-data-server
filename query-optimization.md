@@ -43,15 +43,7 @@ You must read parquet datasets from S3 using read_parquet(). There are no local 
 **Aggregate after the join, never before.** When joining a small scope to a large hex dataset, do the join against the raw `read_parquet(...)` of the large side. Wrapping the large side in a pre-aggregation CTE (`GROUP BY`, `MODE`, `SUM`) before the join forces DuckDB to scan every h0 partition of it — the small scope's h0 values cannot prune through an aggregation operator.
 
 ```sql
--- ❌ WRONG: large side aggregated first → scans all h0 partitions
-WITH lc_agg AS (
-  SELECT h8, h0, MODE(lc_class) AS dominant
-  FROM read_parquet('<large_hex>') GROUP BY h8, h0
-)
-SELECT s.h8, a.dominant
-FROM scope s JOIN lc_agg a USING (h8, h0);
-
--- ✅ RIGHT: join first, aggregate after → only scope's h0 partitions opened
+-- Join first, aggregate after → only scope's h0 partitions opened
 WITH lc_on_scope AS (
   SELECT s.h8, s.h0, l.lc_class
   FROM scope s
