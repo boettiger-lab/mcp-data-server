@@ -428,6 +428,86 @@ class TestGetHexTileStatus:
         assert "bounds" in status
         assert "value_stats" in status
 
+    def test_long_poll_returns_done_when_build_finishes_during_wait(self, isolated_jobs, monkeypatch):
+        """wait_seconds blocks server-side until the build completes,
+        avoiding the rapid-poll antipattern."""
+        import server, tiles.pyramid as pyramid
+        import time
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 0.05)
+        orig_build = pyramid.build_hex_tiles
+        def slow_build(con, plan):
+            time.sleep(0.5)
+            return orig_build(con, plan)
+        monkeypatch.setattr(server, "build_hex_tiles", slow_build)
+
+        sub = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert sub["status"] == "running"
+
+        # Long-poll for up to 10 s — build finishes in ~0.5 s.
+        status = server.get_hex_tile_status(hash=sub["hash"], wait_seconds=10)
+        assert status["status"] == "done"
+        assert "bounds" in status
+        assert "value_stats" in status
+
+    def test_long_poll_returns_running_when_wait_expires(self, isolated_jobs, monkeypatch):
+        """If the build doesn't finish in the requested wait, returns
+        status=running so the caller knows to ask again."""
+        import server, tiles.pyramid as pyramid
+        import time
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 0.05)
+        orig_build = pyramid.build_hex_tiles
+        def very_slow_build(con, plan):
+            time.sleep(3.0)
+            return orig_build(con, plan)
+        monkeypatch.setattr(server, "build_hex_tiles", very_slow_build)
+
+        sub = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert sub["status"] == "running"
+
+        t0 = time.time()
+        status = server.get_hex_tile_status(hash=sub["hash"], wait_seconds=1)
+        elapsed = time.time() - t0
+        assert status["status"] == "running"
+        # Waited approximately 1 s (not 3 — the build is still running).
+        assert 0.8 <= elapsed <= 2.0, f"wait_seconds=1 took {elapsed:.2f}s"
+
+        # Drain so the test doesn't leak threads.
+        server._jobs[sub["hash"]]["future"].result(timeout=10)
+
+    def test_wait_seconds_is_clamped(self, isolated_jobs, monkeypatch):
+        """Caller cannot pin a server thread indefinitely; wait_seconds
+        is clamped to _STATUS_POLL_MAX_WAIT_SECONDS."""
+        import server, tiles.pyramid as pyramid
+        import time
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 0.05)
+        monkeypatch.setattr(server, "_STATUS_POLL_MAX_WAIT_SECONDS", 1)
+        orig_build = pyramid.build_hex_tiles
+        def very_slow_build(con, plan):
+            time.sleep(5.0)
+            return orig_build(con, plan)
+        monkeypatch.setattr(server, "build_hex_tiles", very_slow_build)
+
+        sub = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert sub["status"] == "running"
+
+        t0 = time.time()
+        # Caller asks for 999 s; should be clamped to 1 s.
+        status = server.get_hex_tile_status(hash=sub["hash"], wait_seconds=999)
+        elapsed = time.time() - t0
+        assert status["status"] == "running"
+        assert elapsed <= 2.0, f"clamp not enforced — waited {elapsed:.2f}s"
+
+        server._jobs[sub["hash"]]["future"].result(timeout=10)
+
     def test_failed_when_build_raises(self, isolated_jobs, monkeypatch):
         import server
         monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
