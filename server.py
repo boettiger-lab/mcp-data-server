@@ -72,6 +72,21 @@ TOOL_INJECTED_CONTEXT = f"""
    - `read_parquet('s3://public-padus/padus-4-1/fee/hex/h0=*/data_0.parquet')` — nested path, partition glob
 
    Both are correct. Copy-paste the path from get_stac_details. In SQL examples below, `<STAC_HEX_PATH>` means "insert the exact path from get_stac_details here."
+4. **MASK BEFORE AGGREGATE (DPP rule).** When joining a small hex mask
+   (e.g. state, district, county, protected-areas hexes) against a globally
+   `h0`-partitioned hex dataset (land cover, climate, biomass — anything
+   under `hex/h0=*/`), the `SEMI JOIN` against the mask MUST appear directly
+   on the raw `read_parquet(...)` BEFORE `GROUP BY`. Aggregating the global
+   side first scans every `h0` partition and will hit the 300-second MCP
+   timeout. DuckDB dynamic partition pruning cannot push filters through
+   `HASH_GROUP_BY`.
+   ```sql
+   SELECT a.h8, MODE(a.lc_class) AS dominant
+   FROM read_parquet('<global_hex>', hive_partitioning = true) a
+   SEMI JOIN <mask> m USING (h8, h0)
+   WHERE a.lc_class IS NOT NULL
+   GROUP BY a.h8;
+   ```
 
 ### ⚡ OPTIMIZATION RULES
 {OPTIM_RAW}

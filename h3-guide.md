@@ -226,15 +226,7 @@ post-aggregation mask forces every h0 partition of the value dataset to
 be scanned — turning a small masked query into a global one.
 
 ```sql
--- ❌ Mask after aggregation → scans every h0 file
-WITH lc_agg AS (
-    SELECT h8, h0, MODE(lc_class) AS dominant
-    FROM read_parquet('<raster_hex>', hive_partitioning = true)
-    GROUP BY h8, h0
-)
-SELECT m.h8, l.dominant FROM mask m JOIN lc_agg l USING (h8, h0);
-
--- ✅ Mask first → only matching h0 files scanned
+-- Mask first: only matching h0 files scanned
 SELECT a.h8, MODE(a.lc_class) AS dominant
 FROM read_parquet('<raster_hex>', hive_partitioning = true) a
 SEMI JOIN mask m USING (h8, h0)
