@@ -18,7 +18,7 @@ from tiles.tile_math import content_hash
 MVT_LAYER_NAME = "layer"
 
 
-def build_pyramid_sql(
+def build_pyramid_statements(
     user_sql: str,
     finest_res: int,
     min_res: int,
@@ -26,74 +26,97 @@ def build_pyramid_sql(
     value_columns: List[str],
     h3_column: str,
     output_uri: str,
-) -> str:
-    """Return the COPY ... TO SQL that writes a partitioned pyramid.
+) -> List[str]:
+    """Return the ordered list of COPY statements that build a partitioned pyramid.
 
-    The finest-resolution level stores raw per-row values; parent resolutions
-    aggregate via the chosen `agg` function.
+    Two-phase design:
+      Phase 1 (first statement): one COPY reads user_sql, aggregates by (h, h0),
+        and writes only res=finest_res partitioned by (res, h0).
+      Phase 2 (remaining statements): for res = finest_res - 1 down to min_res,
+        each COPY reads the previously written res+1 partition (already aggregated,
+        small) and writes res. Working set per Phase 2 step is bounded by the
+        cardinality of the previous res, which shrinks ~7x per step.
 
-    When agg="COUNT", `value_columns` must be exactly ["count"] and the SQL
-    emits `COUNT(*) AS count` at parent levels and `1 AS count` at the finest
-    level. Any value columns from the user SQL are ignored — callers requesting
-    COUNT get row-count semantics, nothing else.
+    AVG mode stores an internal `count` column alongside the aggregate so
+    parent rollups produce correctly weighted averages instead of an
+    unweighted mean-of-means.
     """
     _VALID_AGG = {"AVG", "SUM", "MIN", "MAX", "COUNT"}
     agg_upper = agg.upper()
     if agg_upper not in _VALID_AGG:
         raise ValueError(f"agg must be one of {_VALID_AGG}, got {agg!r}")
+    if agg_upper != "COUNT" and not value_columns:
+        raise ValueError(
+            "user SQL must return at least one value column after the H3 index "
+            "(or use agg='COUNT')"
+        )
 
     qh = f'"{h3_column}"'
 
+    # Per-agg expressions at finest (Phase 1, aggregating raw source rows)
+    # and at parent levels (Phase 2, rolling up the previous resolution).
     if agg_upper == "COUNT":
-        parent_values = "COUNT(*) AS count"
-        finest_values = "1 AS count"
-    else:
-        parent_values = ", ".join(f'{agg_upper}("{c}") AS "{c}"' for c in value_columns)
-        finest_values = ", ".join(f'"{c}"' for c in value_columns)
-
-    selects = []
-    for res in range(min_res, finest_res):
-        # GROUP BY 1, 2 — h0 is functionally determined by h, so adding it to
-        # the group key doesn't change cardinality.
-        selects.append(
-            f"  SELECT h3_cell_to_parent({qh}, {res}) AS h, "
-            f"h0, {parent_values}, {res} AS res FROM src GROUP BY 1, 2"
+        phase1_values = "COUNT(*) AS count"
+        phase2_values = "SUM(count) AS count"
+    elif agg_upper == "SUM":
+        phase1_values = ", ".join(f'SUM("{c}") AS "{c}"' for c in value_columns)
+        phase2_values = ", ".join(f'SUM("{c}") AS "{c}"' for c in value_columns)
+    elif agg_upper == "MIN":
+        phase1_values = ", ".join(f'MIN("{c}") AS "{c}"' for c in value_columns)
+        phase2_values = ", ".join(f'MIN("{c}") AS "{c}"' for c in value_columns)
+    elif agg_upper == "MAX":
+        phase1_values = ", ".join(f'MAX("{c}") AS "{c}"' for c in value_columns)
+        phase2_values = ", ".join(f'MAX("{c}") AS "{c}"' for c in value_columns)
+    else:  # AVG
+        # Phase 1: average raw source rows + carry COUNT for weighted parents.
+        phase1_values = (
+            ", ".join(f'AVG("{c}") AS "{c}"' for c in value_columns)
+            + ", COUNT(*) AS count"
         )
-    if agg_upper == "COUNT":
-        # Aggregate at finest too — otherwise raw rows pass through and a cell
-        # with N occurrences becomes N MVT features. Tiles balloon (e.g., 126M
-        # rows for 2.3M unique cells on GBIF CA → 54× duplication).
-        selects.append(
-            f"  SELECT {qh} AS h, h0, COUNT(*) AS count, "
-            f"{finest_res} AS res FROM src GROUP BY 1, 2"
-        )
-    else:
-        # Non-COUNT aggs preserve raw per-row values at finest by design — the
-        # caller may have pre-aggregated upstream, or want per-row visibility.
-        selects.append(
-            f"  SELECT {qh} AS h, h0, {finest_values}, "
-            f"{finest_res} AS res FROM src"
+        # Phase 2: weighted average = SUM(v*count) / SUM(count). Propagate count.
+        phase2_values = (
+            ", ".join(
+                f'SUM("{c}" * count) / SUM(count) AS "{c}"' for c in value_columns
+            )
+            + ", SUM(count) AS count"
         )
 
-    body = "\n  UNION ALL\n".join(selects)
-
-    # h0 = H3 base cell (res=0 parent) of every row, cast to BIGINT so it round-
-    # trips through hive partition directories. All 122 base cells fit in
-    # signed 64-bit. Computed once in the src CTE and reused across every
-    # UNION ALL branch — recomputing per branch costs ~6× extra H3 calls per
-    # row on a 7-level pyramid, which pushes large-dataset builds past MCP
-    # client timeouts. PARTITION_BY (res, h0) routes rows to per-h0 sub-
-    # directories so tile requests can hive-prune to the bbox-overlapping set.
-    return (
+    # Phase 1: scan user_sql, derive h0 once in the src CTE, aggregate at finest.
+    phase_1 = (
         "COPY (\n"
         f"  WITH src AS (\n"
         f"    SELECT *, CAST(h3_cell_to_parent({qh}, 0) AS BIGINT) AS h0\n"
         f"    FROM (\n{user_sql}\n    )\n"
         f"  )\n"
-        f"{body}\n"
+        f"  SELECT {qh} AS h,\n"
+        f"         h0,\n"
+        f"         {phase1_values},\n"
+        f"         {finest_res} AS res\n"
+        f"  FROM src\n"
+        f"  GROUP BY 1, 2\n"
         f") TO '{output_uri}' "
         f"(FORMAT PARQUET, PARTITION_BY (res, h0), OVERWRITE_OR_IGNORE)"
     )
+
+    statements = [phase_1]
+
+    # Phase 2: each parent res reads from the previously written res+1.
+    for res in range(finest_res - 1, min_res - 1, -1):
+        src_uri = f"{output_uri}res={res + 1}/**/*.parquet"
+        stmt = (
+            "COPY (\n"
+            f"  SELECT h3_cell_to_parent(h, {res}) AS h,\n"
+            f"         h0,\n"
+            f"         {phase2_values},\n"
+            f"         {res} AS res\n"
+            f"  FROM read_parquet('{src_uri}', hive_partitioning=true)\n"
+            f"  GROUP BY 1, 2\n"
+            f") TO '{output_uri}' "
+            f"(FORMAT PARQUET, PARTITION_BY (res, h0), OVERWRITE_OR_IGNORE)"
+        )
+        statements.append(stmt)
+
+    return statements
 
 
 def _bucket_base() -> str:
@@ -220,7 +243,7 @@ def register_hex_tiles(
             "cache_hit": True,
         }
 
-    pyramid_sql = build_pyramid_sql(
+    statements = build_pyramid_statements(
         user_sql=sql,
         finest_res=finest_res,
         min_res=min_res,
@@ -231,7 +254,8 @@ def register_hex_tiles(
     )
     if not output_uri.startswith("s3://"):
         os.makedirs(output_uri, exist_ok=True)
-    con.sql(pyramid_sql)
+    for stmt in statements:
+        con.sql(stmt)
 
     # Per-resolution min/max for every output value column.
     def _jsonable(v):
