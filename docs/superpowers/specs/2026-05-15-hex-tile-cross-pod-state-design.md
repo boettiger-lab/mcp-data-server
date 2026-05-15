@@ -61,6 +61,16 @@ A lock is **stale** if `now - started_at > _LOCK_STALE_SECONDS` (default
 900s = 15 minutes). Stale locks are treated as absent, which handles pod
 crashes mid-build.
 
+**No deletes.** All writes are append-only. The read order
+`metadata → failed → lock` means a successful build's `metadata.json`
+shadows its now-irrelevant lock, and a failed build's `failed.json`
+shadows the lock. Stale locks (from crashed pods) sit until the TTL
+expires, then are simply overwritten by the next register. This avoids
+adding any new dependency (DuckDB's `httpfs` extension lacks a clean
+DELETE primitive) and removes a failure mode (no "lock-clear S3 blip
+leaves phantom lock" case). The per-hash directory holds at most 3
+small JSON files regardless.
+
 ## Modified `register_hex_tiles` flow
 
 Additions in **bold**:
@@ -72,9 +82,10 @@ Additions in **bold**:
    the lock's `started_at`. Do not submit.**
 5. **Write `lock.json` (best-effort; not conditional).** Submit the build to
    the local executor via a wrapper that:
-   - On success: clears `lock.json`. (`metadata.json` is the success signal —
-     written by the existing COPY in `build_hex_tiles`.)
-   - On exception: writes `failed.json`, clears `lock.json`.
+   - On success: does nothing. `metadata.json` is the success signal —
+     written by the existing COPY in `build_hex_tiles` — and shadows the
+     now-stale lock on subsequent reads.
+   - On exception: writes `failed.json`.
 6. Wait `_BUILD_INLINE_WAIT_SECONDS` (unchanged, 5s). Return `done` /
    `failed` / `running` based on outcome (unchanged behavior).
 
@@ -102,9 +113,8 @@ Two pods receive `register_hex_tiles` for the same hash within the small
 window before either writes a `lock.json` → both proceed to submit a build.
 Because the hash is deterministic over (sql, agg, ...), both builds write to
 the same `output_uri`. DuckDB COPY is not concurrency-safe, but the last
-writer wins on the same key; on completion both clear their (now-merged)
-lock. The visible failure mode is wasted compute on one pod, not data
-corruption.
+writer wins on the same key. The visible failure mode is wasted compute on
+one pod, not data corruption.
 
 This is strictly better than today's behavior (N parallel builds, no shared
 state at all). A future hardening could use Ceph S3 conditional-write headers
@@ -121,8 +131,7 @@ executor has `_BUILD_MAX_CONCURRENCY = 2`). Configurable for ops without a
 code change.
 
 When a stale lock is encountered, the reader treats it as no-lock. The next
-`register_hex_tiles` overwrites it. We do not actively delete stale locks
-(simpler, idempotent under concurrent readers).
+`register_hex_tiles` overwrites it.
 
 ## Code changes
 
@@ -135,15 +144,10 @@ are reused):
 - `write_lock(con, output_uri, pod_id) -> None`
 - `read_lock(con, output_uri) -> dict | None`
 - `lock_is_stale(lock, now=None) -> bool`
-- `clear_lock(con, output_uri) -> None`
 - `write_failed(con, output_uri, error: str) -> None`
 - `read_failed(con, output_uri) -> dict | None`
 
-S3 deletion via DuckDB doesn't have a direct primitive; use a small
-"`COPY (SELECT 1 WHERE 1=0) TO '...'`" approach to overwrite with empty
-content, or — better — call the `httpfs` extension's `S3 DELETE` via the
-boto-like `aws` secret already configured. Implementation detail to settle
-during the plan phase.
+No delete primitive needed — see "No deletes" in Mechanism.
 
 ### `server.py`
 
@@ -188,11 +192,15 @@ Add to existing files (no new files):
 
 ## Open implementation questions to resolve during planning
 
-1. Exact S3-delete primitive available through the DuckDB `httpfs` /
-   `aws` secret stack. May need a small `boto3`-style helper if DuckDB
-   doesn't expose `DELETE`. Fallback: write a zero-byte file with the same
-   key (read_lock checks both presence and content validity).
-2. Whether the lock-clearing wrapper in `_submit_build` should also handle
-   the case where `metadata.json` is written but the lock-clear fails (S3
-   blip). Acceptable: the lock will be marked stale 15 minutes later. No
-   correctness loss.
+1. Exact DuckDB COPY incantation for writing a small JSON file readable
+   back as a dict — the existing `metadata.json` write uses
+   `(FORMAT CSV, HEADER false, QUOTE '')` to emit raw JSON bytes via a
+   single-row CSV. Reuse that pattern for `lock.json` / `failed.json`,
+   or switch to `(FORMAT JSON, ARRAY false)` if cleaner. Verify what the
+   pinned DuckDB version actually supports.
+2. Tile-build connection identity for marker writes: the existing
+   `_get_tile_con()` is shared across reads. Lock/failed writes happen on
+   the build-executor's per-job connection (one per `_do_build`), which
+   already has the same secret. Confirm no contention concerns; if any,
+   route marker writes through `_get_tile_con()` with a short critical
+   section.
