@@ -385,6 +385,26 @@ class TestRegisterHexTilesAsync:
         server._jobs[r1["hash"]]["future"].result(timeout=10)
         assert len(build_calls) == 1, f"expected one build, got {len(build_calls)}"
 
+    def test_register_returns_failed_when_failed_marker_exists(self, isolated_jobs, monkeypatch):
+        """If failed.json from a prior build exists for the hash a new
+        register_hex_tiles would produce, return it immediately — don't
+        kick off a redundant build."""
+        import server
+        from tiles.pyramid import write_failed, prepare_hex_tiles
+
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        # Compute the hash the registration would land on, plant a failed marker.
+        plan = prepare_hex_tiles(con=server._get_tile_con(), sql=sql, agg="AVG")
+        import os
+        os.makedirs(plan["output_uri"], exist_ok=True)
+        write_failed(server._get_tile_con(), plan["output_uri"], error="prior build OOM")
+
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert result["status"] == "failed"
+        assert result["error"] == "prior build OOM"
+        # No background build should have been queued.
+        assert plan["hash"] not in server._jobs
+
 
 class TestGetHexTileStatus:
     def test_unknown_for_unrecognised_hash(self, isolated_jobs):

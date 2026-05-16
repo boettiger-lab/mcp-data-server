@@ -422,6 +422,15 @@ def register_hex_tiles(
         result["status"] = "done"
         return result
 
+    failed = read_failed(read_con, plan["output_uri"])
+    if failed is not None:
+        return {
+            "hash": plan["hash"],
+            "tile_url_template": plan["tile_url_template"],
+            "status": "failed",
+            "error": failed.get("error", ""),
+        }
+
     future = _submit_build(plan)
     try:
         result = future.result(timeout=_BUILD_INLINE_WAIT_SECONDS)
