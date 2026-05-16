@@ -679,3 +679,57 @@ class TestPyramidMathCorrectness:
             f"parent AVG = {parent_val}, expected weighted mean 40.0 "
             f"(unweighted mean-of-means would be 62.5)"
         )
+
+
+import json
+import time
+import duckdb
+from tiles.pyramid import (
+    write_lock,
+    read_lock,
+    lock_is_stale,
+)
+
+
+class TestLockMarkers:
+    def _con(self):
+        return duckdb.connect(":memory:")
+
+    def test_write_then_read_round_trips(self, tmp_path):
+        con = self._con()
+        output_uri = str(tmp_path) + "/"
+        write_lock(con, output_uri, pod_id="pod-A")
+        lock = read_lock(con, output_uri)
+        assert lock is not None
+        assert lock["pod_id"] == "pod-A"
+        assert isinstance(lock["started_at"], (int, float))
+        # Lock file should physically exist on disk for local paths.
+        import os
+        assert os.path.exists(output_uri + "lock.json")
+
+    def test_read_returns_none_when_absent(self, tmp_path):
+        con = self._con()
+        output_uri = str(tmp_path) + "/"
+        assert read_lock(con, output_uri) is None
+
+    def test_overwrite_replaces_previous(self, tmp_path):
+        con = self._con()
+        output_uri = str(tmp_path) + "/"
+        write_lock(con, output_uri, pod_id="pod-A")
+        first = read_lock(con, output_uri)
+        time.sleep(0.01)
+        write_lock(con, output_uri, pod_id="pod-B")
+        second = read_lock(con, output_uri)
+        assert second["pod_id"] == "pod-B"
+        assert second["started_at"] >= first["started_at"]
+
+    def test_lock_is_stale_returns_false_when_fresh(self):
+        lock = {"started_at": time.time(), "pod_id": "pod-A"}
+        assert lock_is_stale(lock) is False
+
+    def test_lock_is_stale_returns_true_past_ttl(self):
+        lock = {"started_at": time.time() - 10_000, "pod_id": "pod-A"}
+        assert lock_is_stale(lock) is True
+
+    def test_lock_is_stale_handles_none(self):
+        assert lock_is_stale(None) is True

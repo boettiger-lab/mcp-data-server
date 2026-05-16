@@ -5,6 +5,7 @@ Tile requests read directly from the pyramid — no coordination needed.
 """
 import json
 import os
+import time
 from decimal import Decimal
 from typing import List
 
@@ -16,6 +17,12 @@ from tiles.tile_math import content_hash
 # tests/test_tile_pyramid.py). Clients reference this via MapLibre's
 # `source-layer` option.
 MVT_LAYER_NAME = "layer"
+
+# Builds are tracked across pods via lock.json. A lock older than this
+# is treated as abandoned (the owning pod likely crashed mid-build).
+# Configurable for ops; observed builds complete in 100-120s so 900s
+# gives ~8x headroom.
+_LOCK_STALE_SECONDS = int(os.environ.get("TILE_LOCK_STALE_SECONDS", "900"))
 
 
 def build_pyramid_statements(
@@ -150,7 +157,12 @@ def _read_existing_metadata(con: duckdb.DuckDBPyConnection, output_uri: str):
     """Return the cached metadata dict if metadata.json exists at output_uri,
     else None. Mirrors endpoint._read_metadata for s3 vs local paths.
     """
-    uri = f"{output_uri}metadata.json"
+    return _read_json_marker(con, f"{output_uri}metadata.json")
+
+
+def _read_json_marker(con: duckdb.DuckDBPyConnection, uri: str):
+    """Return parsed JSON dict at uri, or None if absent/unreadable.
+    Mirrors _read_existing_metadata's local-vs-remote handling."""
     try:
         if not uri.startswith("s3://") and not uri.startswith("http"):
             if not os.path.exists(uri):
@@ -163,6 +175,47 @@ def _read_existing_metadata(con: duckdb.DuckDBPyConnection, output_uri: str):
         return json.loads(row[0])
     except Exception:
         return None
+
+
+def _write_json_marker(con: duckdb.DuckDBPyConnection, uri: str, payload: dict) -> None:
+    """Write payload as a single-row CSV-as-JSON file at uri. Uses the
+    same COPY pattern as the existing metadata.json write. For local-fs
+    paths, ensures the parent dir exists (DuckDB COPY does not auto-mkdir,
+    and these markers may fire before build_hex_tiles' own makedirs)."""
+    if not uri.startswith("s3://") and not uri.startswith("http"):
+        parent = os.path.dirname(uri)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+    sql = (
+        f"COPY (SELECT '{_json_dumps_escaped(payload)}' AS j) "
+        f"TO '{uri}' (FORMAT CSV, HEADER false, QUOTE '')"
+    )
+    con.sql(sql)
+
+
+def write_lock(con: duckdb.DuckDBPyConnection, output_uri: str, pod_id: str) -> None:
+    """Write {output_uri}lock.json announcing this pod owns the in-progress
+    build for this hash. Overwrites any prior lock at the same path."""
+    payload = {"started_at": time.time(), "pod_id": pod_id}
+    _write_json_marker(con, f"{output_uri}lock.json", payload)
+
+
+def read_lock(con: duckdb.DuckDBPyConnection, output_uri: str):
+    """Return the lock dict {started_at, pod_id} or None if no lock.json."""
+    return _read_json_marker(con, f"{output_uri}lock.json")
+
+
+def lock_is_stale(lock: dict | None, now: float | None = None) -> bool:
+    """A missing lock is 'stale' (treated the same as absent). A lock older
+    than _LOCK_STALE_SECONDS is considered abandoned."""
+    if lock is None:
+        return True
+    started = lock.get("started_at")
+    if not isinstance(started, (int, float)):
+        return True
+    if now is None:
+        now = time.time()
+    return (now - started) > _LOCK_STALE_SECONDS
 
 
 def tile_paths_for_hash(h: str) -> dict:
