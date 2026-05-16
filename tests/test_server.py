@@ -567,5 +567,29 @@ class TestGetHexTileStatus:
         assert result["hash"] == h
 
 
+class TestBuildFailureMarker:
+    def test_build_exception_writes_failed_marker(self, isolated_jobs, monkeypatch):
+        """When the build raises, _do_build's wrapper writes failed.json so
+        other pods (or this pod after _jobs eviction) can see the failure."""
+        import server, tiles.pyramid as pyramid
+        from tiles.pyramid import read_failed, tile_paths_for_hash
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+
+        def boom(con, plan):
+            raise RuntimeError("synthetic build failure")
+        monkeypatch.setattr(server, "build_hex_tiles", boom)
+
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert result["status"] == "failed"
+        assert "synthetic build failure" in result["error"]
+
+        # And the marker is persisted to S3 (here, tmp_path) so a fresh pod sees it.
+        paths = tile_paths_for_hash(result["hash"])
+        failed = read_failed(server._get_tile_con(), paths["output_uri"])
+        assert failed is not None
+        assert "synthetic build failure" in failed["error"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

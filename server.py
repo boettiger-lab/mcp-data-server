@@ -252,6 +252,7 @@ from tiles.pyramid import (
     read_existing_metadata,
     read_failed,
     tile_paths_for_hash,
+    write_failed,
 )
 
 
@@ -299,6 +300,15 @@ def _submit_build(plan: dict) -> concurrent.futures.Future:
             build_con = build_tile_connection()
             try:
                 return build_hex_tiles(build_con, plan)
+            except Exception as exc:
+                # Persist failure so other pods (and this pod after _jobs
+                # eviction) can return status=failed instead of "unknown".
+                try:
+                    write_failed(build_con, plan["output_uri"], error=str(exc))
+                except Exception:
+                    # Marker write failed (S3 blip); preserve original raise.
+                    pass
+                raise
             finally:
                 build_con.close()
 
