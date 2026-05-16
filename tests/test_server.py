@@ -526,6 +526,26 @@ class TestGetHexTileStatus:
         assert status["status"] == "failed"
         assert "boom" in status["error"]
 
+    def test_failed_marker_returns_status_failed(self, isolated_jobs, monkeypatch):
+        """If failed.json exists at the hash's output_uri, get_hex_tile_status
+        returns status=failed with the recorded error — regardless of whether
+        the local pod has any _jobs entry."""
+        import server
+        from tiles.pyramid import write_failed, tile_paths_for_hash
+
+        h = "deadbeefdeadbeef"
+        paths = tile_paths_for_hash(h)
+        # Ensure the hash dir exists before writing the marker.
+        import os
+        os.makedirs(paths["output_uri"], exist_ok=True)
+        con = server._get_tile_con()
+        write_failed(con, paths["output_uri"], error="build blew up")
+
+        result = server.get_hex_tile_status(hash=h)
+        assert result["status"] == "failed"
+        assert result["error"] == "build blew up"
+        assert result["hash"] == h
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

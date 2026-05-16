@@ -250,6 +250,7 @@ from tiles.pyramid import (
     build_hex_tiles,
     cached_result_dict,
     read_existing_metadata,
+    read_failed,
     tile_paths_for_hash,
 )
 
@@ -500,6 +501,10 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
     cached = read_existing_metadata(_get_tile_con(), paths["output_uri"])
     if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
         return _done_response(base, cached)
+
+    failed = read_failed(_get_tile_con(), paths["output_uri"])
+    if failed is not None:
+        return {**base, "status": "failed", "error": failed.get("error", "")}
 
     with _jobs_lock:
         job = _jobs.get(hash)
