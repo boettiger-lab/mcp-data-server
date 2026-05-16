@@ -31,7 +31,7 @@ Do **not** `git pull` on `main` when local `main` has commits matching the just-
 The MCP server runs on the NRP Nautilus Kubernetes cluster.
 
 - **Prod:** `https://duckdb-mcp.nrp-nautilus.io` — 2 replicas, `k8s/deployment.yaml`
-- **Dev:** `https://dev-duckdb-mcp.nrp-nautilus.io` — 1 replica, `k8s/dev-deployment.yaml`
+- **Dev:** `https://dev-duckdb-mcp.nrp-nautilus.io` — 2 replicas, `k8s/dev-deployment.yaml` (must stay ≥2 so cross-pod bugs surface here before prod)
 - **Resources:** 16 Gi RAM requested, up to 160 Gi / 16 CPU per pod
 - **STAC catalog:** `https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json` (set via `STAC_CATALOG_URL` env var)
 - **Ingress:** HAProxy with CORS enabled, 10-minute query timeout, 1-hour SSE tunnel timeout
