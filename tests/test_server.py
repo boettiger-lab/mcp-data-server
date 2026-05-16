@@ -641,6 +641,92 @@ class TestGetHexTileStatus:
         assert result["error"] == "build blew up"
         assert result["hash"] == h
 
+    def test_running_via_cross_pod_lock(self, isolated_jobs, monkeypatch):
+        """A fresh lock from another pod with no local _jobs entry returns
+        status=running with elapsed_seconds from the lock — not 'unknown'."""
+        import server
+        from tiles.pyramid import write_lock, tile_paths_for_hash
+
+        h = "abcdef0123456789"
+        paths = tile_paths_for_hash(h)
+        import os
+        os.makedirs(paths["output_uri"], exist_ok=True)
+        write_lock(server._get_tile_con(), paths["output_uri"], pod_id="other-pod")
+
+        result = server.get_hex_tile_status(hash=h, wait_seconds=0)
+        assert result["status"] == "running"
+        assert "elapsed_seconds" in result
+        assert result["hash"] == h
+
+    def test_long_poll_picks_up_metadata_appearing_on_another_pod(
+        self, isolated_jobs, monkeypatch
+    ):
+        """While long-polling a hash owned by another pod, if metadata.json
+        appears mid-wait, return status=done."""
+        import server, threading, time, os
+        from tiles.pyramid import write_lock, tile_paths_for_hash, _json_dumps_escaped
+
+        h = "1234567890abcdef"
+        paths = tile_paths_for_hash(h)
+        os.makedirs(paths["output_uri"], exist_ok=True)
+        write_lock(server._get_tile_con(), paths["output_uri"], pod_id="other-pod")
+
+        # Simulate the owning pod finishing the build mid-poll.
+        metadata = {
+            "finest_res": 5, "min_res": 2, "agg": "COUNT",
+            "zoom_offset": -1, "value_columns": ["count"],
+            "value_stats": {}, "layer_name": "layer",
+            "bounds": [-180.0, -90.0, 180.0, 90.0],
+            "feature_count_finest": 1,
+        }
+        def write_metadata_after_delay():
+            time.sleep(0.5)
+            con = server._get_tile_con()
+            con.sql(
+                f"COPY (SELECT '{_json_dumps_escaped(metadata)}' AS j) "
+                f"TO '{paths['output_uri']}metadata.json' "
+                f"(FORMAT CSV, HEADER false, QUOTE '')"
+            )
+        t = threading.Thread(target=write_metadata_after_delay)
+        t.start()
+
+        result = server.get_hex_tile_status(hash=h, wait_seconds=5)
+        t.join()
+        assert result["status"] == "done"
+        assert result["finest_res"] == 5
+
+    def test_long_poll_picks_up_failed_appearing_on_another_pod(
+        self, isolated_jobs, monkeypatch
+    ):
+        """While long-polling, if failed.json appears mid-wait, return failed."""
+        import server, threading, time, os
+        from tiles.pyramid import write_lock, write_failed, tile_paths_for_hash
+
+        h = "fedcba9876543210"
+        paths = tile_paths_for_hash(h)
+        os.makedirs(paths["output_uri"], exist_ok=True)
+        write_lock(server._get_tile_con(), paths["output_uri"], pod_id="other-pod")
+
+        def write_failed_after_delay():
+            time.sleep(0.5)
+            write_failed(server._get_tile_con(), paths["output_uri"], error="cross-pod boom")
+        t = threading.Thread(target=write_failed_after_delay)
+        t.start()
+
+        result = server.get_hex_tile_status(hash=h, wait_seconds=5)
+        t.join()
+        assert result["status"] == "failed"
+        assert "cross-pod boom" in result["error"]
+
+    def test_unknown_when_no_local_job_no_lock_no_failed_no_metadata(
+        self, isolated_jobs
+    ):
+        """If nothing exists for the hash anywhere, still return unknown
+        (preserves the existing contract for never-started hashes)."""
+        import server
+        result = server.get_hex_tile_status(hash="0" * 16, wait_seconds=0)
+        assert result["status"] == "unknown"
+
 
 class TestBuildFailureMarker:
     def test_build_exception_writes_failed_marker(self, isolated_jobs, monkeypatch):

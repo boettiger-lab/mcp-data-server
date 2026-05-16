@@ -552,8 +552,35 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
 
     with _jobs_lock:
         job = _jobs.get(hash)
+
     if job is None:
-        return {**base, "status": "unknown"}
+        # No local job — but another pod may own this build. Consult lock.json.
+        lock = read_lock(_get_tile_con(), paths["output_uri"])
+        if lock is None or lock_is_stale(lock):
+            return {**base, "status": "unknown"}
+
+        # Fresh lock from another pod. Long-poll S3 for metadata.json /
+        # failed.json appearance up to wait_seconds. 2s granularity is fine —
+        # this is server-internal, the LLM sees one tool call.
+        deadline = time.time() + wait_seconds
+        while True:
+            cached = read_existing_metadata(_get_tile_con(), paths["output_uri"])
+            if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
+                return _done_response(base, cached)
+            failed_now = read_failed(_get_tile_con(), paths["output_uri"])
+            if failed_now is not None:
+                return {**base, "status": "failed", "error": failed_now.get("error", "")}
+            if time.time() >= deadline:
+                break
+            time.sleep(min(2.0, max(0.1, deadline - time.time())))
+
+        # Wait expired without resolution. Report running with elapsed from lock.
+        return {
+            **base,
+            "status": "running",
+            "elapsed_seconds": round(time.time() - lock["started_at"], 1),
+        }
+
     future = job["future"]
 
     if not future.done() and wait_seconds > 0:
