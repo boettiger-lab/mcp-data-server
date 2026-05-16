@@ -218,6 +218,19 @@ def lock_is_stale(lock: dict | None, now: float | None = None) -> bool:
     return (now - started) > _LOCK_STALE_SECONDS
 
 
+def write_failed(con: duckdb.DuckDBPyConnection, output_uri: str, error: str) -> None:
+    """Write {output_uri}failed.json recording a build exception. Readers
+    treat this as terminal-failed for the hash until a new register_hex_tiles
+    overwrites it."""
+    payload = {"error": str(error), "failed_at": time.time()}
+    _write_json_marker(con, f"{output_uri}failed.json", payload)
+
+
+def read_failed(con: duckdb.DuckDBPyConnection, output_uri: str):
+    """Return the failed dict {error, failed_at} or None if no failed.json."""
+    return _read_json_marker(con, f"{output_uri}failed.json")
+
+
 def tile_paths_for_hash(h: str) -> dict:
     """Return {output_uri, tile_url_template} for a content hash."""
     return {

@@ -733,3 +733,32 @@ class TestLockMarkers:
 
     def test_lock_is_stale_handles_none(self):
         assert lock_is_stale(None) is True
+
+
+from tiles.pyramid import write_failed, read_failed
+
+
+class TestFailedMarkers:
+    def _con(self):
+        return duckdb.connect(":memory:")
+
+    def test_write_then_read_round_trips(self, tmp_path):
+        con = self._con()
+        output_uri = str(tmp_path) + "/"
+        write_failed(con, output_uri, error="Out of memory during COPY")
+        failed = read_failed(con, output_uri)
+        assert failed is not None
+        assert failed["error"] == "Out of memory during COPY"
+        assert isinstance(failed["failed_at"], (int, float))
+
+    def test_read_returns_none_when_absent(self, tmp_path):
+        con = self._con()
+        output_uri = str(tmp_path) + "/"
+        assert read_failed(con, output_uri) is None
+
+    def test_error_string_with_single_quotes_round_trips(self, tmp_path):
+        con = self._con()
+        output_uri = str(tmp_path) + "/"
+        msg = "table 't' doesn't exist; check 'schema'"
+        write_failed(con, output_uri, error=msg)
+        assert read_failed(con, output_uri)["error"] == msg
