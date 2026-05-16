@@ -1,6 +1,7 @@
 import hmac
 import os
 import re
+import socket
 import duckdb
 import uvicorn
 import sys
@@ -249,8 +250,13 @@ from tiles.pyramid import (
     prepare_hex_tiles,
     build_hex_tiles,
     cached_result_dict,
+    lock_is_stale,
     read_existing_metadata,
+    read_failed,
+    read_lock,
     tile_paths_for_hash,
+    write_failed,
+    write_lock,
 )
 
 
@@ -267,6 +273,10 @@ def _get_tile_con():
         _tile_con = build_tile_connection()
     return _tile_con
 
+
+# Pod identity for cross-pod attribution in lock.json. In k8s, HOSTNAME
+# is the pod name; falling back to the OS hostname for local dev.
+_POD_ID = os.environ.get("HOSTNAME") or socket.gethostname()
 
 # Background pyramid builds. Each submitted job gets a fresh DuckDB
 # connection so writes don't serialise behind each other or behind reads.
@@ -298,6 +308,15 @@ def _submit_build(plan: dict) -> concurrent.futures.Future:
             build_con = build_tile_connection()
             try:
                 return build_hex_tiles(build_con, plan)
+            except Exception as exc:
+                # Persist failure so other pods (and this pod after _jobs
+                # eviction) can return status=failed instead of "unknown".
+                try:
+                    write_failed(build_con, plan["output_uri"], error=str(exc))
+                except Exception:
+                    # Marker write failed (S3 blip); preserve original raise.
+                    pass
+                raise
             finally:
                 build_con.close()
 
@@ -421,6 +440,32 @@ def register_hex_tiles(
         result["status"] = "done"
         return result
 
+    failed = read_failed(read_con, plan["output_uri"])
+    if failed is not None:
+        return {
+            "hash": plan["hash"],
+            "tile_url_template": plan["tile_url_template"],
+            "status": "failed",
+            "error": failed.get("error", ""),
+        }
+
+    existing_lock = read_lock(read_con, plan["output_uri"])
+    if existing_lock is not None and not lock_is_stale(existing_lock):
+        # Another pod owns this build. Don't submit a duplicate.
+        return {
+            "hash": plan["hash"],
+            "tile_url_template": plan["tile_url_template"],
+            "status": "running",
+            "elapsed_seconds": round(time.time() - existing_lock["started_at"], 1),
+        }
+
+    try:
+        write_lock(read_con, plan["output_uri"], pod_id=_POD_ID)
+    except Exception:
+        # S3 blip writing lock; proceed anyway. Worst case is a duplicate
+        # build elsewhere — see spec "Race we knowingly accept".
+        pass
+
     future = _submit_build(plan)
     try:
         result = future.result(timeout=_BUILD_INLINE_WAIT_SECONDS)
@@ -501,10 +546,41 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
     if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
         return _done_response(base, cached)
 
+    failed = read_failed(_get_tile_con(), paths["output_uri"])
+    if failed is not None:
+        return {**base, "status": "failed", "error": failed.get("error", "")}
+
     with _jobs_lock:
         job = _jobs.get(hash)
+
     if job is None:
-        return {**base, "status": "unknown"}
+        # No local job — but another pod may own this build. Consult lock.json.
+        lock = read_lock(_get_tile_con(), paths["output_uri"])
+        if lock is None or lock_is_stale(lock):
+            return {**base, "status": "unknown"}
+
+        # Fresh lock from another pod. Long-poll S3 for metadata.json /
+        # failed.json appearance up to wait_seconds. 2s granularity is fine —
+        # this is server-internal, the LLM sees one tool call.
+        deadline = time.time() + wait_seconds
+        while True:
+            cached = read_existing_metadata(_get_tile_con(), paths["output_uri"])
+            if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
+                return _done_response(base, cached)
+            failed_now = read_failed(_get_tile_con(), paths["output_uri"])
+            if failed_now is not None:
+                return {**base, "status": "failed", "error": failed_now.get("error", "")}
+            if time.time() >= deadline:
+                break
+            time.sleep(min(2.0, max(0.1, deadline - time.time())))
+
+        # Wait expired without resolution. Report running with elapsed from lock.
+        return {
+            **base,
+            "status": "running",
+            "elapsed_seconds": round(time.time() - lock["started_at"], 1),
+        }
+
     future = job["future"]
 
     if not future.done() and wait_seconds > 0:

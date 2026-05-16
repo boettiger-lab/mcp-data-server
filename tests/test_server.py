@@ -385,6 +385,101 @@ class TestRegisterHexTilesAsync:
         server._jobs[r1["hash"]]["future"].result(timeout=10)
         assert len(build_calls) == 1, f"expected one build, got {len(build_calls)}"
 
+    def test_register_returns_failed_when_failed_marker_exists(self, isolated_jobs, monkeypatch):
+        """If failed.json from a prior build exists for the hash a new
+        register_hex_tiles would produce, return it immediately — don't
+        kick off a redundant build."""
+        import server
+        from tiles.pyramid import write_failed, prepare_hex_tiles
+
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        # Compute the hash the registration would land on, plant a failed marker.
+        plan = prepare_hex_tiles(con=server._get_tile_con(), sql=sql, agg="AVG")
+        import os
+        os.makedirs(plan["output_uri"], exist_ok=True)
+        write_failed(server._get_tile_con(), plan["output_uri"], error="prior build OOM")
+
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert result["status"] == "failed"
+        assert result["error"] == "prior build OOM"
+        # No background build should have been queued.
+        assert plan["hash"] not in server._jobs
+
+    def test_register_writes_lock_before_submitting_build(self, isolated_jobs, monkeypatch):
+        """After register_hex_tiles returns status=running, lock.json exists
+        at the hash's output_uri so polls from any pod can see the in-flight
+        build."""
+        import server, tiles.pyramid as pyramid
+        from tiles.pyramid import read_lock
+        import time
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 0.05)
+        orig_build = pyramid.build_hex_tiles
+        def slow_build(con, plan):
+            time.sleep(0.5)
+            return orig_build(con, plan)
+        monkeypatch.setattr(server, "build_hex_tiles", slow_build)
+
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert result["status"] == "running"
+
+        from tiles.pyramid import tile_paths_for_hash
+        paths = tile_paths_for_hash(result["hash"])
+        lock = read_lock(server._get_tile_con(), paths["output_uri"])
+        assert lock is not None
+        assert lock["pod_id"] == server._POD_ID
+
+        server._jobs[result["hash"]]["future"].result(timeout=10)
+
+    def test_register_dedups_via_fresh_lock_from_other_pod(self, isolated_jobs, monkeypatch):
+        """If lock.json from another pod exists (and is fresh), return
+        status=running without submitting a new build."""
+        import server
+        from tiles.pyramid import write_lock, prepare_hex_tiles
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+
+        # Plant a fresh lock as if another pod had started the build.
+        plan = prepare_hex_tiles(con=server._get_tile_con(), sql=sql, agg="AVG")
+        import os
+        os.makedirs(plan["output_uri"], exist_ok=True)
+        write_lock(server._get_tile_con(), plan["output_uri"], pod_id="other-pod-X")
+
+        # Make build_hex_tiles raise if anyone calls it — we expect dedup.
+        def boom(con, plan):
+            raise AssertionError("build should have been deduped")
+        monkeypatch.setattr(server, "build_hex_tiles", boom)
+
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert result["status"] == "running"
+        assert result["hash"] == plan["hash"]
+        # And no local _jobs entry was created.
+        assert plan["hash"] not in server._jobs
+
+    def test_register_ignores_stale_lock_and_starts_fresh_build(self, isolated_jobs, monkeypatch):
+        """A lock older than _LOCK_STALE_SECONDS is treated as absent —
+        register proceeds with a new build and overwrites the stale lock."""
+        import server
+        from tiles.pyramid import write_lock, prepare_hex_tiles, read_lock
+        import tiles.pyramid as pyramid
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        plan = prepare_hex_tiles(con=server._get_tile_con(), sql=sql, agg="AVG")
+        import os, time
+        os.makedirs(plan["output_uri"], exist_ok=True)
+        # Tiny TTL so we don't need to fabricate ancient timestamps.
+        monkeypatch.setattr(pyramid, "_LOCK_STALE_SECONDS", 0)
+        write_lock(server._get_tile_con(), plan["output_uri"], pod_id="dead-pod")
+        time.sleep(0.05)  # ensure (now - started_at) > 0
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        # Stale lock didn't block the build, which finished inline.
+        assert result["status"] == "done"
+        # The fresh build overwrote the stale lock with its own (now done).
+        lock = read_lock(server._get_tile_con(), plan["output_uri"])
+        # The lock may still be present (we don't delete) but is from this pod.
+        if lock is not None:
+            assert lock["pod_id"] != "dead-pod"
+
 
 class TestGetHexTileStatus:
     def test_unknown_for_unrecognised_hash(self, isolated_jobs):
@@ -525,6 +620,136 @@ class TestGetHexTileStatus:
         status = server.get_hex_tile_status(hash=result["hash"])
         assert status["status"] == "failed"
         assert "boom" in status["error"]
+
+    def test_failed_marker_returns_status_failed(self, isolated_jobs, monkeypatch):
+        """If failed.json exists at the hash's output_uri, get_hex_tile_status
+        returns status=failed with the recorded error — regardless of whether
+        the local pod has any _jobs entry."""
+        import server
+        from tiles.pyramid import write_failed, tile_paths_for_hash
+
+        h = "deadbeefdeadbeef"
+        paths = tile_paths_for_hash(h)
+        # Ensure the hash dir exists before writing the marker.
+        import os
+        os.makedirs(paths["output_uri"], exist_ok=True)
+        con = server._get_tile_con()
+        write_failed(con, paths["output_uri"], error="build blew up")
+
+        result = server.get_hex_tile_status(hash=h)
+        assert result["status"] == "failed"
+        assert result["error"] == "build blew up"
+        assert result["hash"] == h
+
+    def test_running_via_cross_pod_lock(self, isolated_jobs, monkeypatch):
+        """A fresh lock from another pod with no local _jobs entry returns
+        status=running with elapsed_seconds from the lock — not 'unknown'."""
+        import server
+        from tiles.pyramid import write_lock, tile_paths_for_hash
+
+        h = "abcdef0123456789"
+        paths = tile_paths_for_hash(h)
+        import os
+        os.makedirs(paths["output_uri"], exist_ok=True)
+        write_lock(server._get_tile_con(), paths["output_uri"], pod_id="other-pod")
+
+        result = server.get_hex_tile_status(hash=h, wait_seconds=0)
+        assert result["status"] == "running"
+        assert "elapsed_seconds" in result
+        assert result["hash"] == h
+
+    def test_long_poll_picks_up_metadata_appearing_on_another_pod(
+        self, isolated_jobs, monkeypatch
+    ):
+        """While long-polling a hash owned by another pod, if metadata.json
+        appears mid-wait, return status=done."""
+        import server, threading, time, os
+        from tiles.pyramid import write_lock, tile_paths_for_hash, _json_dumps_escaped
+
+        h = "1234567890abcdef"
+        paths = tile_paths_for_hash(h)
+        os.makedirs(paths["output_uri"], exist_ok=True)
+        write_lock(server._get_tile_con(), paths["output_uri"], pod_id="other-pod")
+
+        # Simulate the owning pod finishing the build mid-poll.
+        metadata = {
+            "finest_res": 5, "min_res": 2, "agg": "COUNT",
+            "zoom_offset": -1, "value_columns": ["count"],
+            "value_stats": {}, "layer_name": "layer",
+            "bounds": [-180.0, -90.0, 180.0, 90.0],
+            "feature_count_finest": 1,
+        }
+        def write_metadata_after_delay():
+            time.sleep(0.5)
+            con = server._get_tile_con()
+            con.sql(
+                f"COPY (SELECT '{_json_dumps_escaped(metadata)}' AS j) "
+                f"TO '{paths['output_uri']}metadata.json' "
+                f"(FORMAT CSV, HEADER false, QUOTE '')"
+            )
+        t = threading.Thread(target=write_metadata_after_delay)
+        t.start()
+
+        result = server.get_hex_tile_status(hash=h, wait_seconds=5)
+        t.join()
+        assert result["status"] == "done"
+        assert result["finest_res"] == 5
+
+    def test_long_poll_picks_up_failed_appearing_on_another_pod(
+        self, isolated_jobs, monkeypatch
+    ):
+        """While long-polling, if failed.json appears mid-wait, return failed."""
+        import server, threading, time, os
+        from tiles.pyramid import write_lock, write_failed, tile_paths_for_hash
+
+        h = "fedcba9876543210"
+        paths = tile_paths_for_hash(h)
+        os.makedirs(paths["output_uri"], exist_ok=True)
+        write_lock(server._get_tile_con(), paths["output_uri"], pod_id="other-pod")
+
+        def write_failed_after_delay():
+            time.sleep(0.5)
+            write_failed(server._get_tile_con(), paths["output_uri"], error="cross-pod boom")
+        t = threading.Thread(target=write_failed_after_delay)
+        t.start()
+
+        result = server.get_hex_tile_status(hash=h, wait_seconds=5)
+        t.join()
+        assert result["status"] == "failed"
+        assert "cross-pod boom" in result["error"]
+
+    def test_unknown_when_no_local_job_no_lock_no_failed_no_metadata(
+        self, isolated_jobs
+    ):
+        """If nothing exists for the hash anywhere, still return unknown
+        (preserves the existing contract for never-started hashes)."""
+        import server
+        result = server.get_hex_tile_status(hash="0" * 16, wait_seconds=0)
+        assert result["status"] == "unknown"
+
+
+class TestBuildFailureMarker:
+    def test_build_exception_writes_failed_marker(self, isolated_jobs, monkeypatch):
+        """When the build raises, _do_build's wrapper writes failed.json so
+        other pods (or this pod after _jobs eviction) can see the failure."""
+        import server, tiles.pyramid as pyramid
+        from tiles.pyramid import read_failed, tile_paths_for_hash
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+
+        def boom(con, plan):
+            raise RuntimeError("synthetic build failure")
+        monkeypatch.setattr(server, "build_hex_tiles", boom)
+
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert result["status"] == "failed"
+        assert "synthetic build failure" in result["error"]
+
+        # And the marker is persisted to S3 (here, tmp_path) so a fresh pod sees it.
+        paths = tile_paths_for_hash(result["hash"])
+        failed = read_failed(server._get_tile_con(), paths["output_uri"])
+        assert failed is not None
+        assert "synthetic build failure" in failed["error"]
 
 
 if __name__ == "__main__":
