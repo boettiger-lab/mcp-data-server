@@ -1,6 +1,7 @@
 import hmac
 import os
 import re
+import socket
 import duckdb
 import uvicorn
 import sys
@@ -249,10 +250,13 @@ from tiles.pyramid import (
     prepare_hex_tiles,
     build_hex_tiles,
     cached_result_dict,
+    lock_is_stale,
     read_existing_metadata,
     read_failed,
+    read_lock,
     tile_paths_for_hash,
     write_failed,
+    write_lock,
 )
 
 
@@ -269,6 +273,10 @@ def _get_tile_con():
         _tile_con = build_tile_connection()
     return _tile_con
 
+
+# Pod identity for cross-pod attribution in lock.json. In k8s, HOSTNAME
+# is the pod name; falling back to the OS hostname for local dev.
+_POD_ID = os.environ.get("HOSTNAME") or socket.gethostname()
 
 # Background pyramid builds. Each submitted job gets a fresh DuckDB
 # connection so writes don't serialise behind each other or behind reads.
@@ -440,6 +448,23 @@ def register_hex_tiles(
             "status": "failed",
             "error": failed.get("error", ""),
         }
+
+    existing_lock = read_lock(read_con, plan["output_uri"])
+    if existing_lock is not None and not lock_is_stale(existing_lock):
+        # Another pod owns this build. Don't submit a duplicate.
+        return {
+            "hash": plan["hash"],
+            "tile_url_template": plan["tile_url_template"],
+            "status": "running",
+            "elapsed_seconds": round(time.time() - existing_lock["started_at"], 1),
+        }
+
+    try:
+        write_lock(read_con, plan["output_uri"], pod_id=_POD_ID)
+    except Exception:
+        # S3 blip writing lock; proceed anyway. Worst case is a duplicate
+        # build elsewhere — see spec "Race we knowingly accept".
+        pass
 
     future = _submit_build(plan)
     try:

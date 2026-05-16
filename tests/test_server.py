@@ -405,6 +405,81 @@ class TestRegisterHexTilesAsync:
         # No background build should have been queued.
         assert plan["hash"] not in server._jobs
 
+    def test_register_writes_lock_before_submitting_build(self, isolated_jobs, monkeypatch):
+        """After register_hex_tiles returns status=running, lock.json exists
+        at the hash's output_uri so polls from any pod can see the in-flight
+        build."""
+        import server, tiles.pyramid as pyramid
+        from tiles.pyramid import read_lock
+        import time
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 0.05)
+        orig_build = pyramid.build_hex_tiles
+        def slow_build(con, plan):
+            time.sleep(0.5)
+            return orig_build(con, plan)
+        monkeypatch.setattr(server, "build_hex_tiles", slow_build)
+
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert result["status"] == "running"
+
+        from tiles.pyramid import tile_paths_for_hash
+        paths = tile_paths_for_hash(result["hash"])
+        lock = read_lock(server._get_tile_con(), paths["output_uri"])
+        assert lock is not None
+        assert lock["pod_id"] == server._POD_ID
+
+        server._jobs[result["hash"]]["future"].result(timeout=10)
+
+    def test_register_dedups_via_fresh_lock_from_other_pod(self, isolated_jobs, monkeypatch):
+        """If lock.json from another pod exists (and is fresh), return
+        status=running without submitting a new build."""
+        import server
+        from tiles.pyramid import write_lock, prepare_hex_tiles
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+
+        # Plant a fresh lock as if another pod had started the build.
+        plan = prepare_hex_tiles(con=server._get_tile_con(), sql=sql, agg="AVG")
+        import os
+        os.makedirs(plan["output_uri"], exist_ok=True)
+        write_lock(server._get_tile_con(), plan["output_uri"], pod_id="other-pod-X")
+
+        # Make build_hex_tiles raise if anyone calls it — we expect dedup.
+        def boom(con, plan):
+            raise AssertionError("build should have been deduped")
+        monkeypatch.setattr(server, "build_hex_tiles", boom)
+
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert result["status"] == "running"
+        assert result["hash"] == plan["hash"]
+        # And no local _jobs entry was created.
+        assert plan["hash"] not in server._jobs
+
+    def test_register_ignores_stale_lock_and_starts_fresh_build(self, isolated_jobs, monkeypatch):
+        """A lock older than _LOCK_STALE_SECONDS is treated as absent —
+        register proceeds with a new build and overwrites the stale lock."""
+        import server
+        from tiles.pyramid import write_lock, prepare_hex_tiles, read_lock
+        import tiles.pyramid as pyramid
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val"
+        plan = prepare_hex_tiles(con=server._get_tile_con(), sql=sql, agg="AVG")
+        import os, time
+        os.makedirs(plan["output_uri"], exist_ok=True)
+        # Tiny TTL so we don't need to fabricate ancient timestamps.
+        monkeypatch.setattr(pyramid, "_LOCK_STALE_SECONDS", 0)
+        write_lock(server._get_tile_con(), plan["output_uri"], pod_id="dead-pod")
+        time.sleep(0.05)  # ensure (now - started_at) > 0
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+
+        result = server.register_hex_tiles(sql=sql, agg="AVG")
+        # Stale lock didn't block the build, which finished inline.
+        assert result["status"] == "done"
+        # The fresh build overwrote the stale lock with its own (now done).
+        lock = read_lock(server._get_tile_con(), plan["output_uri"])
+        # The lock may still be present (we don't delete) but is from this pod.
+        if lock is not None:
+            assert lock["pod_id"] != "dead-pod"
+
 
 class TestGetHexTileStatus:
     def test_unknown_for_unrecognised_hash(self, isolated_jobs):
