@@ -3,7 +3,7 @@
 **Most datasets have H3 hex versions.** Always use them for spatial operations instead of GeoParquet geometry columns.
 
 **Always use H3 hex datasets for filtering and joining — never spatial predicates on GeoParquet.**
-When a dataset appears in the STAC catalog as GeoParquet, a hex-indexed version almost always exists alongside it. Find and use the hex version. Never use `ST_Within`, `ST_Intersects`, `ST_Contains`, or similar predicates to filter or join large datasets — on global data these run 10+ minutes and return nothing useful.
+When a dataset appears in the STAC catalog as GeoParquet, a hex-indexed version almost always exists alongside it. Find and use the hex version. Never use `ST_Within`, `ST_Intersects`, `ST_Contains`, or similar predicates to filter or join large datasets — on global data these run 10+ minutes and return nothing useful. (Narrow exception: line datasets where exact mileage at AOI boundaries is required — see Problem 4.)
 
 If you browse the catalog and only find a GeoParquet with no hex equivalent, **say so** rather than falling back to spatial predicates. A missing hex version is a data pipeline gap (not something to work around silently).
 
@@ -29,7 +29,7 @@ All spatial operations are hex joins — two datasets overlap wherever their hex
 
 - Always report **areas** (km², acres, etc.), never raw hex counts
 - For nationwide/global aggregates over millions of cells, `APPROX_COUNT_DISTINCT(hN)` is fast and accurate to ~1–2%. For per-group breakdowns (per-state, per-class, per-county, per-district) where each group has fewer than ~1M distinct cells, use `COUNT(DISTINCT hN)` instead — DuckDB's HLL error grows steeply at smaller cardinalities and compounds inside `GROUP BY` (real-world per-group errors of +30% have been observed). Total scan size matters less than per-group cell count.
-- **Never SUM area columns** (ACRES, GIS_Acres, area_ha, etc.) on hex data. These store the source polygon's total area repeated on every hex row. `SUM(ACRES)` = polygon_area × num_hex_cells — wrong by 10³–10⁶×. Always compute area from hex cells instead. Note: `DISTINCT` deduplication removes duplicate rows for the same feature but does not resolve overlapping features — two features covering the same ground still sum their acreages independently. Counting distinct hex cells × `area_per_cell` is the only method immune to this, since it counts physical cells rather than feature declarations (see the previous bullet for `APPROX` vs exact `COUNT DISTINCT`).
+- **Never SUM area columns** (ACRES, GIS_Acres, area_ha, etc.) on hex data. These store the source polygon's total area repeated on every hex row. `SUM(ACRES)` = polygon_area × num_hex_cells — wrong by 10³–10⁶×. Always compute area from hex cells instead. Note: `DISTINCT` deduplication removes duplicate rows for the same feature but does not resolve overlapping features — two features covering the same ground still sum their acreages independently. Counting distinct hex cells × `area_per_cell` is the only method immune to this, since it counts physical cells rather than feature declarations (see the previous bullet for `APPROX` vs exact `COUNT DISTINCT`). The same row-replication problem applies to `length_*` columns on line hex at smaller scale — see Problem 4.
 
 ## Area Conversion
 
@@ -113,9 +113,9 @@ JOIN gfw ON h3_cell_to_parent(wdpa.h8, 6) = gfw.h6
 
 When one side lacks h0, omit it from that side. Prefer hex-partitioned variants (with h0) when available for partition pruning.
 
-## Multiple Rows per Hex: Three Different Problems
+## Multiple Rows per Hex: Four Different Problems
 
-There are **three distinct reasons** a dataset can have multiple rows with the same `h8` value, and they require different fixes:
+There are **four distinct reasons** a dataset can have multiple rows with the same `h8` value, and they require different fixes:
 
 ---
 
@@ -236,6 +236,28 @@ GROUP BY a.h8;
 
 ---
 
+### Problem 4 — Lines: per-segment columns and AOI boundaries
+
+*(Applies only to line-derived hex: source geometry is `LineString`/`MultiLineString`, columns like `length_miles`, `length_km`. Skip if your dataset has area/acres columns or is raster-derived.)*
+
+Each segment tiles into ~2–6 hex rows at h8, with per-segment values (length, owner, agency) repeated on every row.
+
+- **Sum `length_*` only after deduplicating by feature** — apply the Problem 1 pattern: `SELECT DISTINCT _cng_fid, length_miles, ...` first, then `SUM`. Per-segment attributes are repeated on every hex row the segment occupies.
+- **For segment counts or presence ("which trails cross this AOI"), use the hex SEMI JOIN with `COUNT(DISTINCT _cng_fid)`** — fast and accurate.
+- **For mileage *inside* an AOI (state, county, fire perimeter), use the GeoParquet**, not a hex JOIN. A hex match tells you *which* segments touch the AOI; the segment's full length is carried on every hex row, so summing through the JOIN credits each segment's whole length to every AOI it touches. Compute the intersected length directly:
+
+```sql
+SELECT p.STUSPS, SUM(ST_Length(ST_Intersection(t.geom, p.geom)) / 1609.344) AS miles
+FROM read_parquet('<line_geoparquet>') t
+JOIN read_parquet('<aoi_geoparquet>') p
+  ON ST_Intersects(t.geom, p.geom)
+GROUP BY p.STUSPS
+```
+
+For large AOI sets (counties, tracts, fire perimeters), pre-filter with a hex `SEMI JOIN` on `_cng_fid` to a candidate list, then run `ST_Intersection` on the GeoParquet for those candidates only.
+
+---
+
 ### Diagnostic: check rows-per-hex before writing queries
 
 When uncertain, run this check on a single h0 partition first:
@@ -251,7 +273,7 @@ FROM read_parquet('<STAC_HEX_PATH_SINGLE_PARTITION>');
 | avg_rows_per_hex | Meaning |
 |---|---|
 | ≈ 1 | One row per hex — check `_cng_fid` presence; if vector, tiling dedup still applies to attribute sums |
-| > 1, integer-ish | Overlapping polygons — use DISTINCT |
+| > 1, integer-ish | Overlapping polygons — use DISTINCT (or Problem 4 if `length_*` columns / no area columns) |
 | >> 1, non-integer | Raster pixels — use GROUP BY + SUM/AVG/MODE |
 
 ## Generating Output Files

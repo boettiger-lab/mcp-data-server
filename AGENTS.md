@@ -66,6 +66,7 @@ It has no memory between requests. Its only context is what is injected at call 
 **Files it reads (injected as prompts):**
 - `query-setup.md` — required DuckDB setup SQL, must run before every query
 - `query-optimization.md` — short, actionable query-writing rules
+- `h3-guide.md` — H3 hex data model and per-problem patterns (tiling, overlap, raster, lines)
 - `datasets.md` — STAC catalog summary, dataset paths, column schemas
 - `assistant-role.md` — role and response style instructions
 
@@ -74,7 +75,9 @@ It has no memory between requests. Its only context is what is injected at call 
 - Instructions must be short, concrete, and unambiguous
 - No debugging advice, no explanation of DuckDB internals, no "check X before Y"
 - No meta-commentary about why rules exist — just the rules
-- Every example must be a correct, copy-pasteable query
+- **Every SQL example must be the correct shape. Never include ❌ / antipattern SQL blocks** — small LLMs reproduce the structure verbatim (variable names, CTE shape) regardless of the ❌ marker. Negation priming overrides the marker. State the rule in prose; show only the correct query. See PR #134 / Issue #133 for measured 2× reduction in antipattern rate after removing ❌ blocks.
+- Prefer positive framing in bullets: "Do X first, then Y" beats "❌ Don't Y before X". Existing prose "Never X" rules without SQL bodies can stay — the hazard is SQL antipatterns, not the word "never."
+- When adding guidance for a niche case (e.g., line datasets when most datasets are polygons), keep it short and gate with a "Skip if your dataset is X" header so models doing the common case skim past. Niche fixes must not displace attention from the dominant workload.
 
 ---
 
@@ -105,13 +108,30 @@ instructions.
 
 ---
 
-## Failure mode to avoid
+## Failure modes to avoid
 
-In March 2026, a small LLM generated a query omitting h0 from a join (violating the
-rule in `query-optimization.md`). The resulting slow query was diagnosed as "S3 DPP
-is broken" rather than "the query violated the h0-in-join rule." Hours of investigation
-followed, producing `optimization-design-notes.md` content that incorrectly characterized
-the rule as wrong. A subsequent Claude session read those notes and tried to remove the
+### Misdiagnosing a rule-violation as an infrastructure bug (March 2026)
+
+A small LLM generated a query omitting h0 from a join (violating the rule in
+`query-optimization.md`). The resulting slow query was diagnosed as "S3 DPP is broken"
+rather than "the query violated the h0-in-join rule." Hours of investigation followed,
+producing `optimization-design-notes.md` content that incorrectly characterized the
+rule as wrong. A subsequent Claude session read those notes and tried to remove the
 correct rule from `query-optimization.md`.
 
-The fix is this document: keep the two processes and their files clearly separated.
+The fix is this document: keep the two processes and their files clearly separated, and
+diagnose rule violations before infrastructure.
+
+### ❌ examples in prompts get reproduced verbatim (May 2026)
+
+Baseline matrix runs (issue #133) showed small LLMs reproducing the ❌-marked DPP
+antipattern CTE — same variable names, same shape — at a 50% first-query rate.
+The ❌ marker did not suppress reuse; if anything the named, copy-pasteable SQL
+primed it. PR #134 removed the ❌ blocks and hoisted the rule into the CRITICAL
+SQL RULES header, halving the antipattern rate.
+
+When extending the prompt artifacts (e.g., adding a new "Problem N" section to
+`h3-guide.md`), the temptation to mirror the structure of the existing problems —
+which already showed ❌/✅ pairs — is high. Resist it. Even on guidance covering a
+new failure mode (lines, sparse rasters, etc.), include only the ✅ form. Past sections
+that still carry ❌ blocks are the next thing to migrate, not a pattern to copy.
