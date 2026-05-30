@@ -287,6 +287,57 @@ class TestTileRouteMounted:
         assert "get_hex_tile_status" in tool_names
 
 
+class TestHealthz:
+    """The /healthz endpoint is the kubelet probe target (see issue #157).
+    Replaces a TCP-only probe so a wedged uvicorn event loop fails fast."""
+
+    def _build_app(self, with_auth_middleware=False):
+        from server import mcp, _healthz, _BearerAuthMiddleware, mount_tiles
+        app = mcp.streamable_http_app()
+        app.router.redirect_slashes = False
+        mount_tiles(app)
+        app.add_route("/healthz", _healthz, methods=["GET"])
+        if with_auth_middleware:
+            app.add_middleware(_BearerAuthMiddleware)
+        return app
+
+    def test_healthz_route_registered(self):
+        """After app construction, /healthz appears in the route table."""
+        app = self._build_app()
+        paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/healthz" in paths
+
+    def test_healthz_returns_ok_fast(self):
+        """GET /healthz returns 200 with {"ok": true}. Async handler does no I/O
+        and no executor work — fails only if the event loop itself is starved."""
+        from starlette.testclient import TestClient
+        client = TestClient(self._build_app())
+        r = client.get("/healthz")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True}
+
+    def test_healthz_bypasses_auth_middleware(self):
+        """When MCP_AUTH_TOKEN is set, the kubelet still needs to probe — but the
+        kubelet doesn't carry the token. The middleware must let /healthz through
+        unauthenticated. If a future edit drops the path bypass, this test fails."""
+        import server
+        from starlette.testclient import TestClient
+        original = server._MCP_AUTH_TOKEN
+        server._MCP_AUTH_TOKEN = "test-token"
+        try:
+            client = TestClient(self._build_app(with_auth_middleware=True))
+            # /healthz works with no auth header.
+            r = client.get("/healthz")
+            assert r.status_code == 200, r.text
+            assert r.json() == {"ok": True}
+            # /mcp without a valid token is rejected — confirms the middleware
+            # IS installed and gating other paths.
+            r2 = client.post("/mcp", json={"jsonrpc": "2.0", "method": "ping", "id": 1})
+            assert r2.status_code == 401
+        finally:
+            server._MCP_AUTH_TOKEN = original
+
+
 @pytest.fixture
 def isolated_jobs(monkeypatch, tmp_path):
     """Reset the module-level _jobs dict and point the tile bucket at tmp_path

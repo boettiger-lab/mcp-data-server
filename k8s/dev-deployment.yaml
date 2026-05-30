@@ -47,9 +47,28 @@ spec:
             cpu: 64
         ports:
         - containerPort: 8000
+        # Probes exercise an actual HTTP request (GET /healthz) rather than a
+        # bare TCP accept. Under a TCP-only probe a pod whose uvicorn event loop
+        # is starved (e.g. by a runaway DuckDB query saturating CPU/memory) still
+        # passes — the kernel accepts the connection regardless of whether the
+        # app writes a response — and HAProxy keeps routing ~50% of traffic to a
+        # wedged backend. See issue #157.
         readinessProbe:
-          tcpSocket:
+          httpGet:
+            path: /healthz
             port: 8000
           initialDelaySeconds: 15
           periodSeconds: 5
-          failureThreshold: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        # Liveness restarts a chronically wedged pod (3 minutes of unresponsive
+        # /healthz). Longer than readiness so a temporarily slow pod gets pulled
+        # from the Service first; only a deeply stuck one is killed.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 6

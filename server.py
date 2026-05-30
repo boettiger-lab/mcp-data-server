@@ -619,11 +619,22 @@ _MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "").strip()
 
 class _BearerAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
+        # /healthz must remain reachable to the kubelet probe even with auth on.
+        if request.url.path == "/healthz":
+            return await call_next(request)
         auth = request.headers.get("Authorization", "")
         supplied = auth[len("Bearer "):] if auth.startswith("Bearer ") else ""
         if not hmac.compare_digest(supplied.encode(), _MCP_AUTH_TOKEN.encode()):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         return await call_next(request)
+
+
+async def _healthz(_request):
+    # Async, no executor work — fails fast if uvicorn's event loop is starved
+    # (e.g. a runaway DuckDB query saturating CPU/memory on the pod). That's the
+    # signal we want: a wedged pod becomes NotReady within ~15s and HAProxy
+    # stops routing to it. See issue #157.
+    return JSONResponse({"ok": True})
 
 # -------------------------------------------------------------------------
 # 10. SERVER START
@@ -645,6 +656,7 @@ if __name__ == "__main__":
     app = mcp.streamable_http_app()
     app.router.redirect_slashes = False
     mount_tiles(app)
+    app.add_route("/healthz", _healthz, methods=["GET"])
 
     if _MCP_AUTH_TOKEN:
         app.add_middleware(_BearerAuthMiddleware)
