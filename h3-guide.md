@@ -121,14 +121,8 @@ There are **four distinct reasons** a dataset can have multiple rows with the sa
 
 ### Problem 1 — Tiling: same feature repeated across many hexes
 
-Every vector polygon is tiled into N hex rows — one per H3 cell it covers — all sharing the same `_cng_fid` and identical feature-level attributes (name, declared acres, funding amount). Summing or counting without deduplicating by feature multiplies attribute values by N.
+Every vector polygon is tiled into N hex rows — one per H3 cell it covers — all sharing the same `_cng_fid` and identical feature-level attributes (name, declared acres, funding amount). Summing an attribute directly multiplies it by N; deduplicate to one row per feature first:
 
-**❌ WRONG: sums amount N times (once per hex row)**
-```sql
-SELECT SUM(amount) FROM read_parquet('<hex>') WHERE state_id = 'CA'
-```
-
-**✅ CORRECT: one amount per feature**
 ```sql
 SELECT SUM(amount) FROM (
   SELECT DISTINCT _cng_fid, amount
@@ -141,17 +135,9 @@ SELECT SUM(amount) FROM (
 
 **Cross-collection case: flat table joined to a hex table for spatial assignment**
 
-When the aggregate value lives in a flat (non-hex) table, joining it to a hex table replicates it across N hex rows. Apply the same principle — deduplicate by feature ID — but the `DISTINCT` must be on `(feature_id, geography_id)`, not on hex coordinates:
+When the aggregate value lives in a flat (non-hex) table, joining it to a hex table replicates it across N hex rows. Apply the same principle — deduplicate by feature ID — but the `DISTINCT` must be on `(feature_id, geography_id)`, **not on hex coordinates**: hex coordinates are already unique per row, so `DISTINCT (h10, h0, value)` doesn't collapse the per-feature replication. The flat table is joined **last**, after the spatial assignment is deduplicated:
 
 ```sql
--- ❌ WRONG: DISTINCT on hex coords doesn't help — they're already unique per row
-tx_sites_hex AS (
-  SELECT DISTINCT s.h10, s.h0, f.total_federal   -- still N rows per tpl_id
-  FROM flat_funding f
-  JOIN read_parquet('<sites_hex>') s USING (tpl_id)
-)
-
--- ✅ CORRECT: DISTINCT on (feature_id, geography_id) gives one row per assignment
 site_district AS (
   SELECT DISTINCT s.tpl_id, c.GEOID
   FROM read_parquet('<sites_hex>') s
@@ -163,21 +149,12 @@ JOIN flat_funding f USING (tpl_id)
 GROUP BY sd.GEOID
 ```
 
-The flat table is joined **last**, after the spatial assignment is deduplicated.
-
 ---
 
 ### Problem 2 — Overlapping polygons (vector datasets)
 
-Some vector datasets store one row per *feature* (e.g. each protected area). Multiple features can cover the same hex, producing duplicate `h8` values. Fix: **deduplicate with DISTINCT** before joining.
+Some vector datasets store one row per *feature* (e.g. each protected area). Multiple features can cover the same hex, producing duplicate `h8` values. Joining the raw hex table directly inflates downstream aggregates (two features over the same cell sum carbon twice). Deduplicate to unique `(h8, h0)` pairs first:
 
-**❌ WRONG:** Joining directly multiplies rows
-```sql
--- If 2 features cover hex ABC, this counts carbon twice
-JOIN read_parquet('<STAC_HEX_PATH>') d ON c.h8 = d.h8
-```
-
-**✅ CORRECT:** Deduplicate first with DISTINCT
 ```sql
 unique_hexes AS (
   SELECT DISTINCT h8, h0 FROM read_parquet('<STAC_HEX_PATH>')
@@ -240,21 +217,32 @@ GROUP BY a.h8;
 
 *(Applies only to line-derived hex: source geometry is `LineString`/`MultiLineString`, columns like `length_miles`, `length_km`. Skip if your dataset has area/acres columns or is raster-derived.)*
 
-Each segment tiles into ~2–6 hex rows at h8, with per-segment values (length, owner, agency) repeated on every row.
+Per-segment values are **replicated on every row of any JOIN that matches a segment to multiple things**. Two unrelated mechanisms produce that replication:
 
-- **Sum `length_*` only after deduplicating by feature** — apply the Problem 1 pattern: `SELECT DISTINCT _cng_fid, length_miles, ...` first, then `SUM`. Per-segment attributes are repeated on every hex row the segment occupies.
-- **For segment counts or presence ("which trails cross this AOI"), use the hex SEMI JOIN with `COUNT(DISTINCT _cng_fid)`** — fast and accurate.
-- **For mileage *inside* an AOI (state, county, fire perimeter), use the GeoParquet**, not a hex JOIN. A hex match tells you *which* segments touch the AOI; the segment's full length is carried on every hex row, so summing through the JOIN credits each segment's whole length to every AOI it touches. Compute the intersected length directly:
+- **Hex tiling.** Each segment → 2–6 hex rows at h8.
+- **AOI matching.** Joining segments to AOI polygons (states, counties, fire perimeters) by *any* predicate — hex SEMI/INNER JOIN, `ST_Intersects` on GeoParquet — emits one row per (segment, AOI) the segment touches. A trail crossing 3 states appears in 3 rows.
+
+**Therefore `SUM(length_miles)` after such a JOIN over-counts.** Recipe by question type:
+
+- **Total per agency / class / surface** (no AOI): dedup by feature first. `SELECT admin_agency, SUM(length_miles) FROM (SELECT DISTINCT _cng_fid, admin_agency, length_miles FROM <line_hex>) GROUP BY admin_agency`.
+- **Presence / count** ("which trails cross this AOI"): hex SEMI JOIN + `COUNT(DISTINCT _cng_fid)`. No spatial functions.
+- **Mileage *inside* an AOI** (per-state, per-county, per-perimeter): `length_miles` is the **wrong column** — it's the segment's *full* length, not the AOI-clipped length. Default pattern: hex SEMI JOIN to a candidate `(trail _cng_fid, aoi _cng_fid)` list, then `ST_Intersection` on the GeoParquets joined by `_cng_fid` (the per-feature key, deterministic — avoid joining on names which can repeat across admin levels).
 
 ```sql
-SELECT p.STUSPS, SUM(ST_Length(ST_Intersection(t.geom, p.geom)) / 1609.344) AS miles
-FROM read_parquet('<line_geoparquet>') t
-JOIN read_parquet('<aoi_geoparquet>') p
-  ON ST_Intersects(t.geom, p.geom)
-GROUP BY p.STUSPS
+WITH cand AS (
+  SELECT DISTINCT t._cng_fid AS trail_fid, r._cng_fid AS aoi_fid
+  FROM read_parquet('<line_hex>') t
+  JOIN read_parquet('<aoi_hex>') r ON t.h8 = r.h8 AND t.h0 = r.h0
+)
+SELECT rg.name_en AS aoi,
+       SUM(ST_Length(ST_Intersection(tg.geometry, rg.geometry)) / 1609.344) AS miles
+FROM cand c
+JOIN read_parquet('<line_geoparquet>') tg ON tg._cng_fid = c.trail_fid
+JOIN read_parquet('<aoi_geoparquet>') rg ON rg._cng_fid = c.aoi_fid
+GROUP BY rg.name_en ORDER BY miles DESC;
 ```
 
-For large AOI sets (counties, tracts, fire perimeters), pre-filter with a hex `SEMI JOIN` on `_cng_fid` to a candidate list, then run `ST_Intersection` on the GeoParquet for those candidates only.
+The geometry column is `geometry` on the GeoParquets — not `geom`.
 
 ---
 
