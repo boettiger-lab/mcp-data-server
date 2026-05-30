@@ -154,9 +154,10 @@ Editing these files changes what the agent is told to do. They must be written f
 
 ### Key Design Patterns
 
-1. **Isolation Engine**: Each query runs in a fresh `duckdb.connect(":memory:")` — no state or credentials survive between requests
-2. **Context Injection**: Prompt files are embedded into tool descriptions so even MCP clients that don't support `prompts/list` receive the guidance
-3. **Partition Pruning**: H3 resolution columns (`h0`) enable DuckDB to skip S3 partitions, giving 5–20× speedups on large datasets
+1. **Stateless transport**: FastMCP runs in stateless streamable-HTTP mode (`stateless_http=True` in `server.py`). Every `POST /mcp` is a complete, independent request/response — no `Mcp-Session-Id`, no per-pod session cache, no in-memory state that survives across requests. Replicas behind the load balancer are interchangeable on a per-request basis. (The protocol's stateful SSE mode is not used.)
+2. **Isolation Engine**: Each query runs in a fresh `duckdb.connect(":memory:")` — no DuckDB connection, credential, or query state survives between requests
+3. **Context Injection**: Prompt files are embedded into tool descriptions so even MCP clients that don't support `prompts/list` receive the guidance
+4. **Partition Pruning**: H3 resolution columns (`h0`) enable DuckDB to skip S3 partitions, giving 5–20× speedups on large datasets
 
 ## Kubernetes Deployment
 

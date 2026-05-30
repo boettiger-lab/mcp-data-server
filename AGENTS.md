@@ -36,6 +36,18 @@ The MCP server runs on the NRP Nautilus Kubernetes cluster.
 - **STAC catalog:** `https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json` (set via `STAC_CATALOG_URL` env var)
 - **Ingress:** HAProxy with CORS enabled, 10-minute query timeout, 1-hour SSE tunnel timeout
 
+### MCP transport: stateless HTTP
+
+The server runs FastMCP in **stateless streamable-HTTP mode** (`server.py`: `FastMCP(..., stateless_http=True)`). Every `POST /mcp` is a complete, independent request/response. There is no `Mcp-Session-Id` pinning clients to a replica, no per-pod session cache, no in-memory state that survives across requests. The protocol's stateful SSE mode is **not** in use here.
+
+This is intentional and load-bearing. Several things depend on it:
+
+- The Service has `sessionAffinity: None` and the ingress uses `balance-algorithm: leastconn`. Both rely on the stateless premise — replicas are interchangeable on a per-request basis.
+- Each query runs in a fresh `duckdb.connect(":memory:")` (the Isolation Engine, `server.py` §4). No connection, credential, or DuckDB state survives between requests.
+- Durable cross-pod state for genuinely persistent artifacts (e.g. hex tile pyramid build markers, PRs #146–#148) lives in **S3** markers, not pod memory, for exactly this reason.
+
+**Do not** introduce per-pod in-memory caches keyed on something the client provides expecting the same pod will see the next request — under stateless HTTP it almost certainly won't, and even if it did once, scaling up replicas or a single rollout breaks the assumption silently.
+
 ### Rollout workflow
 
 **Merge to `main` → redeploy dev only:**
