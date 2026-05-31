@@ -50,6 +50,12 @@ kubectl apply -f k8s/deployment.yaml
 kubectl rollout restart deployment/duckdb-mcp -n biodiversity
 ```
 
+Prod clones a pinned tag, so a release is two steps: **first** bump the `--branch vX.Y.Z`
+pin in `k8s/deployment.yaml` to the new tag (separate commit, as in #151), **then** apply.
+Never `kubectl apply -f k8s/deployment.yaml` to prod while the pin still points at the
+previous tag — `deployment.yaml` changes (e.g. new `/healthz` probes) can reference code
+the pinned tag doesn't yet have, and the rollout will stall on failing probes.
+
 `kubectl apply` must precede `rollout restart` — a git push alone does not update the cluster.
 
 ---
