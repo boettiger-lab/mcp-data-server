@@ -296,22 +296,19 @@ Then tell the user the *public https* address (note the use of the public, not p
 
 ## Rendering hex results as a map layer
 
-Before building a hex tileset, check whether the value is already renderable —
-hex is the right display path for **one** case only:
+Use `register_hex_tiles` only to display a value your SQL computes that no
+layer or COG already serves. Otherwise render the existing source:
 
-| To display… | Use | Not hex because |
-|---|---|---|
-| A raster-native field (effort, elevation, SST) | **COG via titiler** | hex is a lossy re-bin of it |
-| An existing column in a layer's PMTiles | **data-driven paint (set_style)** | the attribute is already there |
-| A value your SQL **computes** that no layer/COG serves | **`register_hex_tiles`** ✓ | nothing else can render it |
+| To display… | Use |
+|---|---|
+| A raster field (effort, elevation, SST) | the **COG via titiler** |
+| A column already in a layer's PMTiles (e.g. county population) | **data-driven paint (set_style)** on that layer |
+| A value your SQL computes that no layer/COG serves | **`register_hex_tiles`** |
 
-So use `register_hex_tiles` only when **all** hold:
-- The value is produced by your SQL and is not already a servable field (a layer's PMTiles column, or a COG raster)
-- The user wants it shown as per-hex values across a region (not a top-N table)
+Use `register_hex_tiles` only when all hold:
+- The value is produced by your SQL, not already a servable field (a layer's PMTiles column, or a COG raster)
+- It is shown as per-hex values across a region, not a top-N table
 - The result set is large (would exceed the 50-row `query` cap)
-
-(Hex *computation* — joins, area, zonal stats — is separate and stays ideal in
-hex parquet; this section is only about the visual tile server.)
 
 **How to use:**
 1. Write your analysis SQL that returns `(h3_index, value1, value2, ...)` — first
