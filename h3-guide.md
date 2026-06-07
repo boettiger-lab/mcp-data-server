@@ -296,14 +296,19 @@ Then tell the user the *public https* address (note the use of the public, not p
 
 ## Rendering hex results as a map layer
 
-For hex result sets too large to display as a table (roughly >100k cells), or
-whenever the user wants to visualize hexes directly on the map, use the
-`register_hex_tiles` MCP tool instead of returning markdown.
+Use `register_hex_tiles` only to display a value your SQL computes that no
+layer or COG already serves. Otherwise render the existing source:
 
-**When to use:**
-- User asks to *show*, *render*, *visualize*, or *color* hexes on the map
-- Result set would exceed the 50-row `query` cap with meaningful content
-- The answer is "per-hex values across a region" rather than "top N rows"
+| To display… | Use |
+|---|---|
+| A raster field (effort, elevation, SST) | the **COG via titiler** |
+| A column already in a layer's PMTiles (e.g. county population) | **data-driven paint (set_style)** on that layer |
+| A value your SQL computes that no layer/COG serves | **`register_hex_tiles`** |
+
+Use `register_hex_tiles` only when all hold:
+- The value is produced by your SQL, not already a servable field (a layer's PMTiles column, or a COG raster)
+- It is shown as per-hex values across a region, not a top-N table
+- The result set is large (would exceed the 50-row `query` cap)
 
 **How to use:**
 1. Write your analysis SQL that returns `(h3_index, value1, value2, ...)` — first
