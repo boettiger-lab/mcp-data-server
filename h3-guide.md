@@ -296,14 +296,22 @@ Then tell the user the *public https* address (note the use of the public, not p
 
 ## Rendering hex results as a map layer
 
-For hex result sets too large to display as a table (roughly >100k cells), or
-whenever the user wants to visualize hexes directly on the map, use the
-`register_hex_tiles` MCP tool instead of returning markdown.
+Before building a hex tileset, check whether the value is already renderable —
+hex is the right display path for **one** case only:
 
-**When to use:**
-- User asks to *show*, *render*, *visualize*, or *color* hexes on the map
-- Result set would exceed the 50-row `query` cap with meaningful content
-- The answer is "per-hex values across a region" rather than "top N rows"
+| To display… | Use | Not hex because |
+|---|---|---|
+| A raster-native field (effort, elevation, SST) | **COG via titiler** | hex is a lossy re-bin of it |
+| An existing column in a layer's PMTiles | **data-driven paint (set_style)** | the attribute is already there |
+| A **derived per-area value in no layer** (zonal-stats / vector×raster join / computed class) | **`register_hex_tiles`** ✓ | the legitimate case |
+
+So use `register_hex_tiles` only when **all** hold:
+- The value is *derived/computed* and lives in no existing layer
+- The user wants it shown as per-hex values across a region (not a top-N table)
+- The result set is large (would exceed the 50-row `query` cap)
+
+(Hex *computation* — joins, area, zonal stats — is separate and stays ideal in
+hex parquet; this section is only about the visual tile server.)
 
 **How to use:**
 1. Write your analysis SQL that returns `(h3_index, value1, value2, ...)` — first

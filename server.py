@@ -351,6 +351,11 @@ def register_hex_tiles(
     "aggregate X by hex", "visualize density of X", "map the count of X per
     area". If the user did not ask for one of these, do NOT use this tool.
 
+    The ONE legitimate display case is a DERIVED per-area value that lives in
+    no layer — a zonal-stats / vector×raster join result or a computed
+    classification. If the value is already renderable, render that instead
+    (see WHEN NOT TO USE).
+
     WHEN NOT TO USE — most map/data questions are NOT hex-tile questions.
     Do NOT use this tool for:
       - Counting / summing / averaging questions that return a number or
@@ -361,10 +366,12 @@ def register_hex_tiles(
       - Navigating, framing, or zooming the map ("show me Yosemite",
         "zoom to LA" → use the map client's fly-to / curated layer
         controls, not this tool).
-      - Styling or filtering an existing curated layer ("color counties
-        by population", "filter parks to GAP 1" → use the map client's
-        set_style / set_filter on the existing layer; do NOT create a
-        new hex tileset for this).
+      - Coloring/filtering a layer by a column ALREADY in its data
+        ("color counties by population", "filter parks to GAP 1") → use
+        the map client's set_style / set_filter on that layer; do NOT
+        re-bin to hex.
+      - A raster-native field ("show fishing effort / elevation / SST") →
+        render the COG via titiler; hex is a lossy re-bin of it.
       - "Showing" or "displaying" a dataset whose layer is already in the
         catalog — use the curated layer rather than rebuilding it as hexes.
 
