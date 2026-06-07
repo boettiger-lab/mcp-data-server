@@ -106,6 +106,68 @@ class TestServeTile:
         assert expected in r.content, f"layer name {layer_name!r} not found in MVT bytes"
 
 
+class TestAntimeridian:
+    def test_dateline_cell_geometry_does_not_span_globe(self):
+        # A hex straddling +/-180 must be unwrapped into a continuous frame, not
+        # emitted as a single ring whose vertices jump +179.9 -> -179.9 (which
+        # MapLibre draws "the long way" as a globe-spanning streak). See #164.
+        from tiles.endpoint import _boundary_geom_sql
+        con = build_tile_connection()
+        try:
+            con.sql(
+                "CREATE TABLE src AS SELECT * FROM (VALUES "
+                "(h3_latlng_to_cell(0.0,  179.95, 5)), "   # east-side crosser
+                "(h3_latlng_to_cell(0.0, -179.97, 7)), "   # west-side crosser
+                "(h3_latlng_to_cell(36.5, -119.5, 5))"     # normal (no crossing)
+                ") t(h)"
+            )
+            geom = _boundary_geom_sql(touches_dateline=True)
+            rows = con.sql(
+                f"SELECT ST_XMax(g) - ST_XMin(g) AS span, ST_IsValid(g) AS valid "
+                f"FROM (SELECT {geom} AS g FROM src)"
+            ).fetchall()
+            assert rows, "no geometry produced"
+            for span, valid in rows:
+                assert valid, "unwrapped boundary geometry must be valid"
+                assert span < 180, f"geometry spans the dateline (lng span={span})"
+        finally:
+            con.close()
+
+    def test_dateline_edge_tile_renders_end_to_end(self, app_with_tiles, local_bucket):
+        # Full pipeline: a tileset with cells right on +/-180 must render its
+        # easternmost tile (the correlated unwrap subquery has to survive inside
+        # ST_AsMVTGeom/ST_AsMVT), not error or come back empty.
+        con = app_with_tiles.state.tile_con
+        user_sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 4) AS h4, 1.0 AS val
+            FROM (
+                SELECT (random()-0.5)*2 AS lat, 179.0 + random()*1.0 AS lng
+                FROM range(400)
+            )
+        """
+        result = register_hex_tiles(
+            con=con, sql=user_sql, finest_res=4, min_res=2, agg="AVG", zoom_offset=4,
+        )
+        client = TestClient(app_with_tiles)
+        # z=2, n=4: easternmost column is x=3 (east edge = +180); equator row y=2.
+        r = client.get(f"/tiles/hex/{result['hash']}/2/3/2.pbf")
+        assert r.status_code == 200, f"edge tile failed: {r.status_code}"
+        assert len(r.content) > 0
+
+    def test_build_tile_sql_unwraps_only_on_dateline_tiles(self):
+        # At z=3 (n=8): x=0 touches -180, x=7 touches +180, x=4 is interior.
+        # The unwrap machinery (ST_MakePolygon rebuild) should appear only for
+        # the edge columns so interior tiles keep the cheap direct projection.
+        from tiles.endpoint import _build_tile_sql
+        kw = dict(namespace="hex", name="abc", z=3, y=4, target_res=5, finest_res=5)
+        interior = _build_tile_sql(x=4, **kw)
+        east = _build_tile_sql(x=7, **kw)
+        west = _build_tile_sql(x=0, **kw)
+        assert "ST_MakePolygon" not in interior
+        assert "ST_MakePolygon" in east
+        assert "ST_MakePolygon" in west
+
+
 class TestH0Pruning:
     def test_build_tile_sql_filters_by_h0(self):
         # Per-tile pruning depends on the SQL restricting reads to the h0
