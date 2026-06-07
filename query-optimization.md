@@ -54,6 +54,28 @@ SELECT h8, h0, MODE(lc_class) AS dominant
 FROM lc_on_scope GROUP BY h8, h0;
 ```
 
+### Scoping by name or feature id (no region mask)
+
+To filter a global `…/hex/h0=*/…` dataset by a name or `_cng_fid` and there is no region-mask hex to join, first restrict `h0` to the region, then apply the attribute filter:
+
+- **Known coordinates** (island centroids, a city, bbox corners): build the `h0` set with `h3_latlng_to_cell(lat, lng, 0)` per point and `UNNEST(h3_grid_disk(h0, 1))` to include neighbouring res-0 cells. For large or multi-part features, supply every known point or the bbox corners — one centroid can miss partitions the feature reaches.
+- **Known name only**: look the feature up in the dataset's GeoParquet asset (one row per feature) to read its centroid/bbox, convert to `h0`, then query the hex.
+
+```sql
+WITH h0s AS (
+  SELECT DISTINCT d
+  FROM (VALUES (19.282,166.647),(16.728,-169.534),(6.383,-162.417),
+               (0.807,-176.617),(-0.374,-159.997)) AS i(lat,lng),
+       UNNEST(h3_grid_disk(h3_latlng_to_cell(lat,lng,0),1)) AS t(d)
+)
+SELECT SUM(h3_cell_area(h8, 'km^2')) AS area_km2
+FROM (
+  SELECT DISTINCT h8, h0
+  FROM read_parquet('s3://<bucket>/<dataset>/hex/h0=*/data_00.parquet')
+  WHERE h0 IN (SELECT d FROM h0s) AND _cng_fid IN (201, 246, 243, 142, 90)
+);
+```
+
 ## 3. Trust your schema — don't grep with DESCRIBE+LIKE
 
 For datasets already loaded in your app, the column list returned by `get_schema`

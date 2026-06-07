@@ -33,22 +33,42 @@ All spatial operations are hex joins — two datasets overlap wherever their hex
 
 ## Area Conversion
 
-| Resolution | km²/cell | acres/cell |
+H3 cells are not equal-area — true area varies with latitude and icosahedral distortion (res-8 cells span ~0.55–0.82 km²). Pick the method by scope:
+
+- **Scoped to a region, feature, or group** (a `WHERE`/mask bounds it to roughly ≤ a few million cells) — the common case, and the accuracy-critical one: sum exact `h3_cell_area()` over distinct cells.
+- **Unscoped global coverage** (millions of cells, no region filter): multiply an approximate count by the rough per-cell constant.
+
+For a region or feature area, and for per-group breakdowns, sum `h3_cell_area()` over distinct cells (exact at any resolution):
+
+```sql
+-- Region / feature area:
+SELECT SUM(h3_cell_area(h8, 'km^2')) AS area_km2
+FROM (SELECT DISTINCT h8, h0 FROM read_parquet('<hex>') WHERE <scope>);
+
+-- Per-group breakdown (per-state, per-class, etc.):
+SELECT state, SUM(h3_cell_area(h8, 'km^2')) AS area_km2
+FROM (SELECT DISTINCT state, h8, h0 FROM read_parquet('<hex>'))
+GROUP BY state;
+```
+
+When the scope is a name or feature id on a global `h0=*` dataset, restrict `h0` first — see *Scoping by name or feature id* in query-optimization.md.
+
+`h3_cell_area()` takes any resolution column (`h3_cell_area(h6, 'km^2')`) and unit (`'km^2'`, `'m^2'`).
+
+For unscoped global aggregates over millions of cells, multiplying an approximate count by the rough per-cell constant is faster (within ~1–2%). Exact area would force materializing every distinct cell, defeating the approximate path:
+
+```sql
+SELECT APPROX_COUNT_DISTINCT(h8) * 0.7373 AS area_km2 FROM ...
+```
+
+The constants below are latitude/distortion-averaged, not true per-cell values (res-8 cells range ~0.55–0.82 km²):
+
+| Resolution | km²/cell (rough) | acres/cell (rough) |
 |---|---|---|
 | h5 | 252.9 | 62,502 |
 | h6 | 36.13 | 8,929 |
 | h8 | 0.7373 | 182.2 |
 | h10 | 0.01505 | 3.718 |
-
-```sql
--- Global aggregate (millions of cells, ~1% error acceptable):
-SELECT APPROX_COUNT_DISTINCT(h8) * 0.7373 AS area_km2 FROM ...
-
--- Per-group breakdown (per-state, per-class, etc.) — use exact COUNT DISTINCT:
-SELECT state, COUNT(DISTINCT h8) * 0.7373 AS area_km2
-FROM ...
-GROUP BY state
-```
 
 ## Coordinates from H3 Cells
 
