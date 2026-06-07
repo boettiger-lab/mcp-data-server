@@ -90,6 +90,43 @@ def _get_cached_metadata(app_state, con, namespace: str, name: str):
     return cache[key]
 
 
+def _boundary_geom_sql(touches_dateline: bool) -> str:
+    """Return a SQL scalar expression (EPSG:4326 GEOMETRY) for cell `src.h`'s
+    H3 boundary polygon.
+
+    `h3_cell_to_boundary_wkt` emits a cell straddling +/-180 as a single ring
+    whose longitudes jump +179.9 -> -179.9; MapLibre then draws it "the long
+    way," producing globe-spanning streaks (#164). Only the easternmost and
+    westernmost tile columns can contain such cells, so `_build_tile_sql`
+    passes touches_dateline=True only for those tiles.
+
+    When touches_dateline, rebuild the boundary in a continuous frame: dump the
+    ring's vertices and shift each by +/-360 so it stays within 180 deg of the
+    cell's center longitude. The cell then sits wholly on one side of the seam
+    (overflow past +/-180 is clipped to the tile by ST_AsMVTGeom). Non-crossing
+    cells are unchanged (the CASE is a no-op when max-min lng span <= 180).
+    """
+    if not touches_dateline:
+        return "h3_cell_to_boundary_wkt(src.h)::GEOMETRY"
+    return """(
+        WITH _v AS (
+          SELECT ST_X(d.geom) AS x, ST_Y(d.geom) AS y, d.path[1] AS idx
+          FROM UNNEST(ST_Dump(ST_Points(
+                 h3_cell_to_boundary_wkt(src.h)::GEOMETRY))) AS u(d)
+        ),
+        _c AS (
+          SELECT (MAX(x) - MIN(x)) > 180 AS crosses,
+                 h3_cell_to_lng(src.h) AS ref
+          FROM _v
+        )
+        SELECT ST_MakePolygon(ST_MakeLine(list(ST_Point(
+          CASE WHEN _c.crosses AND (_v.x - _c.ref) >  180 THEN _v.x - 360
+               WHEN _c.crosses AND (_v.x - _c.ref) < -180 THEN _v.x + 360
+               ELSE _v.x END, _v.y) ORDER BY _v.idx)))
+        FROM _v, _c
+      )"""
+
+
 def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
                     target_res: int, finest_res: int) -> str:
     """Produce the SQL that returns a single BLOB row (the MVT for this tile).
@@ -120,6 +157,10 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
     """
     west, south, east, north = tile_xyz_to_lnglat_bounds(z, x, y)
     tileset = _tileset_dir(namespace, name)
+    # Only the edge tile columns (x=0 west=-180, x=2^z-1 east=+180) can hold
+    # cells whose boundary crosses the antimeridian; unwrap geometry only there.
+    touches_dateline = west <= -179.999 or east >= 179.999
+    boundary_geom = _boundary_geom_sql(touches_dateline)
     mx_w = _lng_to_merc_x(west)
     mx_e = _lng_to_merc_x(east)
     my_s = _lat_to_merc_y(south)
@@ -156,7 +197,7 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
         projected AS (
           SELECT
             ST_AsMVTGeom(
-              ST_Transform(h3_cell_to_boundary_wkt(h)::GEOMETRY, 'EPSG:4326', 'EPSG:3857', true),
+              ST_Transform({boundary_geom}, 'EPSG:4326', 'EPSG:3857', true),
               {{'min_x': {mx_w}, 'min_y': {my_s}, 'max_x': {mx_e}, 'max_y': {my_n}}}::BOX_2D
             ) AS geom,
             src.* EXCLUDE (h, h0)
