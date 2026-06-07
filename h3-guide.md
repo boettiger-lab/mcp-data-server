@@ -303,10 +303,10 @@ hex is the right display path for **one** case only:
 |---|---|---|
 | A raster-native field (effort, elevation, SST) | **COG via titiler** | hex is a lossy re-bin of it |
 | An existing column in a layer's PMTiles | **data-driven paint (set_style)** | the attribute is already there |
-| A **derived per-area value in no layer** (zonal-stats / vector×raster join / computed class) | **`register_hex_tiles`** ✓ | the legitimate case |
+| A value your SQL **computes** that no layer/COG serves | **`register_hex_tiles`** ✓ | nothing else can render it |
 
 So use `register_hex_tiles` only when **all** hold:
-- The value is *derived/computed* and lives in no existing layer
+- The value is produced by your SQL and is not already a servable field (a layer's PMTiles column, or a COG raster)
 - The user wants it shown as per-hex values across a region (not a top-N table)
 - The result set is large (would exceed the 50-row `query` cap)
 

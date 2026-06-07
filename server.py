@@ -351,10 +351,10 @@ def register_hex_tiles(
     "aggregate X by hex", "visualize density of X", "map the count of X per
     area". If the user did not ask for one of these, do NOT use this tool.
 
-    The ONE legitimate display case is a DERIVED per-area value that lives in
-    no layer — a zonal-stats / vector×raster join result or a computed
-    classification. If the value is already renderable, render that instead
-    (see WHEN NOT TO USE).
+    The ONE legitimate display case is a value your SQL COMPUTES that is not
+    already a servable field anywhere — i.e. not a column in a layer's PMTiles
+    and not a raster field served by a COG. If the value already lives
+    somewhere renderable, render that instead (see WHEN NOT TO USE).
 
     WHEN NOT TO USE — most map/data questions are NOT hex-tile questions.
     Do NOT use this tool for:
