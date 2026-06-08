@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+node_modules
+**/__pycache__
+*.pyc
+.pytest_cache
+.worktrees
+.claude
+.roo
+.continue
+.vscode
+tiles
