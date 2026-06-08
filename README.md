@@ -172,31 +172,33 @@ kubectl apply -f k8s/ingress.yaml
 ```
 
 The deployment:
-- Runs 2 replicas for high availability
-- Allocates 16GB memory per pod for large queries
-- Uses `uv` for fast dependency installation
-- Includes readiness probes for safe rollouts
+- Runs multiple replicas for high availability (prod: 6, dev: 2)
+- Allocates up to 160 Gi memory / 16 CPU per pod for large queries
+- Bakes the application code and dependencies into the image (no runtime clone)
+- Includes `/healthz` readiness + liveness probes for safe rollouts
 
 ### Releases and production rollouts
 
-The pod image is just a runtime base; the actual application source is `git clone`d at pod startup from a tag pinned in `k8s/deployment.yaml` (`git clone --branch vX.Y.Z ...`). The convention is **every tag is a GitHub Release** — when you cut a new version, push the tag *and* publish a release with notes (`gh release create vX.Y.Z --title "..." --notes "..."`). The latest GitHub Release is the source of truth for "what should be running in prod."
+Application code is **baked into the image** (`COPY . /app` in the `Dockerfile`); pods no longer `git clone` at startup. CI (`.github/workflows/docker.yml`) builds on every push to `main` and on `vX.Y.Z` tags:
 
-To confirm prod is on the latest release:
+- **dev** pins the moving `:main` tag (`imagePullPolicy: Always`) and tracks the latest `main`.
+- **prod** pins an immutable `vX.Y.Z@sha256:<digest>` (`imagePullPolicy: IfNotPresent`) — every replica is identical by construction.
+
+The convention is **every release tag is a GitHub Release** — when you cut a version, push the tag (CI builds `:vX.Y.Z`), publish a release with notes (`gh release create vX.Y.Z --generate-notes`), then pin prod to that build's digest. The full step-by-step (including reading the digest) lives in [`AGENTS.md` → Rollout workflow](AGENTS.md). The latest GitHub Release is the source of truth for "what should be running in prod."
+
+To confirm prod is on the intended release:
 
 ```bash
-# Tag the cluster is configured to clone:
+# Digest the prod manifest pins:
 kubectl -n biodiversity get deploy duckdb-mcp \
-  -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -oP 'branch \K[^ ]+'
+  -o jsonpath='{.spec.template.spec.containers[0].image}'
 
-# Latest published release:
-gh release view -R boettiger-lab/mcp-data-server --json tagName -q .tagName
-
-# Pod ages — must be newer than the k8s/deployment.yaml bump commit:
+# Every running pod should report that same digest:
 kubectl -n biodiversity get pods -l app=duckdb-mcp \
-  -o custom-columns=NAME:.metadata.name,CREATED:.metadata.creationTimestamp
+  -o custom-columns=NAME:.metadata.name,IMAGE:.status.containerStatuses[0].imageID
 ```
 
-If the first two commands print the same tag and the pods are newer than the bump commit, prod is current.
+If every pod's imageID matches the pinned digest, prod is current and consistent.
 
 ## MCP Protocol Features
 
