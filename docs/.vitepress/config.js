@@ -3,6 +3,10 @@ export default {
   description: 'An open MCP server that connects AI agents to cloud-native data — grounding them in STAC metadata and validated query engines (DuckDB on S3).',
   base: '/mcp-data-server/',
 
+  // Internal planning/spec artifacts, not part of the published site. Their
+  // Go-template `{{ ... }}` syntax also breaks VitePress's Vue parser.
+  srcExclude: ['superpowers/**'],
+
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/quickstart' },

@@ -38,7 +38,7 @@ Code is baked into the image, so redeploying means rolling to a new image — no
   kubectl rollout restart deployment/duckdb-mcp -n biodiversity
   ```
 
-See [`AGENTS.md` → Rollout workflow](../../AGENTS.md) for the full release procedure (tagging, reading the digest, verifying convergence).
+See [`AGENTS.md` → Rollout workflow](https://github.com/boettiger-lab/mcp-data-server/blob/main/AGENTS.md) for the full release procedure (tagging, reading the digest, verifying convergence).
 
 ## Environment variables
 
