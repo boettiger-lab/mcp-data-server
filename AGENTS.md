@@ -50,25 +50,43 @@ This is intentional and load-bearing. Several things depend on it:
 
 ### Rollout workflow
 
-**Merge to `main` → redeploy dev only:**
+Application code is **baked into the image** (`COPY . /app` in the `Dockerfile`); pods no
+longer `git clone` at startup. `docker.yml` builds on every push to `main` and on `vX.Y.Z`
+release tags. The image is the unit of release.
+
+**Tags CI produces:**
+- `:main` — moving; rebuilt on every push to `main` and by the weekly cron. **dev** tracks this.
+- `:<git-sha>` — immutable; one per commit.
+- `:vX.Y.Z` — immutable; built on release tags. **prod** pins this (by digest, below).
+
+**Merge to `main` → redeploy dev:**
 ```
 kubectl apply -f k8s/dev-deployment.yaml
 kubectl rollout restart deployment/dev-duckdb-mcp -n biodiversity
 ```
+dev pins `:main` with `imagePullPolicy: Always`, so the restart pulls the freshest build.
+**Wait for the `docker.yml` run on your merge to go green first** — rolling before the
+image is pushed gives `ImagePullBackOff`.
 
-**Tag a release → redeploy prod:**
+**Tag a release → redeploy prod (promote by digest):**
+1. `git tag vX.Y.Z && git push origin vX.Y.Z`, then wait for `docker.yml` to build `:vX.Y.Z`.
+2. Read the digest from the build run's job summary, or:
+   `docker buildx imagetools inspect ghcr.io/boettiger-lab/mcp-data-server:vX.Y.Z --format '{{.Manifest.Digest}}'`
+3. Set `image: ghcr.io/boettiger-lab/mcp-data-server:vX.Y.Z@sha256:<digest>` in
+   `k8s/deployment.yaml` (separate commit).
+4. `kubectl apply -f k8s/deployment.yaml`
+5. `kubectl rollout restart deployment/duckdb-mcp -n biodiversity`
+
+prod pins an immutable `:vX.Y.Z@sha256:…` (tag for humans, digest enforced — if they ever
+disagree, the digest wins). **Never apply prod while the manifest points at an image CI
+hasn't built yet** — the rollout stalls on `ImagePullBackOff`. `kubectl apply` must precede
+`rollout restart`; a git push alone does not update the cluster.
+
+Verify all prod replicas converge on a single digest after rollout:
 ```
-kubectl apply -f k8s/deployment.yaml
-kubectl rollout restart deployment/duckdb-mcp -n biodiversity
+kubectl -n biodiversity get pods -l app=duckdb-mcp \
+  -o custom-columns='NAME:.metadata.name,IMAGE:.status.containerStatuses[0].imageID'
 ```
-
-Prod clones a pinned tag, so a release is two steps: **first** bump the `--branch vX.Y.Z`
-pin in `k8s/deployment.yaml` to the new tag (separate commit, as in #151), **then** apply.
-Never `kubectl apply -f k8s/deployment.yaml` to prod while the pin still points at the
-previous tag — `deployment.yaml` changes (e.g. new `/healthz` probes) can reference code
-the pinned tag doesn't yet have, and the rollout will stall on failing probes.
-
-`kubectl apply` must precede `rollout restart` — a git push alone does not update the cluster.
 
 ---
 

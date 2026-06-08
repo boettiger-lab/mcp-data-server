@@ -3,9 +3,7 @@ name: Build Docker image
 on:
   push:
     branches: [main]
-    paths:
-      - Dockerfile
-      - .github/workflows/docker.yml
+    tags: ['v*']
   schedule:
     - cron: '0 6 * * 1'  # Mondays 06:00 UTC — refresh base image + unpinned deps
   workflow_dispatch:
@@ -26,15 +24,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Compute image tags
         id: tags
         run: |
-          # Always tag :latest. Only tag :<sha> on push events so scheduled
-          # rebuilds don't mutate an immutable content-addressed tag.
-          tags="ghcr.io/boettiger-lab/mcp-data-server:latest"
-          if [ "${{ github.event_name }}" = "push" ]; then
-            tags="$tags"$'\n'"ghcr.io/boettiger-lab/mcp-data-server:${{ github.sha }}"
-          fi
+          repo=ghcr.io/boettiger-lab/mcp-data-server
+          case "${{ github.event_name }}" in
+            push)
+              if [ "${{ github.ref_type }}" = "tag" ]; then
+                # Release tag (vX.Y.Z): immutable version tag + immutable sha.
+                tags="$repo:${{ github.ref_name }}"$'\n'"$repo:${{ github.sha }}"
+              else
+                # Push to main: moving dev tag + immutable sha.
+                tags="$repo:main"$'\n'"$repo:${{ github.sha }}"
+              fi
+              ;;
+            *)
+              # schedule / workflow_dispatch: dep+base refresh. Move ONLY the dev
+              # tag — never mint a :sha or :vX.Y.Z from a non-push event.
+              tags="$repo:main"
+              ;;
+          esac
           {
             echo "tags<<EOF"
             echo "$tags"
@@ -42,8 +54,27 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.tags.outputs.tags }}
+          # Pushes reuse the cached deps layer (fast code-only builds). The weekly
+          # cron sets no-cache + pull so it re-resolves unpinned deps and pulls a
+          # fresh base image (security patches); cache-to still warms the cache.
+          # (When no-cache=true, cache-from is ignored by design; cache-to is kept
+          # so the next code-push still gets a warm cache.)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          no-cache: ${{ github.event_name == 'schedule' }}
+          pull: ${{ github.event_name == 'schedule' }}
+
+      - name: Report image digest
+        run: |
+          {
+            echo "### Image digest"
+            echo '```'
+            echo "${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
