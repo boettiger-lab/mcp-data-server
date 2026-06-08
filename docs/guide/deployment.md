@@ -8,7 +8,7 @@ The server runs on the [NRP Nautilus](https://nrp.ai) Kubernetes cluster.
 https://duckdb-mcp.nrp-nautilus.io/mcp
 ```
 
-- 2 replicas, each cloning this repo at startup and running `server.py` via `uv`
+- 6 replicas (prod), each running the baked image directly (`server.py`) — code is built into the image, not cloned at startup
 - 16 Gi RAM requested, up to 160 Gi / 16 CPU per pod
 - HAProxy ingress with CORS enabled, 10-minute query timeout, 1-hour SSE tunnel timeout
 
@@ -20,13 +20,25 @@ kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/ingress.yaml
 ```
 
-## Redeploying after a push
+## Redeploying
 
-After pushing changes to `main`, restart the pods so they re-clone the repo:
+Code is baked into the image, so redeploying means rolling to a new image — not re-cloning.
 
-```bash
-kubectl rollout restart deployment/duckdb-mcp
-```
+- **dev** tracks the moving `:main` tag. After CI builds your merge to `main`, roll dev to pick it up:
+
+  ```bash
+  kubectl apply -f k8s/dev-deployment.yaml
+  kubectl rollout restart deployment/dev-duckdb-mcp -n biodiversity
+  ```
+
+- **prod** pins an immutable `vX.Y.Z@sha256:<digest>`. Cut a release tag, then bump the digest in `k8s/deployment.yaml`, apply, and roll:
+
+  ```bash
+  kubectl apply -f k8s/deployment.yaml
+  kubectl rollout restart deployment/duckdb-mcp -n biodiversity
+  ```
+
+See [`AGENTS.md` → Rollout workflow](../../AGENTS.md) for the full release procedure (tagging, reading the digest, verifying convergence).
 
 ## Environment variables
 
