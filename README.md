@@ -1,8 +1,10 @@
-# MCP DuckDB Geospatial Data Server
+# MCP Data Server
 
-**[Documentation](https://boettiger-lab.github.io/mcp-data-server/)**
+**[Documentation](https://boettiger-lab.github.io/mcp-data-server/)** · **[The bigger picture](https://boettiger-lab.github.io/mcp-data-server/guide/vision)**
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides SQL query access to large-scale geospatial datasets stored in S3. Built with DuckDB for high-performance analytics on H3-indexed environmental, biodiversity, and geospatial data.
+An open [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects AI agents to cloud-native data: it grounds the agent in [STAC](https://stacspec.org/) metadata so it finds the right dataset and reads its schema, and confines it to validated cloud-native engines so it queries terabyte-scale data over S3 without downloading it, misreading it, or silently failing at scale. Today it serves SQL over Parquet via DuckDB with H3 spatial indexing; see the [roadmap](https://boettiger-lab.github.io/mcp-data-server/guide/roadmap) for array (Zarr) and hardware-accelerated engines.
+
+It is one of three open-source components — with [data-workflows](https://boettiger-lab.github.io/data-workflows/) (which produces the AI-ready data and metadata) and [jupyter-geoagent](https://jupyter-geoagent.readthedocs.io/) — that together make the cloud-native stack reachable by the AI tools researchers already use. Runs locally for sensitive data or on autoscaling Kubernetes for scale.
 
 ## Quick Start
 
@@ -314,7 +316,7 @@ Rather than maintaining a forked server deployment per app, private geo-agent ap
 
 ## License
 
-MIT License - See repository for details
+BSD-3-Clause License — see [LICENSE](LICENSE).
 
 ## Contributing
 

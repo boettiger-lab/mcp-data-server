@@ -3,30 +3,30 @@ layout: home
 
 hero:
   name: MCP Data Server
-  text: SQL access to geospatial data — for AI agents
-  tagline: An MCP server that lets any LLM client query petabytes of H3-indexed environmental and biodiversity data via DuckDB and S3. No database setup required.
+  text: The bridge between AI agents and cloud-native data
+  tagline: An open Model Context Protocol server that grounds coding agents in STAC metadata and confines them to validated cloud-native engines — so any LLM client can query terabyte-scale data over S3 without downloading it, misreading it, or silently failing at scale.
   actions:
     - theme: brand
       text: Quick Start
       link: /guide/quickstart
     - theme: alt
+      text: The bigger picture
+      link: /guide/vision
+    - theme: alt
       text: Browse Datasets
       link: /guide/datasets
-    - theme: alt
-      text: GitHub
-      link: https://github.com/boettiger-lab/mcp-data-server
 
 features:
-  - title: Zero Configuration
-    details: Point any MCP-compatible LLM client at the hosted endpoint. No database to install or configure.
-  - title: DuckDB on S3
-    details: Queries run directly against Parquet files in S3 using DuckDB — fast columnar analytics without moving data.
-  - title: H3 Spatial Indexing
-    details: All datasets use Uber's H3 hexagonal grid for efficient spatial joins and area calculations across resolutions.
-  - title: Isolated Execution
-    details: Each query runs in a fresh DuckDB instance. Credentials are request-scoped and never shared between clients.
-  - title: STAC Catalog
-    details: Datasets are discoverable through a standard STAC catalog. The agent browses and resolves S3 paths dynamically.
-  - title: Private Data Ready
-    details: Pass S3 credentials per-call to query private buckets alongside public data in the same query.
+  - title: Grounded in STAC metadata
+    details: The agent browses a standard STAC catalog to find the right dataset and read its column schema before writing a query — so it interprets the data correctly instead of guessing.
+  - title: Validated cloud-native engines
+    details: Queries run against Parquet on S3 with DuckDB — fast, out-of-core, columnar. The agent reaches for streaming engines instead of in-memory libraries that silently break at scale.
+  - title: Runs local or at scale
+    details: Run it on your own hardware for sensitive data, or on autoscaling Kubernetes for terabyte workloads. The same server, the same tools, either way.
+  - title: Drivable by small open models
+    details: The query guidance is injected at call time, so even compact, locally-run open models can drive the workflow — reducing dependence on closed models and keeping data on your hardware.
+  - title: Private data ready
+    details: Pass S3 credentials per call to query private buckets alongside public data. Credentials are request-scoped, never logged, and never shared between clients.
+  - title: Part of a larger effort
+    details: One of three open-source components — with data-workflows and jupyter-geoagent — that together make the cloud-native stack reachable by the AI tools researchers already use.
 ---

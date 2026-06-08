@@ -1,12 +1,14 @@
 export default {
   title: 'MCP Data Server',
-  description: 'MCP server providing SQL access to large-scale geospatial datasets via DuckDB and S3.',
+  description: 'An open MCP server that connects AI agents to cloud-native data — grounding them in STAC metadata and validated query engines (DuckDB on S3).',
   base: '/mcp-data-server/',
 
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/quickstart' },
       { text: 'Datasets', link: '/guide/datasets' },
+      { text: 'Vision', link: '/guide/vision' },
+      { text: 'Roadmap', link: '/guide/roadmap' },
       { text: 'GitHub', link: 'https://github.com/boettiger-lab/mcp-data-server', target: '_blank' },
     ],
 
@@ -18,6 +20,13 @@ export default {
           { text: 'Available Datasets', link: '/guide/datasets' },
           { text: 'Private Data Access', link: '/guide/private-data' },
           { text: 'Programmatic Access (R & Python)', link: '/guide/programmatic-access' },
+        ],
+      },
+      {
+        text: 'About',
+        items: [
+          { text: 'The bigger picture', link: '/guide/vision' },
+          { text: 'Roadmap', link: '/guide/roadmap' },
         ],
       },
       {
@@ -34,7 +43,7 @@ export default {
     ],
 
     footer: {
-      message: 'Released under the MIT License.',
+      message: 'Released under the BSD-3-Clause License.',
     },
 
     search: {
