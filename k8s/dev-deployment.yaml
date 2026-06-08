@@ -23,13 +23,8 @@ spec:
                     values: ["us-west"]
       containers:
       - name: server
-        image: ghcr.io/boettiger-lab/mcp-data-server:latest
-        command: ["/bin/sh", "-c"]
-        args:
-          - |
-            git clone https://github.com/boettiger-lab/mcp-data-server.git /app && \
-            cd /app && \
-            python server.py
+        image: ghcr.io/boettiger-lab/mcp-data-server:main
+        imagePullPolicy: Always
         env:
         - name: STAC_CATALOG_URL
           value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
