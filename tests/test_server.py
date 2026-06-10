@@ -803,5 +803,128 @@ class TestBuildFailureMarker:
         assert "synthetic build failure" in failed["error"]
 
 
+class TestEventLoopOffload:
+    """The MCP tools (query, register_hex_tiles, get_hex_tile_status) run their
+    blocking DuckDB / long-poll work in worker threads so a single long request
+    never blocks the uvicorn event loop — and thus /healthz, tile GETs, and other
+    concurrent MCP requests on the same pod. See issue (async tool offload)."""
+
+    def test_threaded_tool_preserves_name_doc_and_schema(self):
+        import inspect
+        import server
+
+        def impl(sql_query: str, s3_key: str = None) -> str:
+            """IMPL DOCSTRING."""
+            return "x"
+
+        w = server._threaded_tool(impl, server._QUERY_LIMITER)
+        # FastMCP derives the tool name + JSON schema from the wrapped function's
+        # signature/doc, so these must survive wrapping unchanged.
+        assert inspect.iscoroutinefunction(w)
+        assert w.__name__ == "impl"
+        assert w.__doc__ == "IMPL DOCSTRING."
+        assert str(inspect.signature(w)) == "(sql_query: str, s3_key: str = None) -> str"
+
+    def test_threaded_tool_keeps_event_loop_responsive(self):
+        """While the wrapped (blocking) implementation runs, the event loop must
+        keep ticking. If the work ran on the loop, the concurrent sleeps below
+        could not make progress until it finished."""
+        import threading
+        import anyio
+        import server
+
+        gate = threading.Event()
+
+        def blocking():
+            gate.wait(2.0)
+            return "done"
+
+        tool = server._threaded_tool(blocking, server._QUERY_LIMITER)
+
+        async def main():
+            ticks = 0
+            result = {}
+            async with anyio.create_task_group() as tg:
+
+                async def runner():
+                    result["r"] = await tool()
+
+                tg.start_soon(runner)
+                for _ in range(5):
+                    await anyio.sleep(0.02)
+                    ticks += 1
+                gate.set()  # release the worker thread so runner (and the tg) finish
+            assert ticks == 5
+            return result["r"]
+
+        assert anyio.run(main) == "done"
+
+    def test_registered_tools_are_async_with_stable_schema(self):
+        import inspect
+        import anyio
+        import server
+
+        # The wrappers actually registered with FastMCP are coroutine functions.
+        for wrapper in (
+            server.query_tool,
+            server.register_hex_tiles_tool,
+            server.get_hex_tile_status_tool,
+        ):
+            assert inspect.iscoroutinefunction(wrapper)
+
+        # Wrapping must not change the LLM-facing tool schema.
+        tools = {t.name: t for t in anyio.run(server.mcp.list_tools)}
+        assert sorted(tools["query"].inputSchema["properties"]) == [
+            "s3_endpoint", "s3_key", "s3_scope", "s3_secret", "sql_query",
+        ]
+        assert sorted(tools["register_hex_tiles"].inputSchema["properties"]) == [
+            "agg", "finest_res", "min_res", "sql", "zoom_offset",
+        ]
+        assert sorted(tools["get_hex_tile_status"].inputSchema["properties"]) == [
+            "hash", "wait_seconds",
+        ]
+
+    def test_register_uses_isolated_cursor_not_shared_connection(
+        self, isolated_jobs, monkeypatch
+    ):
+        """register_hex_tiles must run its prepare-phase probes on a fresh cursor,
+        not the shared _tile_con — otherwise concurrent offloaded calls race on a
+        single DuckDB connection."""
+        import server
+
+        captured = {}
+        real_prepare = server.prepare_hex_tiles
+
+        def spy_prepare(con, **kw):
+            captured["con"] = con
+            return real_prepare(con=con, **kw)
+
+        monkeypatch.setattr(server, "prepare_hex_tiles", spy_prepare)
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert captured["con"] is not server._get_tile_con()
+
+    def test_status_uses_isolated_cursor_not_shared_connection(
+        self, isolated_jobs, monkeypatch
+    ):
+        """get_hex_tile_status reads markers on a fresh cursor, not the shared
+        _tile_con, for the same concurrency reason."""
+        import server
+
+        captured = {}
+        real_read = server.read_existing_metadata
+
+        def spy_read(con, output_uri):
+            captured["con"] = con
+            return real_read(con, output_uri)
+
+        monkeypatch.setattr(server, "read_existing_metadata", spy_read)
+        server.get_hex_tile_status(hash="0" * 16, wait_seconds=0)
+        assert captured["con"] is not server._get_tile_con()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

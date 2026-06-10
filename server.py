@@ -1,3 +1,4 @@
+import functools
 import hmac
 import os
 import re
@@ -125,6 +126,35 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
         conn.close()
 
 # -------------------------------------------------------------------------
+# 4b. EVENT-LOOP OFFLOAD
+# -------------------------------------------------------------------------
+# FastMCP awaits coroutine tool functions but runs *synchronous* ones inline on
+# the uvicorn event loop (mcp 1.25.0 func_metadata.call_fn_with_arg_validation).
+# Our tools make blocking DuckDB / S3 / long-poll calls, so a single long query
+# would otherwise freeze the whole pod: /healthz stops answering (readiness
+# pulls the pod), tile GETs stall, and other MCP requests queue behind it.
+#
+# `_threaded_tool` wraps a blocking implementation as an async tool that runs the
+# work in a worker thread (anyio.to_thread), keeping the event loop free. A
+# per-tool CapacityLimiter bounds how many of each run at once so N concurrent
+# heavy queries can't oversubscribe CPU/memory. functools.wraps copies
+# __name__/__doc__/__annotations__ and sets __wrapped__, so FastMCP derives the
+# identical tool name + JSON schema from the wrapped function's signature.
+_QUERY_LIMITER = anyio.CapacityLimiter(int(os.environ.get("MCP_QUERY_CONCURRENCY", "8")))
+_REGISTER_LIMITER = anyio.CapacityLimiter(int(os.environ.get("MCP_REGISTER_CONCURRENCY", "4")))
+# Status long-polls are mostly idle waits (cheap to hold), so allow many.
+_STATUS_LIMITER = anyio.CapacityLimiter(int(os.environ.get("MCP_STATUS_CONCURRENCY", "32")))
+
+
+def _threaded_tool(sync_fn, limiter):
+    @functools.wraps(sync_fn)
+    async def _wrapper(**kwargs):
+        return await anyio.to_thread.run_sync(
+            functools.partial(sync_fn, **kwargs), limiter=limiter
+        )
+    return _wrapper
+
+# -------------------------------------------------------------------------
 # 5. MCP RESOURCES (Schema Browsing)
 # -------------------------------------------------------------------------
 @mcp.resource("catalog://list")
@@ -235,7 +265,9 @@ Credentials are scoped to this request only and never persisted.
 {TOOL_INJECTED_CONTEXT}
 """
 
-mcp.tool()(query)
+# Registered async so FastMCP runs the blocking query off the event loop.
+query_tool = _threaded_tool(query, _QUERY_LIMITER)
+mcp.tool()(query_tool)
 
 # -------------------------------------------------------------------------
 # 8b. TILE ENDPOINT — dynamic MVT for H3 hex visualization (see issue #4)
@@ -265,13 +297,26 @@ from tiles.pyramid import (
 # their own connections via the executor below so a long-running COPY can't
 # block tile-serve reads.
 _tile_con = None
+_tile_con_lock = threading.Lock()
 
 
 def _get_tile_con():
+    # Double-checked locking: register_hex_tiles / get_hex_tile_status now run in
+    # worker threads (see _threaded_tool), so first-touch initialization can race.
     global _tile_con
     if _tile_con is None:
-        _tile_con = build_tile_connection()
+        with _tile_con_lock:
+            if _tile_con is None:
+                _tile_con = build_tile_connection()
     return _tile_con
+
+
+def _tile_cursor():
+    # A DuckDB connection is not safe for concurrent queries; .cursor() yields an
+    # independent handle on the same database (loaded extensions + config shared).
+    # The tile-serve path already does this; register/status must too now that
+    # they run off the event loop and can overlap on the shared _tile_con.
+    return _get_tile_con().cursor()
 
 
 # Pod identity for cross-pod attribution in lock.json. In k8s, HOSTNAME
@@ -415,7 +460,7 @@ def register_hex_tiles(
 
     Always pass hive_partitioning = true so the planner can prune h0=* files.
     """
-    read_con = _get_tile_con()
+    read_con = _tile_cursor()
     plan = prepare_hex_tiles(
         con=read_con, sql=sql, agg=agg,
         finest_res=finest_res, min_res=min_res, zoom_offset=zoom_offset,
@@ -471,7 +516,8 @@ def register_hex_tiles(
         }
 
 
-mcp.tool()(register_hex_tiles)
+register_hex_tiles_tool = _threaded_tool(register_hex_tiles, _REGISTER_LIMITER)
+mcp.tool()(register_hex_tiles_tool)
 
 
 _STATUS_POLL_MAX_WAIT_SECONDS = 60
@@ -527,11 +573,15 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
     paths = tile_paths_for_hash(hash)
     base = {"hash": hash, "tile_url_template": paths["tile_url_template"]}
 
-    cached = read_existing_metadata(_get_tile_con(), paths["output_uri"])
+    # One private cursor for this invocation — this runs in a worker thread now
+    # and must not share query state with concurrent calls on _tile_con.
+    con = _tile_cursor()
+
+    cached = read_existing_metadata(con, paths["output_uri"])
     if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
         return _done_response(base, cached)
 
-    failed = read_failed(_get_tile_con(), paths["output_uri"])
+    failed = read_failed(con, paths["output_uri"])
     if failed is not None:
         return {**base, "status": "failed", "error": failed.get("error", "")}
 
@@ -540,7 +590,7 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
 
     if job is None:
         # No local job — but another pod may own this build. Consult lock.json.
-        lock = read_lock(_get_tile_con(), paths["output_uri"])
+        lock = read_lock(con, paths["output_uri"])
         if lock is None or lock_is_stale(lock):
             return {**base, "status": "unknown"}
 
@@ -549,10 +599,10 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
         # this is server-internal, the LLM sees one tool call.
         deadline = time.time() + wait_seconds
         while True:
-            cached = read_existing_metadata(_get_tile_con(), paths["output_uri"])
+            cached = read_existing_metadata(con, paths["output_uri"])
             if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
                 return _done_response(base, cached)
-            failed_now = read_failed(_get_tile_con(), paths["output_uri"])
+            failed_now = read_failed(con, paths["output_uri"])
             if failed_now is not None:
                 return {**base, "status": "failed", "error": failed_now.get("error", "")}
             if time.time() >= deadline:
@@ -587,7 +637,8 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
             "elapsed_seconds": round(time.time() - job["started_at"], 1)}
 
 
-mcp.tool()(get_hex_tile_status)
+get_hex_tile_status_tool = _threaded_tool(get_hex_tile_status, _STATUS_LIMITER)
+mcp.tool()(get_hex_tile_status_tool)
 
 
 def mount_tiles(app):
