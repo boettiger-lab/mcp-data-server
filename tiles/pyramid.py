@@ -5,6 +5,7 @@ Tile requests read directly from the pyramid — no coordination needed.
 """
 import json
 import os
+import sys
 import time
 from decimal import Decimal
 from typing import List
@@ -360,6 +361,7 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     value_columns = plan["value_columns"]
     output_uri = plan["output_uri"]
 
+    h = plan["hash"]
     statements = build_pyramid_statements(
         user_sql=sql,
         finest_res=finest_res,
@@ -371,8 +373,18 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     )
     if not output_uri.startswith("s3://"):
         os.makedirs(output_uri, exist_ok=True)
-    for stmt in statements:
+    # Per-phase timing — the COPY loop is the dominant cost (#178). Statement 0
+    # is Phase 1 (raw source -> finest res); statement i builds res finest-i.
+    build_t0 = time.perf_counter()
+    for i, stmt in enumerate(statements):
+        s0 = time.perf_counter()
         con.sql(stmt)
+        print(
+            f"[tile-build] hash={h} phase={'1' if i == 0 else '2'} "
+            f"res={finest_res - i} copy={time.perf_counter() - s0:.1f}s",
+            file=sys.stderr,
+        )
+    copy_seconds = time.perf_counter() - build_t0
 
     def _jsonable(v):
         # DuckDB returns DECIMAL for literal-typed numerics; coerce to float
@@ -381,6 +393,7 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
             return float(v)
         return v
 
+    stats_t0 = time.perf_counter()
     value_stats = {}
     for col in value_columns:
         by_res = {}
@@ -393,7 +406,9 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
             ).fetchone()
             by_res[str(res)] = {"min": _jsonable(row[0]), "max": _jsonable(row[1])}
         value_stats[col] = {"by_res": by_res}
+    stats_seconds = time.perf_counter() - stats_t0
 
+    bounds_t0 = time.perf_counter()
     finest_uri = f"{output_uri}res={finest_res}/**/*.parquet"
     bounds_row = con.sql(
         f"SELECT "
@@ -403,6 +418,15 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
         f"FROM read_parquet('{finest_uri}')"
     ).fetchone()
     w, s, e, n, feature_count = bounds_row[2], bounds_row[0], bounds_row[3], bounds_row[1], bounds_row[4]
+    bounds_seconds = time.perf_counter() - bounds_t0
+
+    print(
+        f"[tile-build] hash={h} DONE statements={len(statements)} "
+        f"finest_res={finest_res} min_res={min_res} "
+        f"copy={copy_seconds:.1f}s stats={stats_seconds:.1f}s bounds={bounds_seconds:.1f}s "
+        f"total={time.perf_counter() - build_t0:.1f}s feature_count_finest={feature_count}",
+        file=sys.stderr,
+    )
 
     metadata = {
         "finest_res": finest_res,
