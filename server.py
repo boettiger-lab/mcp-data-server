@@ -338,16 +338,19 @@ def _submit_build(plan: dict) -> concurrent.futures.Future:
 # docstring — the MCP framework derives the LLM-facing tool schema from the
 # docstring, so they stay invisible to the agent. Auto-detection (in
 # tiles.pyramid.register_hex_tiles) reads the H column's resolution to set
-# finest_res; min_res=2 and zoom_offset=-1 are the only sensible values for
-# the current tile rendering. Adding `finest_res` etc. to the docstring is
-# almost certainly a mistake — see #125 for the trigger-tightening rationale
-# and the surrounding discussion about parameter surface.
+# finest_res; min_res=2 is the coarsest level worth materializing. zoom_offset=2
+# maps map-zoom z to H3 res z-2, keeping each tile to ~100-2000 hexes (a healthy
+# MVT feature count) while preserving detail. The previous default (-1, i.e. res
+# z+1) put 40k-130k hexes in every CA-scale tile — fat .pbf payloads and slow
+# ST_AsMVT, for sub-pixel hexes MapLibre couldn't distinguish anyway (#178).
+# Adding `finest_res` etc. to the docstring is almost certainly a mistake — see
+# #125 for the trigger-tightening rationale and the discussion about param surface.
 def register_hex_tiles(
     sql: str,
     agg: str = "COUNT",
     finest_res: int | None = None,
     min_res: int = 2,
-    zoom_offset: int = -1,
+    zoom_offset: int = 2,
 ) -> dict:
     """Materialize a partitioned H3 hex pyramid to public object storage and return
     a MapLibre-compatible vector tile URL template.

@@ -267,7 +267,7 @@ def prepare_hex_tiles(
     finest_res: int | None = None,
     min_res: int = 2,
     agg: str = "AVG",
-    zoom_offset: int = -1,
+    zoom_offset: int = 2,
 ) -> dict:
     """Inspect user SQL, resolve finest_res, compute the content hash, and
     check the S3 cache. Fast — no COPY runs here.
@@ -465,7 +465,7 @@ def register_hex_tiles(
     finest_res: int | None = None,
     min_res: int = 2,
     agg: str = "AVG",
-    zoom_offset: int = -1,
+    zoom_offset: int = 2,
 ) -> dict:
     """Materialize a partitioned parquet pyramid and return tile-endpoint metadata.
 
