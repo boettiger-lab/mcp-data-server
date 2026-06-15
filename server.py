@@ -250,6 +250,7 @@ from tiles.pyramid import (
     prepare_hex_tiles,
     build_hex_tiles,
     cached_result_dict,
+    render_recipe,
     lock_is_stale,
     read_existing_metadata,
     read_failed,
@@ -352,8 +353,12 @@ def register_hex_tiles(
     min_res: int = 2,
     zoom_offset: int = 2,
 ) -> dict:
-    """Materialize a partitioned H3 hex pyramid to public object storage and return
-    a MapLibre-compatible vector tile URL template.
+    """Aggregate an H3 hex visualization to public object storage and return a
+    paste-ready MapLibre render recipe.
+
+    The server picks the rendering automatically — a single GeoJSON file for
+    small/bounded results, a vector tile pyramid for large ones — and hands back
+    a ready `source` and `layer`. You render those verbatim; you never choose.
 
     WHEN TO USE — only when the user explicitly asks for an aggregate
     density / heatmap / hex-grid visualization over a region. Trigger phrases:
@@ -379,26 +384,24 @@ def register_hex_tiles(
           `agg` at every coarser level.
 
     Returns a dict with `status` ∈ {"done", "running", "failed"}:
-    - status="done" (cache hit or fast build): full metadata is included —
-      `tile_url_template` (MapLibre vector tile URL with {z}/{x}/{y}),
-      `value_columns` (MVT feature properties: ["count"] for agg="COUNT",
-      otherwise your value columns), `value_stats` ({<col>: {"by_res":
-      {"<res>": {"min", "max"}}}} for client-side palette domain),
-      `layer_name` (use as `source-layer`), plus `hash`, `bounds`,
-      `finest_res`, `feature_count_finest`.
-    - status="running": pyramid is being built in the background. You get
-      `hash` and `tile_url_template` only. Call
-      `get_hex_tile_status(hash, wait_seconds=30)` to poll — that long-polls
-      server-side, so one call returns either the final result or a single
-      "still running" response. Do NOT retry register_hex_tiles with
-      different parameters; the original build will still finish, and
-      re-submitting queues more work without cancelling the first one.
-    - status="failed": build raised an error inline. `error` field has the
-      exception message. Safe to re-submit with adjusted parameters.
+    - status="done" (cache hit or fast build): includes the render recipe —
+      `source` (pass to map.addSource) and `layer` (pass to map.addLayer),
+      both ready to use as-is with a default color ramp. Also `format`
+      ("geojson" or "vector"), `value_columns` and `value_stats` ({<col>:
+      {"by_res": {"<res>": {"min","max"}}}}) if you want to customize the
+      palette, plus `hash`, `bounds`, `feature_count_finest`.
+    - status="running": being built in the background. You get `hash` and
+      `tile_url_template`. Call `get_hex_tile_status(hash, wait_seconds=30)`
+      to poll — it long-polls server-side, so one call returns either the
+      final recipe or a single "still running" response. Do NOT retry
+      register_hex_tiles with different parameters; the original build still
+      finishes, and re-submitting only queues more work.
+    - status="failed": build raised an error inline. `error` has the message.
+      Safe to re-submit with adjusted parameters.
 
-    MapLibre usage:
-        map.addSource(id, {type: 'vector', tiles: [tile_url_template], minzoom: 0, maxzoom: 14});
-        map.addLayer({..., 'source-layer': layer_name, paint: {...}});
+    MapLibre usage (identical regardless of format — render what you got):
+        map.addSource(id, result.source);
+        map.addLayer({id: ..., source: id, ...result.layer});
 
     SQL patterns — pick the one matching the ask; paste exact paths from
     get_stac_details. `<H>` is the H3 resolution, usually 8.
@@ -487,20 +490,24 @@ mcp.tool()(register_hex_tiles)
 _STATUS_POLL_MAX_WAIT_SECONDS = 60
 
 
-def _done_response(base: dict, source: dict) -> dict:
+def _done_response(base: dict, meta: dict) -> dict:
     """Build a status='done' response from either an S3 metadata dict or
-    a build_hex_tiles return value — both have the same shape."""
+    a build_hex_tiles return value — both have the same shape. Includes the
+    paste-ready render recipe (format + source + layer) so the agent renders
+    the result without choosing between GeoJSON and vector tiles (#178)."""
     return {
         **base,
         "status": "done",
-        "bounds": source["bounds"],
-        "finest_res": source["finest_res"],
-        "min_res": source["min_res"],
-        "zoom_offset": source["zoom_offset"],
-        "value_columns": source["value_columns"],
-        "value_stats": source["value_stats"],
-        "layer_name": source.get("layer_name", MVT_LAYER_NAME),
-        "feature_count_finest": source["feature_count_finest"],
+        "bounds": meta["bounds"],
+        "finest_res": meta["finest_res"],
+        "min_res": meta["min_res"],
+        "zoom_offset": meta["zoom_offset"],
+        "value_columns": meta["value_columns"],
+        "value_stats": meta["value_stats"],
+        "layer_name": meta.get("layer_name", MVT_LAYER_NAME),
+        "feature_count_finest": meta["feature_count_finest"],
+        "geojson_url": meta.get("geojson_url"),
+        **render_recipe(meta, base["tile_url_template"]),
     }
 
 
