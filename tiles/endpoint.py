@@ -12,6 +12,7 @@ import json
 import math
 import os
 import sys
+import time
 import anyio
 from starlette.requests import Request
 from starlette.responses import Response
@@ -240,11 +241,19 @@ async def serve_tile(request: Request) -> Response:
     target_res = zoom_to_h3_res(z, min_res=min_res, finest_res=finest_res, zoom_offset=zoom_offset)
 
     sql = _build_tile_sql(namespace, name, z, x, y, target_res, finest_res)
+    t0 = time.perf_counter()
     try:
         mvt_bytes = await anyio.to_thread.run_sync(_run_tile_query, con, sql)
     except Exception as e:
         print(f"Tile {z}/{x}/{y} error: {e}", file=sys.stderr)
         return Response(status_code=500)
+    # Per-tile serve timing (#178) — grep [tile-serve] to spot fat/slow tiles
+    # (the symptom of an over-fine zoom->resolution mapping).
+    print(
+        f"[tile-serve] hex/{name} z={z} x={x} y={y} res={target_res} "
+        f"bytes={len(mvt_bytes)} {(time.perf_counter() - t0) * 1000:.0f}ms",
+        file=sys.stderr,
+    )
 
     if not mvt_bytes:
         return Response(status_code=204, headers={"Cache-Control": TILE_CACHE_CONTROL})

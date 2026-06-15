@@ -306,9 +306,16 @@ def _submit_build(plan: dict) -> concurrent.futures.Future:
 
         def _do_build():
             build_con = build_tile_connection()
+            print(f"[tile-build] hash={h} START pod={_POD_ID}", file=sys.stderr)
+            t0 = time.perf_counter()
             try:
                 return build_hex_tiles(build_con, plan)
             except Exception as exc:
+                print(
+                    f"[tile-build] hash={h} FAILED after "
+                    f"{time.perf_counter() - t0:.1f}s: {exc}",
+                    file=sys.stderr,
+                )
                 # Persist failure so other pods (and this pod after _jobs
                 # eviction) can return status=failed instead of "unknown".
                 try:
