@@ -50,6 +50,13 @@ class TestZoomToRes:
     def test_custom_offset(self):
         assert zoom_to_h3_res(10, min_res=2, finest_res=9, zoom_offset=2) == 8
 
+    def test_default_offset_is_two_maps_z_to_z_minus_2(self):
+        # #178: the default must map map-zoom z -> H3 res z-2 (not the old z+1),
+        # keeping each tile to ~100-2000 hexes instead of 40k-130k. Pin it so a
+        # regression to the over-fine mapping is caught here.
+        for z in range(4, 11):
+            assert zoom_to_h3_res(z, min_res=2, finest_res=12) == z - 2
+
 
 class TestContentHash:
     def test_stable_for_identical_inputs(self):

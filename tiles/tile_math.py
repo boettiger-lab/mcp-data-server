@@ -14,8 +14,14 @@ def tile_xyz_to_lnglat_bounds(z: int, x: int, y: int) -> Tuple[float, float, flo
     return (west, lat_s, east, lat_n)
 
 
-def zoom_to_h3_res(z: int, min_res: int, finest_res: int, zoom_offset: int = -1) -> int:
-    """Clamp(z - zoom_offset, min_res, finest_res) — coarser hexes at lower zooms."""
+def zoom_to_h3_res(z: int, min_res: int, finest_res: int, zoom_offset: int = 2) -> int:
+    """Clamp(z - zoom_offset, min_res, finest_res) — coarser hexes at lower zooms.
+
+    zoom_offset=2 (the default) maps map-zoom z to H3 res z-2, which keeps each
+    tile to ~100-2000 hexes across zooms — a healthy MVT feature count. Smaller
+    offsets render finer hexes (more features/tile, fatter .pbf); offset=-1 (the
+    old default) produced 40k-130k hexes per tile at CA-scale zooms (#178).
+    """
     target = z - zoom_offset
     return max(min_res, min(finest_res, target))
 
