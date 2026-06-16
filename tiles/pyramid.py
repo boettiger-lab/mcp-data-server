@@ -25,6 +25,12 @@ MVT_LAYER_NAME = "layer"
 # gives ~8x headroom.
 _LOCK_STALE_SECONDS = int(os.environ.get("TILE_LOCK_STALE_SECONDS", "900"))
 
+# Hex sets at or below this many finest-res cells are served as a single
+# GeoJSON FeatureCollection (streamed straight to object storage, fetched
+# client-side by MapLibre from the public gateway) instead of building an MVT
+# tile pyramid. Larger sets fall back to the pyramid. Env-overridable. See #178.
+_GEOJSON_MAX_FEATURES = int(os.environ.get("TILE_GEOJSON_MAX_FEATURES", "100000"))
+
 
 def build_pyramid_statements(
     user_sql: str,
@@ -133,6 +139,72 @@ def _bucket_base() -> str:
 
 def _public_base_url() -> str:
     return os.environ.get("MCP_PUBLIC_BASE_URL", "https://duckdb-mcp.nrp-nautilus.io").rstrip("/")
+
+
+def _s3_public_http_base() -> str:
+    """Public HTTPS gateway for the object store (CORS-enabled, GET-only). A
+    browser fetches GeoJSON directly from here — see stac.py, same gateway."""
+    return os.environ.get("S3_PUBLIC_HTTP_BASE", "https://s3-west.nrp-nautilus.io").rstrip("/")
+
+
+def _to_public_http_url(uri: str) -> str:
+    """Map an s3://bucket/key write URI to the public HTTPS URL MapLibre can
+    fetch client-side. Non-s3 paths (local test dirs) are returned unchanged."""
+    if uri.startswith("s3://"):
+        return f"{_s3_public_http_base()}/{uri[len('s3://'):]}"
+    return uri
+
+
+def build_geojson_statement(finest_uri: str, geojson_uri: str, value_columns: List[str]) -> str:
+    """COPY that writes the finest-res hexes as one valid GeoJSON FeatureCollection.
+
+    Uses DuckDB's native JSON export (FORMAT JSON) plus ST_AsGeoJSON — a spatial
+    scalar, NOT the GDAL-backed ST_Write — so it streams to s3:// over httpfs.
+    A single output row becomes one line that is the whole FeatureCollection
+    object; json_group_array nests each cell's GeoJSON geometry and properties.
+    """
+    props = ", ".join(f"'{c}', \"{c}\"" for c in value_columns)
+    return (
+        "COPY (\n"
+        "  SELECT 'FeatureCollection' AS type,\n"
+        "         coalesce(json_group_array(json_object(\n"
+        "           'type', 'Feature',\n"
+        "           'geometry', CAST(ST_AsGeoJSON(h3_cell_to_boundary_wkt(h)::GEOMETRY) AS JSON),\n"
+        f"           'properties', json_object({props})\n"
+        "         )), '[]'::JSON) AS features\n"
+        f"  FROM read_parquet('{finest_uri}')\n"
+        f") TO '{geojson_uri}' (FORMAT JSON)"
+    )
+
+
+def render_recipe(meta: dict, tile_url_template: str) -> dict:
+    """Return {format, source, layer}: a paste-ready MapLibre source + fill
+    layer with a default linear color ramp over the first value column.
+
+    The agent renders these verbatim and never branches on format. `format` is
+    read from meta ('geojson' or 'vector'; defaults to 'vector' for pre-#178
+    metadata). GeoJSON sources point at the public object-store URL; vector
+    sources at the tile endpoint and carry `source-layer`.
+    """
+    fmt = meta.get("format") or "vector"
+    col = meta["value_columns"][0]
+    by_res = meta.get("value_stats", {}).get(col, {}).get("by_res", {})
+    stats = by_res.get(str(meta["finest_res"])) or (next(iter(by_res.values())) if by_res else None)
+    vmin = stats["min"] if stats and stats.get("min") is not None else 0
+    vmax = stats["max"] if stats and stats.get("max") is not None else vmin
+    if vmax == vmin:
+        vmax = vmin + 1  # degenerate domain — keep the interpolate stops distinct
+    paint = {
+        "fill-color": ["interpolate", ["linear"], ["get", col], vmin, "#fee5d9", vmax, "#a50f15"],
+        "fill-opacity": 0.7,
+    }
+    if fmt == "geojson":
+        source = {"type": "geojson", "data": meta.get("geojson_url")}
+        layer = {"type": "fill", "paint": paint}
+    else:
+        source = {"type": "vector", "tiles": [tile_url_template], "minzoom": 0, "maxzoom": 14}
+        layer = {"type": "fill", "source-layer": meta.get("layer_name", MVT_LAYER_NAME), "paint": paint}
+    return {"format": fmt, "source": source, "layer": layer}
 
 
 def _json_dumps_escaped(obj) -> str:
@@ -246,7 +318,7 @@ def read_existing_metadata(con: duckdb.DuckDBPyConnection, output_uri: str):
 
 
 def cached_result_dict(plan: dict, cached: dict) -> dict:
-    return {
+    result = {
         "tile_url_template": plan["tile_url_template"],
         "hash": plan["hash"],
         "bounds": cached["bounds"],
@@ -257,8 +329,11 @@ def cached_result_dict(plan: dict, cached: dict) -> dict:
         "value_stats": cached["value_stats"],
         "layer_name": cached.get("layer_name", MVT_LAYER_NAME),
         "feature_count_finest": cached["feature_count_finest"],
+        "geojson_url": cached.get("geojson_url"),
         "cache_hit": True,
     }
+    result.update(render_recipe(cached, plan["tile_url_template"]))
+    return result
 
 
 def prepare_hex_tiles(
@@ -373,18 +448,6 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     )
     if not output_uri.startswith("s3://"):
         os.makedirs(output_uri, exist_ok=True)
-    # Per-phase timing — the COPY loop is the dominant cost (#178). Statement 0
-    # is Phase 1 (raw source -> finest res); statement i builds res finest-i.
-    build_t0 = time.perf_counter()
-    for i, stmt in enumerate(statements):
-        s0 = time.perf_counter()
-        con.sql(stmt)
-        print(
-            f"[tile-build] hash={h} phase={'1' if i == 0 else '2'} "
-            f"res={finest_res - i} copy={time.perf_counter() - s0:.1f}s",
-            file=sys.stderr,
-        )
-    copy_seconds = time.perf_counter() - build_t0
 
     def _jsonable(v):
         # DuckDB returns DECIMAL for literal-typed numerics; coerce to float
@@ -393,20 +456,17 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
             return float(v)
         return v
 
-    stats_t0 = time.perf_counter()
-    value_stats = {}
-    for col in value_columns:
-        by_res = {}
-        for res in range(min_res, finest_res + 1):
-            # Recursive glob — h0 hive sub-partitions live under res=N/.
-            uri = f"{output_uri}res={res}/**/*.parquet"
-            row = con.sql(
-                f'SELECT MIN("{col}") AS mn, MAX("{col}") AS mx '
-                f"FROM read_parquet('{uri}')"
-            ).fetchone()
-            by_res[str(res)] = {"min": _jsonable(row[0]), "max": _jsonable(row[1])}
-        value_stats[col] = {"by_res": by_res}
-    stats_seconds = time.perf_counter() - stats_t0
+    # Per-phase timing — the COPY loop is the dominant build cost (#178).
+    build_t0 = time.perf_counter()
+    copy_seconds = 0.0
+
+    # Phase 1 always: materialize the finest resolution. This is both the
+    # pyramid's base level and the source set for the GeoJSON fast path.
+    s0 = time.perf_counter()
+    con.sql(statements[0])
+    dt = time.perf_counter() - s0
+    copy_seconds += dt
+    print(f"[tile-build] hash={h} phase=1 res={finest_res} copy={dt:.1f}s", file=sys.stderr)
 
     bounds_t0 = time.perf_counter()
     finest_uri = f"{output_uri}res={finest_res}/**/*.parquet"
@@ -420,11 +480,59 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     w, s, e, n, feature_count = bounds_row[2], bounds_row[0], bounds_row[3], bounds_row[1], bounds_row[4]
     bounds_seconds = time.perf_counter() - bounds_t0
 
+    # Auto-select (#178): small/bounded sets render fastest as a single
+    # client-side GeoJSON; larger sets need the tiled pyramid. The count comes
+    # free from the already-materialized Phase 1 level.
+    serve_format = "geojson" if feature_count <= _GEOJSON_MAX_FEATURES else "vector"
+
+    # Phase 2 (parent resolutions) is only for the tile path — GeoJSON renders
+    # the finest set directly, so coarser pyramid levels are never requested.
+    if serve_format == "vector":
+        for i, stmt in enumerate(statements[1:], start=1):
+            s0 = time.perf_counter()
+            con.sql(stmt)
+            dt = time.perf_counter() - s0
+            copy_seconds += dt
+            print(
+                f"[tile-build] hash={h} phase=2 res={finest_res - i} copy={dt:.1f}s",
+                file=sys.stderr,
+            )
+
+    # Per-resolution value stats. GeoJSON only uses the finest level (the
+    # client colors from it), so we skip the parent levels it never builds.
+    stats_t0 = time.perf_counter()
+    stat_levels = range(min_res, finest_res + 1) if serve_format == "vector" else [finest_res]
+    value_stats = {}
+    for col in value_columns:
+        by_res = {}
+        for res in stat_levels:
+            # Recursive glob — h0 hive sub-partitions live under res=N/.
+            uri = f"{output_uri}res={res}/**/*.parquet"
+            row = con.sql(
+                f'SELECT MIN("{col}") AS mn, MAX("{col}") AS mx '
+                f"FROM read_parquet('{uri}')"
+            ).fetchone()
+            by_res[str(res)] = {"min": _jsonable(row[0]), "max": _jsonable(row[1])}
+        value_stats[col] = {"by_res": by_res}
+    stats_seconds = time.perf_counter() - stats_t0
+
+    # GeoJSON path: stream the FeatureCollection straight to object storage so
+    # MapLibre fetches it directly from the public gateway (no pod serving).
+    geojson_url = None
+    geojson_seconds = 0.0
+    if serve_format == "geojson":
+        gj_t0 = time.perf_counter()
+        geojson_uri = f"{output_uri}data.geojson"
+        con.sql(build_geojson_statement(finest_uri, geojson_uri, value_columns))
+        geojson_url = _to_public_http_url(geojson_uri)
+        geojson_seconds = time.perf_counter() - gj_t0
+
     print(
-        f"[tile-build] hash={h} DONE statements={len(statements)} "
+        f"[tile-build] hash={h} DONE format={serve_format} "
         f"finest_res={finest_res} min_res={min_res} "
         f"copy={copy_seconds:.1f}s stats={stats_seconds:.1f}s bounds={bounds_seconds:.1f}s "
-        f"total={time.perf_counter() - build_t0:.1f}s feature_count_finest={feature_count}",
+        f"geojson={geojson_seconds:.1f}s total={time.perf_counter() - build_t0:.1f}s "
+        f"feature_count_finest={feature_count}",
         file=sys.stderr,
     )
 
@@ -438,6 +546,8 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
         "layer_name": MVT_LAYER_NAME,
         "bounds": [w, s, e, n],
         "feature_count_finest": feature_count,
+        "format": serve_format,
+        "geojson_url": geojson_url,
     }
     metadata_sql = (
         f"COPY (SELECT '{_json_dumps_escaped(metadata)}' AS j) "
@@ -445,7 +555,7 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     )
     con.sql(metadata_sql)
 
-    return {
+    result = {
         "tile_url_template": plan["tile_url_template"],
         "hash": plan["hash"],
         "bounds": [w, s, e, n],
@@ -456,7 +566,10 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
         "value_stats": value_stats,
         "layer_name": MVT_LAYER_NAME,
         "feature_count_finest": feature_count,
+        "geojson_url": geojson_url,
     }
+    result.update(render_recipe(metadata, plan["tile_url_template"]))
+    return result
 
 
 def register_hex_tiles(

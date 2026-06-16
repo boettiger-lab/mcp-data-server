@@ -235,6 +235,10 @@ async def serve_tile(request: Request) -> Response:
     )
     if meta is None:
         return Response(status_code=404)
+    # GeoJSON tilesets are fetched as a single file from the object-store
+    # gateway, not served as MVT here (#178). No parent pyramid levels exist.
+    if meta.get("format") == "geojson":
+        return Response(status_code=404)
     finest_res = meta["finest_res"]
     min_res = meta["min_res"]
     zoom_offset = meta["zoom_offset"]
