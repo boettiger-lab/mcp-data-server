@@ -17,7 +17,11 @@ import anyio
 from starlette.requests import Request
 from starlette.responses import Response
 
-from tiles.tile_math import tile_xyz_to_lnglat_bounds, zoom_to_h3_res
+from tiles.tile_math import (
+    h3_edge_padding_deg,
+    tile_xyz_to_lnglat_bounds,
+    zoom_to_h3_res,
+)
 
 
 MVT_CONTENT_TYPE = "application/vnd.mapbox-vector-tile"
@@ -139,8 +143,12 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
          partitioned pyramid to a handful of files instead of scanning the
          entire globe at the target resolution.
       3. Filter pyramid rows where the cell's center lat/lng falls inside the
-         tile bbox. Each cell is rendered by exactly one tile (the one
-         containing its center).
+         tile bbox *widened by one hex circumradius* (h3_edge_padding_deg).
+         A hex straddling a tile edge has its center in one tile but its body
+         in both; the pad makes every tile it touches emit it, so the renderer
+         draws the full hex on both sides of the seam (#188). The same hex thus
+         appears in several neighboring tiles — harmless for rendering, and
+         ST_AsMVTGeom's buffer lets MapLibre stitch the duplicates seamlessly.
       4. Project cell geometries with ST_AsMVTGeom then aggregate with ST_AsMVT.
 
     bbox_h0 candidate-cell derivation:
@@ -162,21 +170,34 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
     # cells whose boundary crosses the antimeridian; unwrap geometry only there.
     touches_dateline = west <= -179.999 or east >= 179.999
     boundary_geom = _boundary_geom_sql(touches_dateline)
+    # ST_AsMVTGeom bounds stay the *exact* tile bbox — the merc projection must
+    # map cell coords to true tile pixels. The seam pad widens only the cell
+    # SELECTION window (below), not the projection bounds.
     mx_w = _lng_to_merc_x(west)
     mx_e = _lng_to_merc_x(east)
     my_s = _lat_to_merc_y(south)
     my_n = _lat_to_merc_y(north)
+
+    # Widen the cell-selection window by ~one hex circumradius so boundary-
+    # crossing hexes are emitted by every tile they touch (#188). pad_lng grows
+    # with latitude; use the pole-most edge so the wider side covers the tile.
+    pad_lat, pad_lng = h3_edge_padding_deg(target_res, max(abs(north), abs(south)))
+    south_p = south - pad_lat
+    north_p = north + pad_lat
+    west_p = west - pad_lng
+    east_p = east + pad_lng
 
     if z <= 2:
         bbox_h0_sql = "SELECT CAST(UNNEST(h3_get_res0_cells()) AS BIGINT) AS h0"
     else:
         # 8x8 grid → sample spacing ~tile_width/7. At z>=3 tile width <= 45°
         # while h0 diameter is ~15° (Earth/12 cells), so every overlapping h0
-        # cell receives at least one sample point.
+        # cell receives at least one sample point. Sample the padded bbox so an
+        # edge hex sitting in a neighboring h0 partition isn't pruned away.
         bbox_h0_sql = (
             "SELECT DISTINCT CAST(h3_latlng_to_cell(\n"
-            f"  {south} + (i/7.0) * ({north} - {south}),\n"
-            f"  {west} + (j/7.0) * ({east} - {west}),\n"
+            f"  {south_p} + (i/7.0) * ({north_p} - {south_p}),\n"
+            f"  {west_p} + (j/7.0) * ({east_p} - {west_p}),\n"
             "  0\n"
             ") AS BIGINT) AS h0\n"
             "FROM range(8) t1(i), range(8) t2(j)"
@@ -192,14 +213,15 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
             hive_partitioning=true
           ) p
           SEMI JOIN bbox_h0 USING (h0)
-          WHERE h3_cell_to_lat(p.h) BETWEEN {south} AND {north}
-            AND h3_cell_to_lng(p.h) BETWEEN {west} AND {east}
+          WHERE h3_cell_to_lat(p.h) BETWEEN {south_p} AND {north_p}
+            AND h3_cell_to_lng(p.h) BETWEEN {west_p} AND {east_p}
         ),
         projected AS (
           SELECT
             ST_AsMVTGeom(
               ST_Transform({boundary_geom}, 'EPSG:4326', 'EPSG:3857', true),
-              {{'min_x': {mx_w}, 'min_y': {my_s}, 'max_x': {mx_e}, 'max_y': {my_n}}}::BOX_2D
+              {{'min_x': {mx_w}, 'min_y': {my_s}, 'max_x': {mx_e}, 'max_y': {my_n}}}::BOX_2D,
+              4096, 256, true
             ) AS geom,
             src.* EXCLUDE (h, h0)
           FROM src
@@ -242,7 +264,22 @@ async def serve_tile(request: Request) -> Response:
     finest_res = meta["finest_res"]
     min_res = meta["min_res"]
     zoom_offset = meta["zoom_offset"]
-    target_res = zoom_to_h3_res(z, min_res=min_res, finest_res=finest_res, zoom_offset=zoom_offset)
+    # Adaptive zoom->res (#188): bounds + feature_count_finest let the mapping
+    # pick the finest res that keeps each tile within the cell budget, so bounded
+    # data (CA) shows finer hexes at mid-zoom than global data does. Both fields
+    # are present in all post-#178 metadata; .get keeps pre-#178 tilesets on the
+    # legacy linear mapping. Budget is ops-tunable via TILE_TARGET_CELLS_PER_TILE.
+    target_res = zoom_to_h3_res(
+        z,
+        min_res=min_res,
+        finest_res=finest_res,
+        zoom_offset=zoom_offset,
+        feature_count_finest=meta.get("feature_count_finest"),
+        bounds=meta.get("bounds"),
+        target_cells_per_tile=int(
+            os.environ.get("TILE_TARGET_CELLS_PER_TILE", "4000")
+        ),
+    )
 
     sql = _build_tile_sql(namespace, name, z, x, y, target_res, finest_res)
     t0 = time.perf_counter()
