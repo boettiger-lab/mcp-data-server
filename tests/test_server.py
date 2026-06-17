@@ -286,6 +286,31 @@ class TestTileRouteMounted:
         tool_names = [t.name for t in anyio.run(mcp.list_tools)]
         assert "get_hex_tile_status" in tool_names
 
+    def test_hex_tools_are_served_async(self):
+        """The MCP-served hex tools must be coroutine functions so FastMCP
+        awaits them instead of running them inline on the event loop (#176)."""
+        import inspect, server
+        assert inspect.iscoroutinefunction(server._register_hex_tiles_tool)
+        assert inspect.iscoroutinefunction(server._get_hex_tile_status_tool)
+
+    def test_hex_tool_descriptions_preserve_llm_docstring(self):
+        """The async wrappers reuse the sync functions' docstrings as the
+        LLM-facing tool description, so registering the wrapper doesn't drop it."""
+        from server import mcp, register_hex_tiles, get_hex_tile_status
+        import anyio
+        tools = {t.name: t for t in anyio.run(mcp.list_tools)}
+        assert tools["register_hex_tiles"].description == register_hex_tiles.__doc__
+        assert tools["get_hex_tile_status"].description == get_hex_tile_status.__doc__
+
+    def test_async_status_wrapper_matches_sync_core_for_unknown(self):
+        """The async tool returns the same payload as the sync core."""
+        import anyio, server
+        h = "0" * 16
+        sync_result = server.get_hex_tile_status(hash=h, wait_seconds=0)
+        async_result = anyio.run(server._get_hex_tile_status_tool, h, 0)
+        assert async_result == sync_result
+        assert async_result["status"] == "unknown"
+
 
 class TestHealthz:
     """The /healthz endpoint is the kubelet probe target (see issue #157).

@@ -428,7 +428,11 @@ def register_hex_tiles(
 
     Always pass hive_partitioning = true so the planner can prune h0=* files.
     """
-    read_con = _get_tile_con()
+    # Per-call cursor (not the bare shared connection): this function now runs
+    # inside a worker thread via the async tool wrapper, and several may be in
+    # flight at once. A cursor gives each its own thread-isolated handle on the
+    # shared :memory: connection (the tile endpoint uses the same pattern).
+    read_con = _get_tile_con().cursor()
     plan = prepare_hex_tiles(
         con=read_con, sql=sql, agg=agg,
         finest_res=finest_res, min_res=min_res, zoom_offset=zoom_offset,
@@ -484,7 +488,27 @@ def register_hex_tiles(
         }
 
 
-mcp.tool()(register_hex_tiles)
+async def _register_hex_tiles_tool(
+    sql: str,
+    agg: str = "COUNT",
+    finest_res: int | None = None,
+    min_res: int = 2,
+    zoom_offset: int = 2,
+) -> dict:
+    # Served MCP tool. register_hex_tiles is sync (and the directly-tested core);
+    # FastMCP would run a sync tool inline on the uvicorn event loop, where its
+    # S3 marker I/O + bounded inline build-wait block /healthz and every other
+    # request (#176). Offload it to a worker thread so the loop stays free.
+    return await anyio.to_thread.run_sync(
+        register_hex_tiles, sql, agg, finest_res, min_res, zoom_offset
+    )
+
+
+# Register the async wrapper under the tool name, reusing the sync function's
+# docstring as the LLM-facing description (the wrapper mirrors its signature).
+mcp.tool(name="register_hex_tiles", description=register_hex_tiles.__doc__)(
+    _register_hex_tiles_tool
+)
 
 
 _STATUS_POLL_MAX_WAIT_SECONDS = 60
@@ -509,6 +533,50 @@ def _done_response(base: dict, meta: dict) -> dict:
         "geojson_url": meta.get("geojson_url"),
         **render_recipe(meta, base["tile_url_template"]),
     }
+
+
+def _status_check_once(hash: str, con=None):
+    """One non-blocking status probe. Returns (kind, payload) where kind is
+    "done" | "failed" | "running" | "unknown" and payload is the response dict.
+    "running" means the caller should keep waiting (a local build is in flight,
+    or another pod holds a fresh lock); the others are terminal for this poll.
+    No sleeping here — the looping/waiting lives in the callers."""
+    if con is None:
+        con = _get_tile_con().cursor()
+    paths = tile_paths_for_hash(hash)
+    base = {"hash": hash, "tile_url_template": paths["tile_url_template"]}
+
+    cached = read_existing_metadata(con, paths["output_uri"])
+    if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
+        return ("done", _done_response(base, cached))
+
+    failed = read_failed(con, paths["output_uri"])
+    if failed is not None:
+        return ("failed", {**base, "status": "failed", "error": failed.get("error", "")})
+
+    with _jobs_lock:
+        job = _jobs.get(hash)
+
+    if job is None:
+        # No local job — another pod may own this build. Consult lock.json.
+        lock = read_lock(con, paths["output_uri"])
+        if lock is None or lock_is_stale(lock):
+            return ("unknown", {**base, "status": "unknown"})
+        return ("running", {
+            **base, "status": "running",
+            "elapsed_seconds": round(time.time() - lock["started_at"], 1),
+        })
+
+    future = job["future"]
+    if future.done():
+        exc = future.exception()
+        if exc is not None:
+            return ("failed", {**base, "status": "failed", "error": str(exc)})
+        return ("done", _done_response(base, future.result()))
+    return ("running", {
+        **base, "status": "running",
+        "elapsed_seconds": round(time.time() - job["started_at"], 1),
+    })
 
 
 def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
@@ -540,71 +608,36 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0) -> dict:
     Idempotent — safe to call repeatedly. Hash is the value returned by
     register_hex_tiles.
     """
+    # Sync core, kept for direct unit testing. Loops over the one-shot check
+    # with time.sleep; the served tool is the async wrapper below.
     wait_seconds = max(0, min(int(wait_seconds or 0), _STATUS_POLL_MAX_WAIT_SECONDS))
-    paths = tile_paths_for_hash(hash)
-    base = {"hash": hash, "tile_url_template": paths["tile_url_template"]}
-
-    cached = read_existing_metadata(_get_tile_con(), paths["output_uri"])
-    if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
-        return _done_response(base, cached)
-
-    failed = read_failed(_get_tile_con(), paths["output_uri"])
-    if failed is not None:
-        return {**base, "status": "failed", "error": failed.get("error", "")}
-
-    with _jobs_lock:
-        job = _jobs.get(hash)
-
-    if job is None:
-        # No local job — but another pod may own this build. Consult lock.json.
-        lock = read_lock(_get_tile_con(), paths["output_uri"])
-        if lock is None or lock_is_stale(lock):
-            return {**base, "status": "unknown"}
-
-        # Fresh lock from another pod. Long-poll S3 for metadata.json /
-        # failed.json appearance up to wait_seconds. 2s granularity is fine —
-        # this is server-internal, the LLM sees one tool call.
-        deadline = time.time() + wait_seconds
-        while True:
-            cached = read_existing_metadata(_get_tile_con(), paths["output_uri"])
-            if cached is not None and "bounds" in cached and "feature_count_finest" in cached:
-                return _done_response(base, cached)
-            failed_now = read_failed(_get_tile_con(), paths["output_uri"])
-            if failed_now is not None:
-                return {**base, "status": "failed", "error": failed_now.get("error", "")}
-            if time.time() >= deadline:
-                break
-            time.sleep(min(2.0, max(0.1, deadline - time.time())))
-
-        # Wait expired without resolution. Report running with elapsed from lock.
-        return {
-            **base,
-            "status": "running",
-            "elapsed_seconds": round(time.time() - lock["started_at"], 1),
-        }
-
-    future = job["future"]
-
-    if not future.done() and wait_seconds > 0:
-        try:
-            result = future.result(timeout=wait_seconds)
-            return _done_response(base, result)
-        except concurrent.futures.TimeoutError:
-            pass  # still running — fall through to the standard branch below
-        except Exception as e:
-            return {**base, "status": "failed", "error": str(e)}
-
-    if future.done():
-        exc = future.exception()
-        if exc is not None:
-            return {**base, "status": "failed", "error": str(exc)}
-        return _done_response(base, future.result())
-
-    return {**base, "status": "running",
-            "elapsed_seconds": round(time.time() - job["started_at"], 1)}
+    con = _get_tile_con().cursor()
+    deadline = time.time() + wait_seconds
+    while True:
+        kind, payload = _status_check_once(hash, con)
+        if kind != "running" or time.time() >= deadline:
+            return payload
+        time.sleep(min(2.0, max(0.1, deadline - time.time())))
 
 
-mcp.tool()(get_hex_tile_status)
+async def _get_hex_tile_status_tool(hash: str, wait_seconds: int = 0) -> dict:
+    # Served MCP tool. Truly async long-poll: `await anyio.sleep` frees the
+    # event loop (vs the old time.sleep-on-the-loop that blocked /healthz and
+    # every other request for up to 60s per poll — #176), and each one-shot
+    # S3 check is offloaded to a worker thread.
+    wait_seconds = max(0, min(int(wait_seconds or 0), _STATUS_POLL_MAX_WAIT_SECONDS))
+    con = _get_tile_con().cursor()
+    deadline = time.time() + wait_seconds
+    while True:
+        kind, payload = await anyio.to_thread.run_sync(_status_check_once, hash, con)
+        if kind != "running" or time.time() >= deadline:
+            return payload
+        await anyio.sleep(min(2.0, max(0.1, deadline - time.time())))
+
+
+mcp.tool(name="get_hex_tile_status", description=get_hex_tile_status.__doc__)(
+    _get_hex_tile_status_tool
+)
 
 
 def mount_tiles(app):
