@@ -219,7 +219,16 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
         projected AS (
           SELECT
             ST_AsMVTGeom(
-              ST_Transform({boundary_geom}, 'EPSG:4326', 'EPSG:3857', true),
+              -- ST_MakeValid repairs cells whose web-mercator projection is
+              -- degenerate/self-intersecting — at coarse zoom near the mercator
+              -- latitude limit (~±85.05°), a transformed H3 boundary can become
+              -- invalid, and ST_AsMVTGeom (an aggregate over the whole tile)
+              -- raises TopologyException, 500-ing the *entire* tile on one bad
+              -- cell. Validating per-cell keeps one degenerate hex from taking
+              -- down a global/pole-spanning tileset's coarse tiles (#197).
+              ST_MakeValid(
+                ST_Transform({boundary_geom}, 'EPSG:4326', 'EPSG:3857', true)
+              ),
               {{'min_x': {mx_w}, 'min_y': {my_s}, 'max_x': {mx_e}, 'max_y': {my_n}}}::BOX_2D,
               4096, 256, true
             ) AS geom,

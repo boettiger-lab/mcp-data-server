@@ -147,6 +147,35 @@ class TestTileEdgeSeams:
             )
 
 
+class TestCoarseTileGeometryRobustness:
+    def test_pole_spanning_set_does_not_500_at_coarse_zoom(self, app_with_tiles, local_bucket):
+        # #197: a global, pole-spanning tileset rendered at coarse zoom used to
+        # 500 — near the web-mercator latitude limit (~±85.05°) a transformed H3
+        # boundary can become invalid, and ST_AsMVTGeom (aggregating the whole
+        # tile) raised TopologyException, killing the *entire* tile on one bad
+        # cell. ST_MakeValid per cell must keep the tile rendering.
+        con = app_with_tiles.state.tile_con
+        sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 4) AS h4, 1.0 AS val FROM (
+                SELECT 80 + random()*9.5 AS lat, -180 + random()*360 AS lng FROM range(2000)
+                UNION ALL SELECT -80 - random()*9.5, -180 + random()*360 FROM range(2000)
+                UNION ALL SELECT random()*40, -180 + random()*360 FROM range(1000)
+            )
+        """
+        result = register_hex_tiles(
+            con=con, sql=sql, finest_res=4, min_res=2, agg="AVG", zoom_offset=2,
+        )
+        h = result["hash"]
+        client = TestClient(app_with_tiles)
+        # Coarse tiles (incl. the z=0 whole-world tile and dateline edges) must
+        # render, not 500.
+        for z, x, y in [(0, 0, 0), (1, 0, 0), (1, 1, 0), (2, 0, 0)]:
+            r = client.get(f"/tiles/hex/{h}/{z}/{x}/{y}.pbf")
+            assert r.status_code in (200, 204), (
+                f"coarse tile {z}/{x}/{y} returned {r.status_code} (TopologyException regression)"
+            )
+
+
 class TestAntimeridian:
     def test_dateline_cell_geometry_does_not_span_globe(self):
         # A hex straddling +/-180 must be unwrapped into a continuous frame, not
