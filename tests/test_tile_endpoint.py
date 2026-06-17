@@ -114,6 +114,39 @@ class TestServeTile:
         assert expected in r.content, f"layer name {layer_name!r} not found in MVT bytes"
 
 
+class TestTileEdgeSeams:
+    def test_boundary_hex_emitted_into_neighbor_tiles(self, app_with_tiles, local_bucket):
+        # Seam fix (#188): a hex whose *center* lands in one tile but whose body
+        # overhangs into adjacent tiles must be emitted by every tile it touches.
+        # With the old center-in-tile selection the overhang went undrawn, leaving
+        # a straight clip line (seam) along the tile edge.
+        #
+        # One res-2 cell at (36.5, -119.5): at z=7 its center is in tile (21,50)
+        # but its boundary spans columns 20..22 and rows 49..50. finest=min=2
+        # pins every zoom to res 2 so z=7 serves that single coarse hex.
+        con = app_with_tiles.state.tile_con
+        result = register_hex_tiles(
+            con=con,
+            sql="SELECT h3_latlng_to_cell(36.5, -119.5, 2) AS h2, 1.0 AS val",
+            finest_res=2, min_res=2, agg="AVG", zoom_offset=2,
+        )
+        h = result["hash"]
+        client = TestClient(app_with_tiles)
+
+        def tile_len(z, x, y):
+            r = client.get(f"/tiles/hex/{h}/{z}/{x}/{y}.pbf")
+            assert r.status_code in (200, 204)
+            return len(r.content) if r.status_code == 200 else 0
+
+        empty = tile_len(7, 0, 0)  # far ocean: bare layer envelope, no feature
+        assert tile_len(7, 21, 50) > empty, "center tile should contain the hex"
+        # Each neighbor the hex overhangs into must now also draw it.
+        for nx, ny in [(20, 50), (22, 50), (21, 49)]:
+            assert tile_len(7, nx, ny) > empty, (
+                f"neighbor tile ({nx},{ny}) missing the boundary hex — seam"
+            )
+
+
 class TestAntimeridian:
     def test_dateline_cell_geometry_does_not_span_globe(self):
         # A hex straddling +/-180 must be unwrapped into a continuous frame, not

@@ -381,11 +381,13 @@ def _submit_build(plan: dict) -> concurrent.futures.Future:
 # docstring — the MCP framework derives the LLM-facing tool schema from the
 # docstring, so they stay invisible to the agent. Auto-detection (in
 # tiles.pyramid.register_hex_tiles) reads the H column's resolution to set
-# finest_res; min_res=2 is the coarsest level worth materializing. zoom_offset=2
-# maps map-zoom z to H3 res z-2, keeping each tile to ~100-2000 hexes (a healthy
-# MVT feature count) while preserving detail. The previous default (-1, i.e. res
-# z+1) put 40k-130k hexes in every CA-scale tile — fat .pbf payloads and slow
-# ST_AsMVT, for sub-pixel hexes MapLibre couldn't distinguish anyway (#178).
+# finest_res; min_res=2 is the coarsest level worth materializing. zoom_offset is
+# now an adaptive *bias* knob: the tile endpoint picks the H3 res per zoom from
+# the data's extent + cell count to hold each tile near a cell budget (#188), so
+# bounded data (CA) renders finer at mid-zoom than global data does, instead of a
+# single linear offset that fit neither. zoom_offset=2 is neutral (no bias);
+# smaller nudges one res finer per step (legacy direction). The pyramid still
+# builds all res levels, so this is a serve-time choice — no rebuild on retune.
 # Adding `finest_res` etc. to the docstring is almost certainly a mistake — see
 # #125 for the trigger-tightening rationale and the discussion about param surface.
 def register_hex_tiles(
