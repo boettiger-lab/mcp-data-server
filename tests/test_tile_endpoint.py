@@ -181,7 +181,15 @@ class TestAntimeridian:
         # A hex straddling +/-180 must be unwrapped into a continuous frame, not
         # emitted as a single ring whose vertices jump +179.9 -> -179.9 (which
         # MapLibre draws "the long way" as a globe-spanning streak). See #164.
+        #
+        # #201: _boundary_geom_sql now returns the geometry already in EPSG:3857.
+        # The earlier version measured the *4326* span (which the unwrap fixed)
+        # but ST_Transform then re-normalized the out-of-range longitudes and
+        # recreated a globe-spanning polygon in mercator. So assert the span in
+        # *mercator* (post-projection) is well under the world width — this is
+        # the assertion that actually catches the streak regression.
         from tiles.endpoint import _boundary_geom_sql
+        WORLD_M = 20037508.34 * 2  # full web-mercator world width (meters)
         con = build_tile_connection()
         try:
             con.sql(
@@ -199,7 +207,11 @@ class TestAntimeridian:
             assert rows, "no geometry produced"
             for span, valid in rows:
                 assert valid, "unwrapped boundary geometry must be valid"
-                assert span < 180, f"geometry spans the dateline (lng span={span})"
+                # A single H3 cell is tiny (<<1% of the world); the streak bug
+                # made it ~the full world width in mercator.
+                assert span < WORLD_M * 0.5, (
+                    f"cell geometry spans the globe in mercator (x-span={span:.0f})"
+                )
         finally:
             con.close()
 

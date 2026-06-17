@@ -96,24 +96,29 @@ def _get_cached_metadata(app_state, con, namespace: str, name: str):
 
 
 def _boundary_geom_sql(touches_dateline: bool) -> str:
-    """Return a SQL scalar expression (EPSG:4326 GEOMETRY) for cell `src.h`'s
-    H3 boundary polygon.
+    """Return a SQL scalar expression for cell `src.h`'s H3 boundary polygon,
+    already projected to EPSG:3857 (web mercator).
 
-    `h3_cell_to_boundary_wkt` emits a cell straddling +/-180 as a single ring
-    whose longitudes jump +179.9 -> -179.9; MapLibre then draws it "the long
-    way," producing globe-spanning streaks (#164). Only the easternmost and
-    westernmost tile columns can contain such cells, so `_build_tile_sql`
-    passes touches_dateline=True only for those tiles.
+    Non-dateline tiles: ST_Transform of the raw EPSG:4326 boundary.
 
-    When touches_dateline, rebuild the boundary in a continuous frame: dump the
-    ring's vertices and shift each by +/-360 so it stays within 180 deg of the
-    cell's center longitude. The cell then sits wholly on one side of the seam
-    (overflow past +/-180 is clipped to the tile by ST_AsMVTGeom). Non-crossing
-    cells are unchanged (the CASE is a no-op when max-min lng span <= 180).
+    Dateline tiles: `h3_cell_to_boundary_wkt` emits a cell straddling +/-180 as
+    a single ring whose longitudes jump +179.9 -> -179.9 (#164). We rebuild it
+    in a continuous frame (shift each vertex +/-360 to stay within 180 deg of
+    the cell's center longitude) AND project to mercator *by hand* rather than
+    via ST_Transform. ST_Transform re-normalizes longitude into [-180,180],
+    which would undo the unwrap (e.g. -180.16 -> +179.84) and recreate a
+    globe-spanning polygon -> the horizontal streaks of #201. Mercator x is
+    linear in lng, so projecting the shifted (possibly out-of-range) longitudes
+    directly keeps the cell continuous just past the world edge, where
+    ST_AsMVTGeom clips it cleanly. Only the edge tile columns pass
+    touches_dateline=True. x/y formulas match _lng_to_merc_x / _lat_to_merc_y
+    (and EPSG:3857) so dateline cells line up with the ST_Transform'd rest.
     """
     if not touches_dateline:
-        return "h3_cell_to_boundary_wkt(src.h)::GEOMETRY"
-    return """(
+        return ("ST_Transform(h3_cell_to_boundary_wkt(src.h)::GEOMETRY, "
+                "'EPSG:4326', 'EPSG:3857', true)")
+    scale = 20037508.34 / 180.0
+    return f"""(
         WITH _v AS (
           SELECT ST_X(d.geom) AS x, ST_Y(d.geom) AS y, d.path[1] AS idx
           FROM UNNEST(ST_Dump(ST_Points(
@@ -125,9 +130,11 @@ def _boundary_geom_sql(touches_dateline: bool) -> str:
           FROM _v
         )
         SELECT ST_MakePolygon(ST_MakeLine(list(ST_Point(
-          CASE WHEN _c.crosses AND (_v.x - _c.ref) >  180 THEN _v.x - 360
-               WHEN _c.crosses AND (_v.x - _c.ref) < -180 THEN _v.x + 360
-               ELSE _v.x END, _v.y) ORDER BY _v.idx)))
+          (CASE WHEN _c.crosses AND (_v.x - _c.ref) >  180 THEN _v.x - 360
+                WHEN _c.crosses AND (_v.x - _c.ref) < -180 THEN _v.x + 360
+                ELSE _v.x END) * {scale},
+          ln(tan((90.0 + _v.y) * pi() / 360.0)) / (pi() / 180.0) * {scale}
+          ) ORDER BY _v.idx)))
         FROM _v, _c
       )"""
 
@@ -219,16 +226,17 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
         projected AS (
           SELECT
             ST_AsMVTGeom(
-              -- ST_MakeValid repairs cells whose web-mercator projection is
+              -- boundary_geom is already EPSG:3857 (_boundary_geom_sql projects
+              -- it; the dateline branch by hand to avoid ST_Transform re-wrapping
+              -- the unwrap into globe-spanning streaks, #201).
+              -- ST_MakeValid repairs cells whose mercator projection is still
               -- degenerate/self-intersecting — at coarse zoom near the mercator
-              -- latitude limit (~±85.05°), a transformed H3 boundary can become
+              -- latitude limit (~±85.05°) a projected H3 boundary can become
               -- invalid, and ST_AsMVTGeom (an aggregate over the whole tile)
               -- raises TopologyException, 500-ing the *entire* tile on one bad
               -- cell. Validating per-cell keeps one degenerate hex from taking
               -- down a global/pole-spanning tileset's coarse tiles (#197).
-              ST_MakeValid(
-                ST_Transform({boundary_geom}, 'EPSG:4326', 'EPSG:3857', true)
-              ),
+              ST_MakeValid({boundary_geom}),
               {{'min_x': {mx_w}, 'min_y': {my_s}, 'max_x': {mx_e}, 'max_y': {my_n}}}::BOX_2D,
               4096, 256, true
             ) AS geom,
