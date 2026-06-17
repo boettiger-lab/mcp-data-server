@@ -283,6 +283,14 @@ _POD_ID = os.environ.get("HOSTNAME") or socket.gethostname()
 # connection so writes don't serialise behind each other or behind reads.
 _BUILD_MAX_CONCURRENCY = int(os.environ.get("TILE_BUILD_MAX_CONCURRENCY", "2"))
 _BUILD_INLINE_WAIT_SECONDS = float(os.environ.get("TILE_BUILD_INLINE_WAIT_SECONDS", "5"))
+# Cap DuckDB threads for the CPU-bound pyramid build so it leaves cores for the
+# uvicorn event loop — a build at the full read default (48) can saturate the
+# pod and starve /healthz → liveness SIGKILL (#184). Reads keep the default.
+_BUILD_THREADS = int(os.environ.get("TILE_BUILD_THREADS", "16"))
+# While a build runs, the owning pod re-writes lock.json this often so a live
+# (possibly slow, thread-capped) build never looks stale; when the pod stops,
+# the lock ages out within _LOCK_STALE_SECONDS. Must stay well under it.
+_LOCK_HEARTBEAT_SECONDS = float(os.environ.get("TILE_LOCK_HEARTBEAT_SECONDS", "30"))
 _build_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=_BUILD_MAX_CONCURRENCY,
     thread_name_prefix="tile-build",
@@ -293,6 +301,33 @@ _jobs_lock = threading.Lock()
 # string; "done" status reads metadata.json directly so the job dict
 # isn't authoritative for success.
 _jobs: dict = {}
+
+
+def _start_lock_heartbeat(output_uri: str):
+    """Spawn a daemon thread that refreshes lock.json's heartbeat every
+    _LOCK_HEARTBEAT_SECONDS until stopped, so a long (thread-capped) build never
+    looks stale to status polls. Uses its own tiny connection — the build's
+    connection is busy running the multi-minute COPY. Preserves the original
+    started_at (read from the lock register wrote) so reported elapsed grows.
+    Returns a stop() callable; call it when the build ends (the pod dying just
+    stops the heartbeat, letting the lock age out within _LOCK_STALE_SECONDS)."""
+    stop = threading.Event()
+    hb_con = build_tile_connection(threads=1)
+    existing = read_lock(hb_con, output_uri)
+    started_at = (existing or {}).get("started_at")
+
+    def _beat():
+        try:
+            while not stop.wait(_LOCK_HEARTBEAT_SECONDS):
+                try:
+                    write_lock(hb_con, output_uri, pod_id=_POD_ID, started_at=started_at)
+                except Exception:
+                    pass  # transient S3 blip; next beat retries
+        finally:
+            hb_con.close()
+
+    threading.Thread(target=_beat, name="tile-lock-heartbeat", daemon=True).start()
+    return stop.set
 
 
 def _submit_build(plan: dict) -> concurrent.futures.Future:
@@ -306,9 +341,11 @@ def _submit_build(plan: dict) -> concurrent.futures.Future:
             return existing["future"]
 
         def _do_build():
-            build_con = build_tile_connection()
-            print(f"[tile-build] hash={h} START pod={_POD_ID}", file=sys.stderr)
+            build_con = build_tile_connection(threads=_BUILD_THREADS)
+            print(f"[tile-build] hash={h} START pod={_POD_ID} threads={_BUILD_THREADS}",
+                  file=sys.stderr)
             t0 = time.perf_counter()
+            stop_heartbeat = _start_lock_heartbeat(plan["output_uri"])
             try:
                 return build_hex_tiles(build_con, plan)
             except Exception as exc:
@@ -326,6 +363,7 @@ def _submit_build(plan: dict) -> concurrent.futures.Future:
                     pass
                 raise
             finally:
+                stop_heartbeat()
                 build_con.close()
 
         future = _build_executor.submit(_do_build)

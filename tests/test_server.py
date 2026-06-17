@@ -311,6 +311,29 @@ class TestTileRouteMounted:
         assert async_result == sync_result
         assert async_result["status"] == "unknown"
 
+    def test_lock_heartbeat_refreshes_and_preserves_started_at(self, tmp_path, monkeypatch):
+        """A running build's heartbeat keeps the lock fresh (bumps heartbeat_at)
+        while preserving started_at, so a slow build never looks stale and
+        reported elapsed keeps growing (#184)."""
+        import server, time
+        from tiles.db import build_tile_connection
+        from tiles.pyramid import write_lock, read_lock
+        monkeypatch.setattr(server, "_LOCK_HEARTBEAT_SECONDS", 0.05)
+        uri = str(tmp_path) + "/"
+        con = build_tile_connection(threads=1)
+        try:
+            write_lock(con, uri, pod_id="register", started_at=1234.0)  # register's lock
+            stop = server._start_lock_heartbeat(uri)
+            time.sleep(0.3)
+            stop()
+            time.sleep(0.1)
+            lock = read_lock(con, uri)
+            assert lock["started_at"] == 1234.0          # preserved across beats
+            assert lock["heartbeat_at"] > 1234.0          # refreshed toward now
+            assert lock["pod_id"] == server._POD_ID
+        finally:
+            con.close()
+
 
 class TestHealthz:
     """The /healthz endpoint is the kubelet probe target (see issue #157).
