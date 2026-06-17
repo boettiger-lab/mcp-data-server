@@ -19,11 +19,12 @@ def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnecti
     - The shared READ connection (tile-serve GETs + prepare-phase probes) uses
       the default (TILE_THREADS, 48). Harmless there — those queries are tiny
       (LIMIT 0 / LIMIT 1 / single-tile reads).
-    - Pyramid BUILD connections pass a lower cap (server._BUILD_THREADS). A build
-      pegs every thread for minutes; at 48 it can saturate all cores and starve
-      the uvicorn event loop, failing /healthz → liveness SIGKILL (#184). Leaving
-      cores free keeps the loop schedulable. Builds run on their own connection
-      (server._build_executor) so the cap doesn't slow tile reads.
+    - Pyramid BUILD connections pass server._BUILD_THREADS (env TILE_BUILD_THREADS,
+      default 48 — same as reads, leaving ~16 cores free under the 64-core limit).
+      A build pegs every thread for minutes; the headroom keeps the uvicorn event
+      loop schedulable so /healthz answers (#184/#185). Drop it via env only on
+      under-provisioned nodes. Builds run on their own connection
+      (server._build_executor) so this never slows tile reads.
     """
     con = duckdb.connect(":memory:")
     # Extensions may not be pre-installed in dev environments — install defensively.
