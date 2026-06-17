@@ -742,6 +742,47 @@ class TestLockMarkers:
     def test_lock_is_stale_handles_none(self):
         assert lock_is_stale(None) is True
 
+    def test_write_lock_records_heartbeat_and_preserves_started_at(self, tmp_path):
+        con = self._con()
+        uri = str(tmp_path) + "/"
+        write_lock(con, uri, pod_id="pod-A", started_at=1000.0)
+        lock = read_lock(con, uri)
+        assert lock["started_at"] == 1000.0  # preserved across heartbeats
+        assert isinstance(lock["heartbeat_at"], (int, float))
+        assert lock["heartbeat_at"] >= lock["started_at"]
+
+    def test_lock_is_stale_uses_heartbeat_not_started_at(self):
+        # Old started_at but a fresh heartbeat (live, slow build) → NOT stale.
+        live = {"started_at": time.time() - 10_000, "pod_id": "p", "heartbeat_at": time.time()}
+        assert lock_is_stale(live) is False
+        # Fresh started_at but a stale heartbeat (pod died) → stale.
+        dead = {"started_at": time.time(), "pod_id": "p", "heartbeat_at": time.time() - 10_000}
+        assert lock_is_stale(dead) is True
+
+    def test_lock_is_stale_back_compat_started_at_only(self):
+        # Pre-heartbeat lock (written by an older pod) falls back to started_at.
+        assert lock_is_stale({"started_at": time.time(), "pod_id": "p"}) is False
+        assert lock_is_stale({"started_at": time.time() - 10_000, "pod_id": "p"}) is True
+
+
+class TestBuildConnectionThreads:
+    def test_threads_param_is_applied(self):
+        from tiles.db import build_tile_connection
+        con = build_tile_connection(threads=7)
+        try:
+            assert int(con.sql("SELECT current_setting('threads')").fetchone()[0]) == 7
+        finally:
+            con.close()
+
+    def test_default_threads_from_env(self, monkeypatch):
+        from tiles.db import build_tile_connection
+        monkeypatch.setenv("TILE_THREADS", "5")
+        con = build_tile_connection()
+        try:
+            assert int(con.sql("SELECT current_setting('threads')").fetchone()[0]) == 5
+        finally:
+            con.close()
+
 
 from tiles.pyramid import write_failed, read_failed
 

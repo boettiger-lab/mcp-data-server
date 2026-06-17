@@ -19,11 +19,14 @@ from tiles.tile_math import content_hash
 # `source-layer` option.
 MVT_LAYER_NAME = "layer"
 
-# Builds are tracked across pods via lock.json. A lock older than this
-# is treated as abandoned (the owning pod likely crashed mid-build).
-# Configurable for ops; observed builds complete in 100-120s so 900s
-# gives ~8x headroom.
-_LOCK_STALE_SECONDS = int(os.environ.get("TILE_LOCK_STALE_SECONDS", "900"))
+# Builds are tracked across pods via lock.json. The owning pod refreshes the
+# lock's heartbeat_at every server._LOCK_HEARTBEAT_SECONDS while the build runs;
+# a lock whose heartbeat is older than this is treated as abandoned (the owning
+# pod crashed / was killed / rolled out mid-build). Kept a few heartbeat
+# intervals so brief S3 hiccups don't false-expire a live build, but far below
+# the old fixed 900s so a dead build's "running" ghost resolves in ~2 min, not
+# 15 (#184). Configurable for ops.
+_LOCK_STALE_SECONDS = int(os.environ.get("TILE_LOCK_STALE_SECONDS", "120"))
 
 # Hex sets at or below this many finest-res cells are served as a single
 # GeoJSON FeatureCollection (streamed straight to object storage, fetched
@@ -266,10 +269,22 @@ def _write_json_marker(con: duckdb.DuckDBPyConnection, uri: str, payload: dict) 
     con.sql(sql)
 
 
-def write_lock(con: duckdb.DuckDBPyConnection, output_uri: str, pod_id: str) -> None:
+def write_lock(con: duckdb.DuckDBPyConnection, output_uri: str, pod_id: str,
+               started_at: float | None = None) -> None:
     """Write {output_uri}lock.json announcing this pod owns the in-progress
-    build for this hash. Overwrites any prior lock at the same path."""
-    payload = {"started_at": time.time(), "pod_id": pod_id}
+    build for this hash. Overwrites any prior lock at the same path.
+
+    `started_at` marks when the build began and is preserved across heartbeats
+    (so reported elapsed keeps growing); `heartbeat_at` is bumped to now on every
+    write and is what staleness is judged on. The owning pod re-writes the lock
+    periodically (server heartbeat) so a live build stays fresh; once the pod
+    stops (done/crash), heartbeat_at ages out and lock_is_stale flips true."""
+    now = time.time()
+    payload = {
+        "started_at": now if started_at is None else started_at,
+        "pod_id": pod_id,
+        "heartbeat_at": now,
+    }
     _write_json_marker(con, f"{output_uri}lock.json", payload)
 
 
@@ -279,16 +294,17 @@ def read_lock(con: duckdb.DuckDBPyConnection, output_uri: str):
 
 
 def lock_is_stale(lock: dict | None, now: float | None = None) -> bool:
-    """A missing lock is 'stale' (treated the same as absent). A lock older
-    than _LOCK_STALE_SECONDS is considered abandoned."""
+    """A missing lock is 'stale' (treated the same as absent). A lock whose last
+    heartbeat is older than _LOCK_STALE_SECONDS is considered abandoned. Falls
+    back to started_at for pre-heartbeat locks written by older pods."""
     if lock is None:
         return True
-    started = lock.get("started_at")
-    if not isinstance(started, (int, float)):
+    beat = lock.get("heartbeat_at", lock.get("started_at"))
+    if not isinstance(beat, (int, float)):
         return True
     if now is None:
         now = time.time()
-    return (now - started) > _LOCK_STALE_SECONDS
+    return (now - beat) > _LOCK_STALE_SECONDS
 
 
 def write_failed(con: duckdb.DuckDBPyConnection, output_uri: str, error: str) -> None:
