@@ -283,10 +283,14 @@ _POD_ID = os.environ.get("HOSTNAME") or socket.gethostname()
 # connection so writes don't serialise behind each other or behind reads.
 _BUILD_MAX_CONCURRENCY = int(os.environ.get("TILE_BUILD_MAX_CONCURRENCY", "2"))
 _BUILD_INLINE_WAIT_SECONDS = float(os.environ.get("TILE_BUILD_INLINE_WAIT_SECONDS", "5"))
-# Cap DuckDB threads for the CPU-bound pyramid build so it leaves cores for the
-# uvicorn event loop — a build at the full read default (48) can saturate the
-# pod and starve /healthz → liveness SIGKILL (#184). Reads keep the default.
-_BUILD_THREADS = int(os.environ.get("TILE_BUILD_THREADS", "16"))
+# DuckDB threads for the CPU-bound pyramid build. Default 48 leaves ~16 cores
+# free under the 64-core limit, so the uvicorn event loop stays schedulable and
+# /healthz keeps answering during a build. (#185 removed the on-loop polling
+# that was the real event-loop starvation; a pure build at 48 has ample
+# headroom on a properly-sized pod — #184.) Lower this via env only on
+# under-provisioned / contended nodes where the pod can't actually get ~48
+# cores. Reads use TILE_THREADS (also 48) — their queries are tiny.
+_BUILD_THREADS = int(os.environ.get("TILE_BUILD_THREADS", "48"))
 # While a build runs, the owning pod re-writes lock.json this often so a live
 # (possibly slow, thread-capped) build never looks stale; when the pod stops,
 # the lock ages out within _LOCK_STALE_SECONDS. Must stay well under it.
