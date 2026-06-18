@@ -302,6 +302,66 @@ class TestTileRouteMounted:
         assert tools["register_hex_tiles"].description == register_hex_tiles.__doc__
         assert tools["get_hex_tile_status"].description == get_hex_tile_status.__doc__
 
+    def test_query_is_served_async(self):
+        """query runs a DuckDB scan up to 300s; it must be a coroutine so FastMCP
+        awaits it off the event loop instead of running it inline (#176). #185
+        offloaded the hex tools the same way; this finishes the job for query."""
+        import inspect, server
+        assert inspect.iscoroutinefunction(server._query_tool)
+
+    def test_query_tool_preserves_name_schema_and_docstring(self):
+        """Wrapping must not change the LLM-facing tool: same name, same input
+        schema (derived from the mirrored signature), same description."""
+        from server import mcp, query
+        import anyio
+        tools = {t.name: t for t in anyio.run(mcp.list_tools)}
+        assert "query" in tools
+        assert tools["query"].description == query.__doc__
+        assert sorted(tools["query"].inputSchema["properties"]) == [
+            "s3_endpoint", "s3_key", "s3_scope", "s3_secret", "sql_query",
+        ]
+
+    def test_query_tool_matches_sync_core(self):
+        """The async wrapper returns the same payload as the sync query()."""
+        import anyio, server
+        sql = "SELECT 1 AS one"
+        sync_result = server.query(sql)
+        async_result = anyio.run(server._query_tool, sql)
+        assert async_result == sync_result
+
+    def test_query_tool_keeps_event_loop_responsive(self):
+        """While the wrapped (blocking) query runs in a worker thread, the event
+        loop must keep ticking. If it ran on the loop, the concurrent sleeps
+        below could not make progress until it finished (#176)."""
+        import threading, anyio, server
+
+        gate = threading.Event()
+
+        def blocking_query(sql_query, *a, **k):
+            gate.wait(2.0)
+            return "done"
+
+        # Patch the sync core; the wrapper offloads whatever query() points at.
+        orig = server.query
+        server.query = blocking_query
+        try:
+            async def main():
+                ticks = 0
+                result = {}
+                async with anyio.create_task_group() as tg:
+                    async def runner():
+                        result["r"] = await server._query_tool("SELECT 1")
+                    tg.start_soon(runner)
+                    for _ in range(5):
+                        await anyio.sleep(0.02)
+                        ticks += 1
+                    gate.set()  # release the worker thread so runner finishes
+                assert ticks == 5
+                return result["r"]
+            assert anyio.run(main) == "done"
+        finally:
+            server.query = orig
+
     def test_async_status_wrapper_matches_sync_core_for_unknown(self):
         """The async tool returns the same payload as the sync core."""
         import anyio, server
