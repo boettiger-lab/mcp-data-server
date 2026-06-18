@@ -201,10 +201,21 @@ def _build_tile_sql(namespace: str, name: str, z: int, x: int, y: int,
         # while h0 diameter is ~15° (Earth/12 cells), so every overlapping h0
         # cell receives at least one sample point. Sample the padded bbox so an
         # edge hex sitting in a neighboring h0 partition isn't pruned away.
+        #
+        # Bounds are CAST to DOUBLE: a sub-1 high-precision float literal (e.g.
+        # 0.2033…, produced when the seam pad shifts an equator/meridian tile
+        # edge off 0.0) is typed by DuckDB as DECIMAL(18,17) — one integer digit
+        # — and the grid subtraction with the opposite bound (>=10°) overflows it,
+        # 500-ing equatorial mid-zoom tiles on global data (#204). Double
+        # arithmetic sidesteps the decimal typing entirely.
+        def _d(v: float) -> str:
+            return f"CAST({v!r} AS DOUBLE)"
+        lat_expr = f"{_d(south_p)} + (i/7.0) * ({_d(north_p)} - {_d(south_p)})"
+        lng_expr = f"{_d(west_p)} + (j/7.0) * ({_d(east_p)} - {_d(west_p)})"
         bbox_h0_sql = (
             "SELECT DISTINCT CAST(h3_latlng_to_cell(\n"
-            f"  {south_p} + (i/7.0) * ({north_p} - {south_p}),\n"
-            f"  {west_p} + (j/7.0) * ({east_p} - {west_p}),\n"
+            f"  {lat_expr},\n"
+            f"  {lng_expr},\n"
             "  0\n"
             ") AS BIGINT) AS h0\n"
             "FROM range(8) t1(i), range(8) t2(j)"

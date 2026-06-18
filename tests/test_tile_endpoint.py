@@ -176,6 +176,32 @@ class TestCoarseTileGeometryRobustness:
             )
 
 
+class TestEquatorMeridianTiles:
+    def test_equator_meridian_tile_does_not_500(self, app_with_tiles, local_bucket):
+        # #204: the seam pad shifts an equator/prime-meridian tile edge off 0.0 to
+        # a sub-1 high-precision value (e.g. 0.2033…), which DuckDB types as
+        # DECIMAL(18,17); the bbox_h0 grid subtraction with the opposite (>=10°)
+        # bound then overflowed DECIMAL and 500'd the tile. Bounds are now cast to
+        # DOUBLE. Data straddling (0,0) at z=4 must serve, not 500.
+        con = app_with_tiles.state.tile_con
+        sql = """
+            SELECT h3_latlng_to_cell(lat, lng, 4) AS h4, 1.0 AS val FROM (
+                SELECT (random()-0.5)*40 AS lat, (random()-0.5)*40 AS lng FROM range(3000)
+            )
+        """
+        result = register_hex_tiles(
+            con=con, sql=sql, finest_res=4, min_res=2, agg="AVG", zoom_offset=2,
+        )
+        h = result["hash"]
+        client = TestClient(app_with_tiles)
+        # z=4 tiles straddling the equator (y=8) and prime meridian (x=8).
+        for z, x, y in [(4, 8, 8), (4, 8, 7), (4, 7, 8), (3, 4, 4)]:
+            r = client.get(f"/tiles/hex/{h}/{z}/{x}/{y}.pbf")
+            assert r.status_code in (200, 204), (
+                f"equator/meridian tile {z}/{x}/{y} returned {r.status_code} (#204 DECIMAL overflow)"
+            )
+
+
 class TestAntimeridian:
     def test_dateline_cell_geometry_does_not_span_globe(self):
         # A hex straddling +/-180 must be unwrapped into a continuous frame, not
