@@ -85,6 +85,29 @@ class TestGeoJSONOutput:
         assert len(f0["geometry"]["coordinates"][0]) == 7
         assert "count" in f0["properties"]
 
+    def test_globe_spanning_pole_cell_is_dropped(self, con, local_bucket):
+        """A South-Pole (lat=-90) junk cell — the kind GBIF coordinate noise
+        produces — has a boundary that wraps every longitude and renders in
+        MapLibre as a smear across the whole map. The GeoJSON builder must drop
+        such globe-spanning cells while keeping the legitimate ones (#196)."""
+        # 24 distinct Berkeley cells + one South-Pole cell = 25 input cells.
+        sql = (
+            "SELECT h3_latlng_to_cell(37.87 + (i * 0.01), -122.27 + (j * 0.01), 8) AS h8 "
+            "FROM range(5) t1(i), range(5) t2(j) "
+            "UNION ALL SELECT h3_latlng_to_cell(-90.0, 0.0, 8) AS h8"
+        )
+        result = register_hex_tiles(con=con, sql=sql, agg="COUNT")
+        assert result["format"] == "geojson"
+        # The metadata count reflects the input (the pole cell is real data)...
+        assert result["feature_count_finest"] == 25
+        path = local_bucket / "hex" / result["hash"] / "data.geojson"
+        gj = json.loads(path.read_text())
+        # ...but the rendered FeatureCollection has the smear-causing cell dropped.
+        assert len(gj["features"]) == 24
+        for feat in gj["features"]:
+            lngs = [pt[0] for ring in feat["geometry"]["coordinates"] for pt in ring]
+            assert max(lngs) - min(lngs) <= 180  # no globe-spanning ring survives
+
     def test_value_column_lands_in_properties(self, con, local_bucket):
         sql = (
             "SELECT h3_latlng_to_cell(37.87 + (i * 0.01), -122.27, 8) AS h8, "
