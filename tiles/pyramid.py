@@ -172,6 +172,19 @@ def _to_public_http_url(uri: str) -> str:
     return uri
 
 
+# A cell's H3 boundary "spans the globe" when its longitude extent exceeds
+# 180 deg. Two kinds of cell trip this, both from un-clipped/noisy point data:
+#   - pole cells (latitude ~+/-90, e.g. GBIF coordinate junk at the South Pole)
+#     whose ring wraps every longitude;
+#   - cells whose raw boundary straddles the antimeridian (longitude jumps
+#     +179.9 -> -179.9, #164).
+# Emitted as raw GeoJSON, MapLibre draws either as a horizontal smear across the
+# whole map ("the layer isn't rendering"). The MVT serve path handles these
+# (#164/#201); the GeoJSON builder never did. Dropping them is the GeoJSON-path
+# analog of that robustness fix (#196). `g` is the boundary GEOMETRY column.
+_GEOJSON_GLOBE_SPANNING = "(ST_XMax(g) - ST_XMin(g)) > 180"
+
+
 def build_geojson_statement(finest_uri: str, geojson_uri: str, value_columns: List[str]) -> str:
     """COPY that writes the finest-res hexes as one valid GeoJSON FeatureCollection.
 
@@ -179,18 +192,38 @@ def build_geojson_statement(finest_uri: str, geojson_uri: str, value_columns: Li
     scalar, NOT the GDAL-backed ST_Write — so it streams to s3:// over httpfs.
     A single output row becomes one line that is the whole FeatureCollection
     object; json_group_array nests each cell's GeoJSON geometry and properties.
+
+    Globe-spanning pole/dateline cells are dropped (see _GEOJSON_GLOBE_SPANNING)
+    so noisy/un-clipped data never renders as a smear (#196).
     """
     props = ", ".join(f"'{c}', \"{c}\"" for c in value_columns)
+    cols = ", ".join(f'"{c}"' for c in value_columns)
     return (
         "COPY (\n"
+        "  WITH _cells AS (\n"
+        f"    SELECT {cols}, h3_cell_to_boundary_wkt(h)::GEOMETRY AS g\n"
+        f"    FROM read_parquet('{finest_uri}')\n"
+        "  )\n"
         "  SELECT 'FeatureCollection' AS type,\n"
         "         coalesce(json_group_array(json_object(\n"
         "           'type', 'Feature',\n"
-        "           'geometry', CAST(ST_AsGeoJSON(h3_cell_to_boundary_wkt(h)::GEOMETRY) AS JSON),\n"
+        "           'geometry', CAST(ST_AsGeoJSON(g) AS JSON),\n"
         f"           'properties', json_object({props})\n"
         "         )), '[]'::JSON) AS features\n"
-        f"  FROM read_parquet('{finest_uri}')\n"
+        "  FROM _cells\n"
+        f"  WHERE NOT {_GEOJSON_GLOBE_SPANNING}\n"
         f") TO '{geojson_uri}' (FORMAT JSON)"
+    )
+
+
+def count_globe_spanning_statement(finest_uri: str) -> str:
+    """COUNT of the globe-spanning cells build_geojson_statement drops — for a
+    log line so a smear-free render that silently shed junk cells is still
+    visible in the build logs (#196)."""
+    return (
+        "SELECT count(*) FROM (\n"
+        f"  SELECT h3_cell_to_boundary_wkt(h)::GEOMETRY AS g FROM read_parquet('{finest_uri}')\n"
+        f") WHERE {_GEOJSON_GLOBE_SPANNING}"
     )
 
 
@@ -553,9 +586,16 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     if serve_format == "geojson":
         gj_t0 = time.perf_counter()
         geojson_uri = f"{output_uri}data.geojson"
+        dropped = con.sql(count_globe_spanning_statement(finest_uri)).fetchone()[0]
         con.sql(build_geojson_statement(finest_uri, geojson_uri, value_columns))
         geojson_url = _to_public_http_url(geojson_uri)
         geojson_seconds = time.perf_counter() - gj_t0
+        if dropped:
+            print(
+                f"[tile-build] hash={h} geojson dropped {dropped} globe-spanning "
+                f"(pole/dateline) cells of {feature_count} (#196)",
+                file=sys.stderr,
+            )
 
     print(
         f"[tile-build] hash={h} DONE format={serve_format} "
