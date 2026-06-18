@@ -235,7 +235,33 @@ Credentials are scoped to this request only and never persisted.
 {TOOL_INJECTED_CONTEXT}
 """
 
-mcp.tool()(query)
+# query runs a DuckDB scan up to 300s. FastMCP runs a *sync* tool inline on the
+# uvicorn event loop, so a long query would freeze the whole pod: /healthz goes
+# unanswered (readiness pulls the pod, a long-enough scan risks the liveness
+# SIGKILL), tile GETs stall, and other MCP requests queue behind it (#176). #185
+# offloaded the hex tools the same way; query was the remaining sync-on-loop tool.
+# A CapacityLimiter bounds concurrent scans so a burst can't oversubscribe the
+# pod's CPU/memory or starve the hex tools sharing anyio's default thread pool.
+_QUERY_LIMITER = anyio.CapacityLimiter(int(os.environ.get("MCP_QUERY_CONCURRENCY", "8")))
+
+
+async def _query_tool(
+    sql_query: str,
+    s3_key: str = None,
+    s3_secret: str = None,
+    s3_endpoint: str = None,
+    s3_scope: str = None,
+) -> str:
+    # Mirrors query()'s signature so FastMCP derives the identical tool schema.
+    return await anyio.to_thread.run_sync(
+        query, sql_query, s3_key, s3_secret, s3_endpoint, s3_scope,
+        limiter=_QUERY_LIMITER,
+    )
+
+
+# Register the async wrapper under the tool name, reusing the sync function's
+# docstring as the LLM-facing description (mirroring the hex-tool pattern, #185).
+mcp.tool(name="query", description=query.__doc__)(_query_tool)
 
 # -------------------------------------------------------------------------
 # 8b. TILE ENDPOINT — dynamic MVT for H3 hex visualization (see issue #4)
