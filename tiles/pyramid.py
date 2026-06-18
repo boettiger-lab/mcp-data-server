@@ -54,6 +54,17 @@ def build_pyramid_statements(
         small) and writes res. Working set per Phase 2 step is bounded by the
         cardinality of the previous res, which shrinks ~7x per step.
 
+    Partitioning strategy (#189): only the FINEST level is partitioned by
+    (res, h0). The h0 partitioning earns its keep at *serve* time only on the
+    finest level — high-zoom tiles hit a huge level and need file-level h0
+    pruning. Coarser levels are written PARTITION_BY (res) only, with h0 kept as
+    a data column (so the serve-side `SEMI JOIN ... USING (h0)` still works).
+    Reason: writing a level as ~122 tiny h0 files costs ~0.8s/file of Ceph
+    object overhead regardless of cell count, so coarse levels (which hold few
+    cells) paid 60-100s each to write near-empty partitions; a single file
+    writes in <1s. Benchmarked in-cluster: ~2.6-3x faster builds, and coarse
+    tiles even serve ~1.6x faster single-file (one file beats globbing 122).
+
     AVG mode stores an internal `__pyramid_weight` column alongside the aggregate
     so parent rollups produce correctly weighted averages instead of an
     unweighted mean-of-means.
@@ -118,6 +129,9 @@ def build_pyramid_statements(
     statements = [phase_1]
 
     # Phase 2: each parent res reads from the previously written res+1.
+    # Coarser levels are PARTITION_BY (res) only — h0 stays a data column (still
+    # SELECTed below), so serve-side h0 filtering works but we don't pay the
+    # per-h0-file write overhead on these small levels (#189).
     for res in range(finest_res - 1, min_res - 1, -1):
         src_uri = f"{output_uri}res={res + 1}/**/*.parquet"
         stmt = (
@@ -129,7 +143,7 @@ def build_pyramid_statements(
             f"  FROM read_parquet('{src_uri}', hive_partitioning=true)\n"
             f"  GROUP BY 1, 2\n"
             f") TO '{output_uri}' "
-            f"(FORMAT PARQUET, PARTITION_BY (res, h0), OVERWRITE_OR_IGNORE)"
+            f"(FORMAT PARQUET, PARTITION_BY (res), OVERWRITE_OR_IGNORE)"
         )
         statements.append(stmt)
 
