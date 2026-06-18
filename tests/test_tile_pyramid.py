@@ -247,13 +247,13 @@ class TestInspectUserSQL:
 
 
 class TestRegisterHexTiles:
-    def test_writes_h0_subpartitions(self, local_bucket, h3_conn):
-        # h0 partitioning enables file-level pruning when tile requests filter
-        # by candidate h0 cells. Verify both that the on-disk layout includes
-        # h0=... subdirectories and that h0 is recoverable when reading back
-        # with hive_partitioning=true (matches what the tile endpoint does).
-        # Use lat/lng spans that span multiple h0 cells so the partition split
-        # is observable.
+    def test_finest_h0_partitioned_coarse_levels_single_file(self, local_bucket, h3_conn):
+        # #189: only the FINEST level is partitioned by h0 (file-level pruning
+        # earns its keep there — high-zoom tiles hit a huge level). Coarser
+        # levels are PARTITION_BY (res) only, with h0 kept as a DATA column, to
+        # skip the per-h0-file write overhead on small levels. h0 must stay
+        # recoverable on EVERY level for the serve-side SEMI JOIN USING (h0).
+        # Use lat/lng spanning multiple h0 cells so the split is observable.
         user_sql = """
             SELECT h3_latlng_to_cell(lat, lng, 4) AS h4, val
             FROM (VALUES (37.8, -122.3, 1.0),
@@ -264,22 +264,33 @@ class TestRegisterHexTiles:
             con=h3_conn, sql=user_sql, finest_res=4, min_res=2,
             agg="AVG", zoom_offset=-1,
         )
-        # At least 2 h0 partitions under each res= directory.
-        for res in (2, 3, 4):
-            res_dir = local_bucket / "hex" / result["hash"] / f"res={res}"
-            h0_subdirs = [p for p in res_dir.iterdir() if p.is_dir() and p.name.startswith("h0=")]
-            assert len(h0_subdirs) >= 2, f"res={res} expected ≥2 h0 partitions, got {[p.name for p in h0_subdirs]}"
-        # h0 column comes back via hive_partitioning and equals h3_cell_to_parent(h, 0).
-        uri = str(local_bucket / "hex" / result["hash"] / "res=4" / "**" / "*.parquet")
-        cols = h3_conn.sql(
-            f"SELECT * FROM read_parquet('{uri}', hive_partitioning=true) LIMIT 1"
-        ).columns
-        assert "h0" in cols
-        mismatches = h3_conn.sql(
-            f"SELECT COUNT(*) FROM read_parquet('{uri}', hive_partitioning=true) "
-            "WHERE h0::BIGINT != h3_cell_to_parent(h, 0)::BIGINT"
-        ).fetchone()[0]
-        assert mismatches == 0
+        base = local_bucket / "hex" / result["hash"]
+        # Finest level (res=4): h0= subdirectories present.
+        finest_h0 = [p for p in (base / "res=4").iterdir()
+                     if p.is_dir() and p.name.startswith("h0=")]
+        assert len(finest_h0) >= 2, (
+            f"finest res=4 expected ≥2 h0 partitions, got {[p.name for p in (base / 'res=4').iterdir()]}"
+        )
+        # Coarse levels (res=2,3): NOT h0-partitioned (single file per res).
+        for res in (2, 3):
+            h0_subdirs = [p for p in (base / f"res={res}").iterdir()
+                          if p.is_dir() and p.name.startswith("h0=")]
+            assert not h0_subdirs, (
+                f"coarse res={res} should not be h0-partitioned, got {[p.name for p in h0_subdirs]}"
+            )
+        # h0 recoverable + correct on BOTH a partitioned (finest, from path) and
+        # a single-file (coarse, from data column) level.
+        for res in (4, 2):
+            uri = str(base / f"res={res}" / "**" / "*.parquet")
+            cols = h3_conn.sql(
+                f"SELECT * FROM read_parquet('{uri}', hive_partitioning=true) LIMIT 1"
+            ).columns
+            assert "h0" in cols, f"res={res} missing h0 column"
+            mismatches = h3_conn.sql(
+                f"SELECT COUNT(*) FROM read_parquet('{uri}', hive_partitioning=true) "
+                "WHERE h0::BIGINT != h3_cell_to_parent(h, 0)::BIGINT"
+            ).fetchone()[0]
+            assert mismatches == 0, f"res={res} h0 mismatch"
 
     def test_writes_pyramid_partitions(self, local_bucket, h3_conn):
         # Source: 5 cells at r5 around a point.
