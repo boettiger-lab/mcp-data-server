@@ -3,10 +3,12 @@
 register_hex_tiles() materializes a partitioned parquet pyramid to object storage.
 Tile requests read directly from the pyramid — no coordination needed.
 """
+import gzip
 import json
 import os
 import sys
 import time
+import urllib.request
 from decimal import Decimal
 from typing import List
 
@@ -196,23 +198,52 @@ def build_geojson_statement(finest_uri: str, geojson_uri: str, value_columns: Li
     Globe-spanning pole/dateline cells are dropped (see _GEOJSON_GLOBE_SPANNING)
     so noisy/un-clipped data never renders as a smear (#196).
     """
-    props = ", ".join(f"'{c}', \"{c}\"" for c in value_columns)
-    cols = ", ".join(f'"{c}"' for c in value_columns)
+    cte, features = _geojson_body(finest_uri, value_columns)
     return (
         "COPY (\n"
+        f"{cte}"
+        "  SELECT 'FeatureCollection' AS type,\n"
+        f"         {features} AS features\n"
+        "  FROM _cells\n"
+        f"  WHERE NOT {_GEOJSON_GLOBE_SPANNING}\n"
+        f") TO '{geojson_uri}' (FORMAT JSON)"
+    )
+
+
+def _geojson_body(finest_uri: str, value_columns: List[str]):
+    """The `_cells` CTE and per-feature array shared by both GeoJSON emitters —
+    the COPY-to-file form (local/test) and the single-string fetch form (the
+    gzip-to-s3 path) — so the two can never drift on geometry or properties."""
+    props = ", ".join(f"'{c}', \"{c}\"" for c in value_columns)
+    cols = ", ".join(f'"{c}"' for c in value_columns)
+    cte = (
         "  WITH _cells AS (\n"
         f"    SELECT {cols}, h3_cell_to_boundary_wkt(h)::GEOMETRY AS g\n"
         f"    FROM read_parquet('{finest_uri}')\n"
         "  )\n"
-        "  SELECT 'FeatureCollection' AS type,\n"
-        "         coalesce(json_group_array(json_object(\n"
+    )
+    features = (
+        "coalesce(json_group_array(json_object(\n"
         "           'type', 'Feature',\n"
         "           'geometry', CAST(ST_AsGeoJSON(g) AS JSON),\n"
         f"           'properties', json_object({props})\n"
-        "         )), '[]'::JSON) AS features\n"
+        "         )), '[]'::JSON)"
+    )
+    return cte, features
+
+
+def geojson_fc_query(finest_uri: str, value_columns: List[str]) -> str:
+    """SELECT whose single `fc` column is the entire FeatureCollection as one
+    JSON value. DuckDB assembles it in its C/JSON layer; we fetch the string
+    once and gzip it — no intermediate file, the bytes stream straight out of
+    DuckDB. The COPY form (build_geojson_statement) stays for local/test writes."""
+    cte, features = _geojson_body(finest_uri, value_columns)
+    return (
+        f"{cte}"
+        "  SELECT json_object('type', 'FeatureCollection', 'features',\n"
+        f"         {features}) AS fc\n"
         "  FROM _cells\n"
-        f"  WHERE NOT {_GEOJSON_GLOBE_SPANNING}\n"
-        f") TO '{geojson_uri}' (FORMAT JSON)"
+        f"  WHERE NOT {_GEOJSON_GLOBE_SPANNING}"
     )
 
 
@@ -225,6 +256,49 @@ def count_globe_spanning_statement(finest_uri: str) -> str:
         f"  SELECT h3_cell_to_boundary_wkt(h)::GEOMETRY AS g FROM read_parquet('{finest_uri}')\n"
         f") WHERE {_GEOJSON_GLOBE_SPANNING}"
     )
+
+
+def _s3_internal_write_url(uri: str) -> str:
+    """In-cluster write endpoint for the GeoJSON PUT — the same Ceph RGW the tile
+    build already writes parquet through (HTTP, no SSL, no public-ingress hop).
+    Browsers still GET via the public gateway (_to_public_http_url); one object,
+    two endpoints into the same store. Non-s3 paths pass through (local tests)."""
+    base = os.environ.get(
+        "S3_INTERNAL_HTTP_BASE", "http://rook-ceph-rgw-nautiluss3.rook"
+    ).rstrip("/")
+    if uri.startswith("s3://"):
+        return f"{base}/{uri[len('s3://'):]}"
+    return uri
+
+
+def _put_gzip(http_url: str, raw: bytes, content_type: str = "application/json") -> int:
+    """Anonymous PUT of gzip-compressed bytes carrying a Content-Encoding header,
+    so the public gateway (which does NOT negotiate Accept-Encoding) returns them
+    compressed and the browser inflates transparently — ~4x less wire for the
+    GeoJSON path (#190). Returns the compressed byte count.
+
+    Uses urllib + an unsigned PUT deliberately: it adds no dependency and avoids
+    boto3's flexible-checksum streaming, which appends `aws-chunked` to
+    Content-Encoding (`gzip,aws-chunked`) — a token list browsers won't inflate.
+    The bucket already accepts anonymous writes (same path DuckDB's httpfs uses).
+    """
+    # Level 6: ~same ratio as 9 (measured 4.5x on real payloads) at <half the
+    # CPU — the conventional HTTP-gzip default, and this runs at build time.
+    gz = gzip.compress(raw, compresslevel=6, mtime=0)
+    req = urllib.request.Request(
+        http_url,
+        data=gz,
+        method="PUT",
+        headers={
+            "Content-Encoding": "gzip",
+            "Content-Type": content_type,
+            "Content-Length": str(len(gz)),
+        },
+    )
+    with urllib.request.urlopen(req) as resp:
+        if resp.status not in (200, 201):
+            raise RuntimeError(f"gzip PUT to {http_url} returned HTTP {resp.status}")
+    return len(gz)
 
 
 def render_recipe(meta: dict, tile_url_template: str) -> dict:
@@ -586,9 +660,24 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     if serve_format == "geojson":
         gj_t0 = time.perf_counter()
         geojson_uri = f"{output_uri}data.geojson"
-        dropped = con.sql(count_globe_spanning_statement(finest_uri)).fetchone()[0]
-        con.sql(build_geojson_statement(finest_uri, geojson_uri, value_columns))
         geojson_url = _to_public_http_url(geojson_uri)
+        dropped = con.sql(count_globe_spanning_statement(finest_uri)).fetchone()[0]
+        if geojson_uri.startswith("s3://"):
+            # The public gateway serves objects uncompressed; pre-gzip the
+            # FeatureCollection and PUT it with Content-Encoding so the wire
+            # payload drops ~4x and browsers inflate transparently (#190).
+            # DuckDB builds the whole FC string in its C layer; we fetch it once
+            # (no temp file) and PUT to the internal RGW endpoint.
+            raw = con.sql(geojson_fc_query(finest_uri, value_columns)).fetchone()[0].encode()
+            gz_len = _put_gzip(_s3_internal_write_url(geojson_uri), raw)
+            print(
+                f"[tile-build] hash={h} geojson gzip raw={len(raw) / 1e6:.1f}MB "
+                f"gz={gz_len / 1e6:.1f}MB ratio={len(raw) / max(gz_len, 1):.1f}x (#190)",
+                file=sys.stderr,
+            )
+        else:
+            # Local/test path: write the file directly (no gateway to gzip for).
+            con.sql(build_geojson_statement(finest_uri, geojson_uri, value_columns))
         geojson_seconds = time.perf_counter() - gj_t0
         if dropped:
             print(

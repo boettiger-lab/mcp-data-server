@@ -152,6 +152,63 @@ class TestRenderRecipe:
         assert vmin != vmax
 
 
+class TestGzipUpload:
+    """The S3 path pre-gzips the FeatureCollection and PUTs it with a
+    Content-Encoding header so the public gateway serves it compressed (#190)."""
+
+    def test_put_gzip_sets_content_encoding_and_roundtrips(self, monkeypatch):
+        import gzip
+
+        from tiles import pyramid
+
+        captured = {}
+
+        class _FakeResp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, *a, **k):
+            captured["url"] = req.full_url
+            captured["headers"] = {k.lower(): v for k, v in req.headers.items()}
+            captured["body"] = req.data
+            return _FakeResp()
+
+        monkeypatch.setattr(pyramid.urllib.request, "urlopen", fake_urlopen)
+
+        raw = b'{"type":"FeatureCollection","features":[]}'
+        gz_len = pyramid._put_gzip("https://gw/public-output/hex/x/data.geojson", raw)
+
+        assert captured["url"] == "https://gw/public-output/hex/x/data.geojson"
+        # Single clean token — NOT "gzip,aws-chunked", which browsers won't inflate.
+        assert captured["headers"]["content-encoding"] == "gzip"
+        assert captured["headers"]["content-type"] == "application/json"
+        assert gzip.decompress(captured["body"]) == raw
+        assert int(captured["headers"]["content-length"]) == len(captured["body"]) == gz_len
+
+    def test_put_gzip_raises_on_error_status(self, monkeypatch):
+        from tiles import pyramid
+
+        class _FakeResp:
+            status = 403
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(
+            pyramid.urllib.request, "urlopen", lambda req, *a, **k: _FakeResp()
+        )
+        with pytest.raises(RuntimeError, match="HTTP 403"):
+            pyramid._put_gzip("https://gw/x", b"{}")
+
+
 class TestEndpointRejectsGeoJSON:
     def test_tile_request_for_geojson_tileset_returns_404(self, con, local_bucket):
         result = register_hex_tiles(con=con, sql=SMALL_SQL, agg="COUNT")
