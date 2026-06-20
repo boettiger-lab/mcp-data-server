@@ -35,11 +35,8 @@ WHERE sci_name = 'Rana draytonii';
 
 `h3_polygon_wkt_to_cells(wkt, res)` accepts Polygon and MultiPolygon and returns
 the covered cells; `UNNEST` flattens them. Add `DISTINCT` for unique cells.
-Tiling a polygon this way is H3 indexing, not a spatial join.
-
-Use the partitioned hex for many features at once or a cross-feature aggregate
-(richness over a region) — there `h0` partitioning prunes and the pre-tiled
-cells are what you want.
+Tiling a polygon this way is H3 indexing, not a spatial join. For many features
+at once or a region-wide aggregate, use the partitioned hex — there `h0` prunes.
 
 ## Resolution Direction
 

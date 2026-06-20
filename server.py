@@ -497,13 +497,6 @@ def register_hex_tiles(
        raw read_parquet(), upstream of GROUP BY — see h3-guide.md Problem 2.
 
     Always pass hive_partitioning = true so the planner can prune h0=* files.
-
-    Access pattern (see h3-guide.md, query-optimization.md):
-    - One feature's footprint (one species' range, one named area): tile its
-      source polygon with `h3_polygon_wkt_to_cells`.
-    - "X in <country/state/county/region>": clip with a `SEMI JOIN` against the
-      region-hex (Overture/Census) on (h8, h0).
-    - Exact-match keys (`sci_name`, codes): match the stored case exactly.
     """
     # Per-call cursor (not the bare shared connection): this function now runs
     # inside a worker thread via the async tool wrapper, and several may be in
