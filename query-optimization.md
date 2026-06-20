@@ -102,9 +102,11 @@ WHERE lower(site) LIKE '%' || lower('user input') || '%'
 ```
 
 For an **exact match on a known key** (`sci_name`, `name_en`, a country or
-category code), match the stored case exactly — this keeps parquet row-group
-pruning (~3× faster on large files). Take the spelling from a `get_stac_details`
-example or a `SELECT DISTINCT` probe:
+category code), match the stored case exactly instead of wrapping the column in
+`lower()`. Where the file is sorted or clustered by that key, exact-case lets
+DuckDB skip row groups by their stored min/max stats; `lower()` forces a full
+column scan. Take the spelling from a `get_stac_details` example or a
+`SELECT DISTINCT` probe:
 
 ```sql
 WHERE sci_name = 'Rana draytonii'
