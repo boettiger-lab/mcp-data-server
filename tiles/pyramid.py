@@ -34,7 +34,17 @@ _LOCK_STALE_SECONDS = int(os.environ.get("TILE_LOCK_STALE_SECONDS", "120"))
 # GeoJSON FeatureCollection (streamed straight to object storage, fetched
 # client-side by MapLibre from the public gateway) instead of building an MVT
 # tile pyramid. Larger sets fall back to the pyramid. Env-overridable. See #178.
-_GEOJSON_MAX_FEATURES = int(os.environ.get("TILE_GEOJSON_MAX_FEATURES", "100000"))
+#
+# 30k (was 100k): set from #190 step-2 measurement. Single-res GeoJSON is bound
+# by client-side time-to-interactive — MapLibre tessellates every cell on the
+# main thread on *every* view (measured ~4s at 25k, ~10s at 100k, ~18s at 200k
+# on a 4-core client), and having no pyramid it only shows real hexes near the
+# data's native zoom (sub-pixel blob otherwise). MVT now builds about as fast
+# for bounded sets (~6s flat, post-#207) and renders correctly at every zoom
+# with progressive ~viewport-bound loads, so it wins above this point on both
+# latency and appearance. GeoJSON stays the simpler choice only for small,
+# bounded sets viewed at their native extent. Full data on #190.
+_GEOJSON_MAX_FEATURES = int(os.environ.get("TILE_GEOJSON_MAX_FEATURES", "30000"))
 
 
 def build_pyramid_statements(

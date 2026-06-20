@@ -42,6 +42,14 @@ def local_bucket(tmp_path, monkeypatch):
 
 
 class TestAutoSelect:
+    def test_default_cutoff_is_30k(self):
+        # The GeoJSON/MVT routing cutoff is a measured decision (#190 step 2):
+        # single-res GeoJSON is client-render-bound and only looks right at its
+        # native zoom, so bounded sets above ~30k cells go to the MVT pyramid.
+        # Guard the value so a change is deliberate, not accidental.
+        from tiles import pyramid
+        assert pyramid._GEOJSON_MAX_FEATURES == 30000
+
     def test_small_set_selects_geojson(self, con, local_bucket):
         result = register_hex_tiles(con=con, sql=SMALL_SQL, agg="COUNT")
         assert result["format"] == "geojson"
