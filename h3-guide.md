@@ -17,6 +17,30 @@ All datasets are already stored as H3 hex parquet in the STAC catalog — no con
 
 All spatial operations are hex joins — two datasets overlap wherever their hex IDs match. **Never use `ST_Within`, `ST_Intersects`, `ST_Centroid`, or any spatial function.** For coordinates (e.g. to supply a map zoom), use `h3_cell_to_lat(hN)` and `h3_cell_to_lng(hN)`.
 
+## Per-feature subsets: hex the polygon
+
+For one feature (or a few) selected by attribute — one species' range, one named
+area — read its row from the source **polygon** GeoParquet (keyed by that
+attribute, so the read prunes) and tile it to H3 with `h3_polygon_wkt_to_cells`.
+This is 7–22× faster than filtering the geography-partitioned hex on the
+attribute, which prunes only on `h0` and scans the whole dataset.
+
+```sql
+-- One species' range as h8 cells
+SELECT t.cell AS h8
+FROM read_parquet('s3://public-iucn/iucn-ranges-2025.parquet'),
+     UNNEST(h3_polygon_wkt_to_cells(ST_AsText(geometry), 8)) AS t(cell)
+WHERE sci_name = 'Rana draytonii';
+```
+
+`h3_polygon_wkt_to_cells(wkt, res)` accepts Polygon and MultiPolygon and returns
+the covered cells; `UNNEST` flattens them. Add `DISTINCT` for unique cells.
+Tiling a polygon this way is H3 indexing, not a spatial join.
+
+Use the partitioned hex for many features at once or a cross-feature aggregate
+(richness over a region) — there `h0` partitioning prunes and the pre-tiled
+cells are what you want.
+
 ## Resolution Direction
 
 **Higher H3 resolution numbers are finer (smaller cells); lower numbers are coarser (larger cells).** h0 is the coarsest (~1000 km edge length); h15 is the finest. A higher-resolution cell is always a *child* of a lower-resolution cell — never the reverse.

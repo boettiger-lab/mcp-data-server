@@ -54,6 +54,35 @@ SELECT h8, h0, MODE(lc_class) AS dominant
 FROM lc_on_scope GROUP BY h8, h0;
 ```
 
+### Clip to a named region by hex-join
+
+For "X **in** \<country / state / county / region\>", clip X to the region's
+boundary hexes with a `SEMI JOIN` against the region-hex on `(h8, h0)`. Name the
+region on the small region-hex side; filter the large side by the join alone.
+The region hexes supply the `h0` set that prunes the scan, and the boundary clip
+keeps only on-land cells.
+
+Region-hex sources: countries → `overture-divisions-countries-*` (`country` =
+ISO alpha-2); states/regions and counties → the matching `overture-divisions-*`
+or `census-2024-*` hex collection.
+
+```sql
+-- "GBIF richness in Peru"
+WITH region AS (
+  SELECT DISTINCT h8, h0
+  FROM read_parquet('s3://public-overturemaps/2026-02-18.0/countries/hex/h0=*/data_0.parquet')
+  WHERE country = 'PE'
+)
+SELECT g.h8, COUNT(DISTINCT g.species) AS species_richness
+FROM read_parquet('<gbif_hex>', hive_partitioning = true) g
+SEMI JOIN region r USING (h8, h0)
+WHERE g.species IS NOT NULL
+GROUP BY g.h8;
+```
+
+Put the `SEMI JOIN` on the raw `read_parquet()` of the large side, before
+`GROUP BY` (§2).
+
 ### Scoping by name or feature id (no region mask)
 
 To filter a global `…/hex/h0=*/…` dataset by a name or `_cng_fid` and there is no region-mask hex to join, first restrict `h0` to the region, then apply the attribute filter:
@@ -91,13 +120,23 @@ to grep for specific columns is wasteful — the same data is already in your
 context. Search the existing schema response instead. `DESCRIBE` is appropriate
 only for arbitrary parquet files not represented in any STAC collection.
 
-## 4. Case-insensitive text search
+## 4. Text matching: fuzzy search vs exact keys
 
-DuckDB `LIKE` is case-sensitive by default. Name/label fields (site names, owner names,
-program names) are often stored in uppercase or mixed case. Always normalize both sides:
+DuckDB `LIKE` is case-sensitive by default. For **fuzzy substring search** on a
+free-text label the user typed (site, owner, program names), normalize both
+sides:
 
 ```sql
 WHERE lower(site) LIKE '%' || lower('user input') || '%'
+```
+
+For an **exact match on a known key** (`sci_name`, `name_en`, a country or
+category code), match the stored case exactly — this keeps parquet row-group
+pruning (~3× faster on large files). Take the spelling from a `get_stac_details`
+example or a `SELECT DISTINCT` probe:
+
+```sql
+WHERE sci_name = 'Rana draytonii'
 ```
 
 ## 5. GeoParquet geometry columns
