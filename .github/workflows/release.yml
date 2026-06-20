@@ -1,0 +1,27 @@
+name: Publish GitHub Release
+
+# When a vX.Y.Z tag is pushed, publish a matching GitHub Release with
+# auto-generated notes (the merged-PR list since the previous tag) so the
+# Releases page reflects what's actually shipped. See issue #221.
+# docker.yml builds the image for the same tag in parallel; this only creates
+# the Release entry.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # create releases
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Release with auto-generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            --verify-tag
