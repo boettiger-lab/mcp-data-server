@@ -63,6 +63,21 @@ If your query lacks h0 in the join condition, DPP can only use row-group stats �
 requires opening every file for a footer read. Locally this is nearly free (94 × ~10ms =
 ~1s). On S3 it is very expensive (94 × ~100ms × N requests/file = many seconds or minutes).
 
+### Files opened, not bytes read, is the cost (dev, DuckDB 1.5.3, 2026-06)
+
+The dominant S3 cost is the number of partition files opened, not the bytes scanned.
+GBIF species richness "in Peru", attribute filter vs spatial clip:
+
+```
+# countrycode='PE'  (no partition prune)         923/923 files, 641 MiB, 8.70s
+# SEMI JOIN countries-hex USING (h8, h0)          100/923 files, 631 MiB, 4.12s
+```
+
+~2.1× faster on essentially identical bytes — the win is opening 100 files instead of
+923. (Consistent with the #190 I/O characterization: the per-file footer + range-request
+latency dominates; a sparse attribute filter that touches all partitions collapses
+throughput.) The lever is always *prune the file list*, not *read fewer bytes*.
+
 ### Benchmark (corrected, DuckDB 1.5.0, public S3 endpoint)
 
 ```
@@ -222,6 +237,27 @@ Static literals prune at planning time and save one round of build-side material
 For simple queries the improvement is ~9s (~25%). Use this when you already know the h0
 scope from a prior step.
 
+### An inline `IN (subquery)` already prunes files — the Python two-step is usually unnecessary
+
+`h0 IN (SELECT h0 FROM <small_table> WHERE …)` is internally a SEMI JOIN on h0, so it
+gets the **same file-level DPP** as a join condition — DuckDB builds a runtime dynamic
+filter from the subquery and prunes the partition list. No need to round-trip the h0
+values to Python and re-embed them as literals; a single SQL statement prunes.
+
+Verified on the IUCN per-species sidecar (dev, DuckDB 1.5.3, 2026-06):
+
+```sql
+SELECT h8 FROM read_parquet('…/iucn-ranges-2025/hex/h0=*/data_0.parquet', hive_partitioning=true)
+WHERE h0 IN (SELECT h0 FROM read_parquet('…/iucn-species-h0.parquet') WHERE sci_name='Rana draytonii')
+  AND sci_name='Rana draytonii';
+-- EXPLAIN ANALYZE: Dynamic Filters: h0 IN BF(#0); Total Files Read: 2/122; 2.19s
+```
+
+The Python two-step (above) still buys the planning-time-vs-runtime difference (~9s on
+the carbon query, same as static-literal Query C vs join Query A in §1), so reach for it
+only when that margin matters or you already have the h0 list in hand. For the common
+case, the inline subquery is simpler and prunes correctly.
+
 ---
 
 ## 5. Benchmark Summary (corrected)
@@ -251,8 +287,10 @@ Look for:
 - Low `#GET` count relative to total partition count
 
 If you see `Total Files Read: 94` (the full partition count), either:
-- h0 is missing from the join condition, or
-- The query structure doesn't allow DPP to propagate (e.g., subquery isolation)
+- h0 is missing from the join / `IN`-subquery condition, or
+- An operator between the h0 source and the large scan blocks propagation —
+  aggregation (`GROUP BY`/`MODE`/`SUM`) or a correlated subquery. (A plain
+  uncorrelated `h0 IN (SELECT …)` does *not* block it — see §4.)
 
 ---
 
