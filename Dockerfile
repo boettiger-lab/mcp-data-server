@@ -22,4 +22,11 @@ RUN python -c "import duckdb; c = duckdb.connect(); c.sql('INSTALL httpfs; INSTA
 # Application code last, so a code change rebuilds only this cheap layer.
 COPY . /app
 
+# Version stamp, passed by docker.yml (APP_VERSION = the git tag on release builds,
+# else "main"; GIT_SHA = the commit). Last so a version/sha change rebuilds only this
+# trivial layer, never the deps. Read at runtime by server.py (issue #221).
+ARG APP_VERSION=dev
+ARG GIT_SHA=unknown
+ENV APP_VERSION=$APP_VERSION GIT_SHA=$GIT_SHA
+
 CMD ["python", "server.py"]

@@ -29,11 +29,28 @@ BaseSession.send_notification = _resilient_send_notification
 # -------------------------------------------------------------------------
 # 1. INITIALIZATION
 # -------------------------------------------------------------------------
+# App version + git SHA, baked at build time from the git tag (Dockerfile ARGs set
+# by docker.yml). The tag is the single source of truth — no version string lives in
+# source, so nothing can drift from what was actually tagged/built. Defaults mark a
+# local/un-stamped run. See issue #221.
+APP_VERSION = os.environ.get("APP_VERSION", "dev")
+GIT_SHA = os.environ.get("GIT_SHA", "unknown")
+
 mcp = FastMCP(
     "DuckDB-S3-Geo-Isolated",
     stateless_http=True,
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)
 )
+
+# Report APP_VERSION in the MCP `initialize` handshake (serverInfo.version) so clients
+# learn it in-band, no extra request. FastMCP has no version kwarg, so set it on the
+# wrapped low-level server. `mcp` is unpinned (the weekly cron re-resolves it), so guard
+# against a future internal rename rather than crash startup — /version and /healthz
+# still carry the version regardless.
+try:
+    mcp._mcp_server.version = APP_VERSION
+except Exception:
+    pass
 
 # -------------------------------------------------------------------------
 # 2. CONFIGURATION & FILE LOADING
@@ -724,8 +741,9 @@ _MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "").strip()
 
 class _BearerAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
-        # /healthz must remain reachable to the kubelet probe even with auth on.
-        if request.url.path == "/healthz":
+        # /healthz must remain reachable to the kubelet probe even with auth on;
+        # /version is deliberately public too (version discovery is the whole point).
+        if request.url.path in ("/healthz", "/version"):
             return await call_next(request)
         auth = request.headers.get("Authorization", "")
         supplied = auth[len("Bearer "):] if auth.startswith("Bearer ") else ""
@@ -739,7 +757,13 @@ async def _healthz(_request):
     # (e.g. a runaway DuckDB query saturating CPU/memory on the pod). That's the
     # signal we want: a wedged pod becomes NotReady within ~15s and HAProxy
     # stops routing to it. See issue #157.
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "version": APP_VERSION})
+
+
+async def _version(_request):
+    # App version + git SHA of the running image (issue #221). Lets consumers and
+    # ops confirm what's deployed without cluster access.
+    return JSONResponse({"version": APP_VERSION, "git_sha": GIT_SHA})
 
 # -------------------------------------------------------------------------
 # 10. SERVER START
@@ -762,6 +786,7 @@ if __name__ == "__main__":
     app.router.redirect_slashes = False
     mount_tiles(app)
     app.add_route("/healthz", _healthz, methods=["GET"])
+    app.add_route("/version", _version, methods=["GET"])
 
     if _MCP_AUTH_TOKEN:
         app.add_middleware(_BearerAuthMiddleware)
