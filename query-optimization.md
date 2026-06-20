@@ -91,13 +91,25 @@ to grep for specific columns is wasteful — the same data is already in your
 context. Search the existing schema response instead. `DESCRIBE` is appropriate
 only for arbitrary parquet files not represented in any STAC collection.
 
-## 4. Case-insensitive text search
+## 4. Text matching: fuzzy search vs exact keys
 
-DuckDB `LIKE` is case-sensitive by default. Name/label fields (site names, owner names,
-program names) are often stored in uppercase or mixed case. Always normalize both sides:
+DuckDB `LIKE` is case-sensitive by default. For **fuzzy substring search** on a
+free-text label the user typed (site, owner, program names), normalize both
+sides:
 
 ```sql
 WHERE lower(site) LIKE '%' || lower('user input') || '%'
+```
+
+For an **exact match on a known key** (`sci_name`, `name_en`, a country or
+category code), match the stored case exactly instead of wrapping the column in
+`lower()`. Where the file is sorted or clustered by that key, exact-case lets
+DuckDB skip row groups by their stored min/max stats; `lower()` forces a full
+column scan. Take the spelling from a `get_stac_details` example or a
+`SELECT DISTINCT` probe:
+
+```sql
+WHERE sci_name = 'Rana draytonii'
 ```
 
 ## 5. GeoParquet geometry columns
