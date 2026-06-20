@@ -47,10 +47,17 @@ jobs:
               tags="$repo:main"
               ;;
           esac
+          # Version stamp baked into the image: the tag on release builds, else "main".
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            app_version="${{ github.ref_name }}"
+          else
+            app_version="main"
+          fi
           {
             echo "tags<<EOF"
             echo "$tags"
             echo "EOF"
+            echo "app_version=$app_version"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
@@ -60,6 +67,9 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            APP_VERSION=${{ steps.tags.outputs.app_version }}
+            GIT_SHA=${{ github.sha }}
           # Pushes reuse the cached deps layer (fast code-only builds). The weekly
           # cron sets no-cache + pull so it re-resolves unpinned deps and pulls a
           # fresh base image (security patches); cache-to still warms the cache.

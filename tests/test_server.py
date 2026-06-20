@@ -400,11 +400,12 @@ class TestHealthz:
     Replaces a TCP-only probe so a wedged uvicorn event loop fails fast."""
 
     def _build_app(self, with_auth_middleware=False):
-        from server import mcp, _healthz, _BearerAuthMiddleware, mount_tiles
+        from server import mcp, _healthz, _version, _BearerAuthMiddleware, mount_tiles
         app = mcp.streamable_http_app()
         app.router.redirect_slashes = False
         mount_tiles(app)
         app.add_route("/healthz", _healthz, methods=["GET"])
+        app.add_route("/version", _version, methods=["GET"])
         if with_auth_middleware:
             app.add_middleware(_BearerAuthMiddleware)
         return app
@@ -416,13 +417,16 @@ class TestHealthz:
         assert "/healthz" in paths
 
     def test_healthz_returns_ok_fast(self):
-        """GET /healthz returns 200 with {"ok": true}. Async handler does no I/O
-        and no executor work — fails only if the event loop itself is starved."""
+        """GET /healthz returns 200 with ok=true (plus the app version). Async
+        handler does no I/O and no executor work — fails only if the event loop
+        itself is starved."""
         from starlette.testclient import TestClient
         client = TestClient(self._build_app())
         r = client.get("/healthz")
         assert r.status_code == 200
-        assert r.json() == {"ok": True}
+        body = r.json()
+        assert body["ok"] is True
+        assert "version" in body
 
     def test_healthz_bypasses_auth_middleware(self):
         """When MCP_AUTH_TOKEN is set, the kubelet still needs to probe — but the
@@ -437,11 +441,40 @@ class TestHealthz:
             # /healthz works with no auth header.
             r = client.get("/healthz")
             assert r.status_code == 200, r.text
-            assert r.json() == {"ok": True}
+            assert r.json()["ok"] is True
             # /mcp without a valid token is rejected — confirms the middleware
             # IS installed and gating other paths.
             r2 = client.post("/mcp", json={"jsonrpc": "2.0", "method": "ping", "id": 1})
             assert r2.status_code == 401
+        finally:
+            server._MCP_AUTH_TOKEN = original
+
+    def test_version_returns_app_version_and_sha(self):
+        """GET /version reports the build-stamped app version + git SHA (issue #221)."""
+        import server
+        from starlette.testclient import TestClient
+        orig_v, orig_s = server.APP_VERSION, server.GIT_SHA
+        server.APP_VERSION, server.GIT_SHA = "v9.9.9", "deadbeef"
+        try:
+            client = TestClient(self._build_app())
+            r = client.get("/version")
+            assert r.status_code == 200
+            assert r.json() == {"version": "v9.9.9", "git_sha": "deadbeef"}
+        finally:
+            server.APP_VERSION, server.GIT_SHA = orig_v, orig_s
+
+    def test_version_bypasses_auth_middleware(self):
+        """/version is public (version discovery is the point) — reachable with no
+        token even when auth is on."""
+        import server
+        from starlette.testclient import TestClient
+        original = server._MCP_AUTH_TOKEN
+        server._MCP_AUTH_TOKEN = "test-token"
+        try:
+            client = TestClient(self._build_app(with_auth_middleware=True))
+            r = client.get("/version")
+            assert r.status_code == 200, r.text
+            assert "version" in r.json()
         finally:
             server._MCP_AUTH_TOKEN = original
 
