@@ -144,6 +144,57 @@ instructions.
 
 ---
 
+## Validating guidance changes (headless model-suite test)
+
+**Every change to a prompt artifact** (`h3-guide.md`, `query-optimization.md`,
+`query-setup.md`, `assistant-role.md`, `datasets.md`) **should be tested across the
+open-model suite before it's considered done.** These files are runtime instructions
+for small open models — the ground truth is not "does the SQL I write run," it's
+"does the model *generate* the right SQL after reading this guidance." Only running
+the models confirms that. A fix verified solely by running the corrected query
+yourself proves the pattern works, not that the guidance steers the model to it.
+
+The harness lives in the sibling repo **`boettiger-lab/open-llm-proxy`** under
+`headless/` (see its `README.md`). It replays the real geo-agent tool-use loop from
+the command line against the LLM proxy, so prompt assembly, the tool-call parser, and
+the MCP transport stay in sync with the browser app by construction.
+
+**Workflow for a guidance change:**
+
+1. Merge the change and let dev pick it up — dev tracks `:main` and serves the
+   injected guidance. (Confirm: `curl -s https://dev-duckdb-mcp.nrp-nautilus.io/version`
+   git_sha matches `main`; the new text appears in the `query` tool description.)
+2. Run the matrix as a one-shot k8s Job (pulls `PROXY_KEY` from the cluster Secret —
+   no local creds). Use **`geo-agent-template`** as the app repo: its
+   `layers-input.json` has `mcp_url` pointed at **dev**, so the test exercises the
+   dev-served guidance without touching any prod app.
+
+   ```bash
+   cd ../open-llm-proxy/headless
+   cat > runs/q.txt <<'EOF'
+   <a question that forces the behavior the guidance governs>
+   EOF
+   QUESTIONS_FILE="$PWD/runs/q.txt" TAG=<short-tag> \
+     MODELS="glm-5 kimi qwen3 gpt-oss minimax-m2" TRIALS=2 \
+     ./run-matrix-k8s.sh boettiger-lab/geo-agent-template
+   ```
+
+3. Read the transcripts from `kubectl -n biodiversity logs job/<JOB_NAME>`: confirm
+   the models emit the intended SQL pattern and the correct answer, and that the
+   prior failure form is gone (zero occurrences).
+
+**Pick the models deliberately.** Always include any model that previously exhibited
+the failure (the logs naming the symptom are the regression set), plus a spread of the
+suite — model values come from `geo-agent-template/k8s/configmap.yaml` (`glm-5`,
+`kimi`, `qwen3`, `qwen3-small`, `gpt-oss`, `nemotron`, `gemma`, `minimax-m2`).
+Establish a ground-truth answer first by running the correct query yourself, so the
+transcripts have something to check against.
+
+To A/B-test app-level *system prompt* wording (not the MCP-injected guides) without
+forking the app, `run-matrix-k8s.sh` takes `SYSTEM_PROMPT_APPEND_FILE`.
+
+---
+
 ## Failure modes to avoid
 
 ### Misdiagnosing a rule-violation as an infrastructure bug (March 2026)
