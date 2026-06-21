@@ -89,6 +89,22 @@ literal. Markdown table output may render the BIGINT in scientific notation
 which loses precision even when accepted. Accepted argument types are
 `VARCHAR`, `UBIGINT`, and `BIGINT`.
 
+## Distance Between Hexes
+
+`h3_great_circle_distance` measures between two coordinate pairs, not cell
+indices. To get the distance between two hex cells, convert each to its center
+first with `h3_cell_to_lat` / `h3_cell_to_lng`:
+
+```sql
+SELECT h3_great_circle_distance(
+  h3_cell_to_lat(a.h8), h3_cell_to_lng(a.h8),
+  h3_cell_to_lat(b.h8), h3_cell_to_lng(b.h8),
+  'km') AS dist_km
+FROM ...
+```
+
+Units: `'km'`, `'m'`, or `'rads'`.
+
 ## Joining Different Resolutions
 
 **Always join by converting the finer (higher-numbered) dataset to the coarser resolution — never look for child columns on the coarser dataset.**
