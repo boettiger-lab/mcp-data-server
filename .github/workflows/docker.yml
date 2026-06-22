@@ -71,14 +71,15 @@ jobs:
             APP_VERSION=${{ steps.tags.outputs.app_version }}
             GIT_SHA=${{ github.sha }}
           # Pushes reuse the cached deps layer (fast code-only builds). The weekly
-          # cron sets no-cache + pull so it re-resolves unpinned deps and pulls a
-          # fresh base image (security patches); cache-to still warms the cache.
+          # cron and manual workflow_dispatch both set no-cache + pull so they
+          # re-resolve unpinned deps and pull a fresh base image (security patches);
+          # cache-to still warms the cache for subsequent pushes.
           # (When no-cache=true, cache-from is ignored by design; cache-to is kept
           # so the next code-push still gets a warm cache.)
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          no-cache: ${{ github.event_name == 'schedule' }}
-          pull: ${{ github.event_name == 'schedule' }}
+          no-cache: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          pull: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
       - name: Report image digest
         run: |

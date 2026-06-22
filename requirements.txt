@@ -1,10 +1,9 @@
 mcp
 # Pinned: the community `h3` extension is built per exact DuckDB version and
-# lags new releases. Unpinned, CI/image builds pull the latest DuckDB (e.g.
-# 1.5.4) for which `INSTALL h3 FROM community` has no candidate, breaking every
-# tile path. 1.5.3 is the version our extensions (spatial + h3) are validated
-# against and what prod runs. Bump only once community h3 ships for the target.
-duckdb==1.5.3
+# lags new releases. Unpinned, CI/image builds pull the latest DuckDB for which
+# `INSTALL h3 FROM community` may have no candidate, breaking every tile path.
+# Bump only once community h3 ships for the target version.
+duckdb==1.5.4
 pandas
 uvicorn
 tabulate
