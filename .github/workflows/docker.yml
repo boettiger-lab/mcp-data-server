@@ -81,6 +81,12 @@ jobs:
           no-cache: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           pull: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
+      - name: Smoke-test image
+        run: |
+          image="ghcr.io/boettiger-lab/mcp-data-server@${{ steps.build.outputs.digest }}"
+          docker pull "$image"
+          docker run --rm "$image" python -c "import duckdb; c=duckdb.connect(); c.sql('LOAD httpfs'); c.sql('LOAD spatial'); c.sql('LOAD h3'); c.sql('SELECT h3_latlng_to_cell(37.8, -122.4, 5)'); c.sql('SELECT ST_Point(0, 0)'); print('OK: httpfs/spatial/h3 loaded and functional')"
+
       - name: Report image digest
         run: |
           {
