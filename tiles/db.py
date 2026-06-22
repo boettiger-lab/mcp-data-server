@@ -12,8 +12,8 @@ import duckdb
 def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnection:
     """Create a :memory: connection with extensions loaded and S3 configured.
 
-    Extensions are assumed to be pre-installed in the image (see mcp-data-server#54);
-    LOAD is per-session and always required.
+    Extensions are pre-installed in the image (Dockerfile INSTALL step); LOAD is
+    per-session. Dev environments must run the Dockerfile or manually INSTALL once.
 
     `threads` sets DuckDB's per-query parallelism for this connection:
     - The shared READ connection (tile-serve GETs + prepare-phase probes) uses
@@ -27,10 +27,9 @@ def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnecti
       (server._build_executor) so this never slows tile reads.
     """
     con = duckdb.connect(":memory:")
-    # Extensions may not be pre-installed in dev environments — install defensively.
-    con.sql("INSTALL httpfs; LOAD httpfs")
-    con.sql("INSTALL spatial; LOAD spatial")
-    con.sql("INSTALL h3 FROM community; LOAD h3")
+    con.sql("LOAD httpfs")
+    con.sql("LOAD spatial")
+    con.sql("LOAD h3")
 
     if threads is None:
         threads = int(os.environ.get("TILE_THREADS", "48"))

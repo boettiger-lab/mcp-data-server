@@ -7,9 +7,9 @@ SET THREADS=100;
 SET preserve_insertion_order=false;
 SET enable_object_cache=true;
 SET temp_directory='/tmp';
-INSTALL httpfs; LOAD httpfs;
-INSTALL h3 FROM community; LOAD h3;
-INSTALL spatial; LOAD spatial;
+LOAD httpfs;
+LOAD h3;
+LOAD spatial;
 CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '');
 ```
 
