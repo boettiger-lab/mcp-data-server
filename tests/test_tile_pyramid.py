@@ -2,14 +2,6 @@ import pytest
 from tiles.pyramid import build_pyramid_statements
 
 
-@pytest.fixture(autouse=True)
-def _force_vector_path(monkeypatch):
-    # This suite exercises the MVT tile pyramid. Pin the GeoJSON cutoff to 0 so
-    # the auto-selector (#178) always builds the full pyramid; the GeoJSON path
-    # has dedicated coverage in test_tile_geojson.py.
-    monkeypatch.setattr("tiles.pyramid._GEOJSON_MAX_FEATURES", 0)
-
-
 class TestBuildPyramidStatements:
     def test_returns_list_with_one_statement_per_resolution(self):
         stmts = build_pyramid_statements(

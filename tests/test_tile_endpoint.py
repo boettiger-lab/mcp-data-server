@@ -10,14 +10,6 @@ from tiles.pyramid import register_hex_tiles
 from tiles.db import build_tile_connection
 
 
-@pytest.fixture(autouse=True)
-def _force_vector_path(monkeypatch):
-    # This suite exercises MVT tile serving. Pin the GeoJSON cutoff to 0 so the
-    # auto-selector (#178) always builds the tile pyramid; the GeoJSON path has
-    # dedicated coverage in test_tile_geojson.py.
-    monkeypatch.setattr("tiles.pyramid._GEOJSON_MAX_FEATURES", 0)
-
-
 @pytest.fixture
 def local_bucket(tmp_path, monkeypatch):
     bucket = tmp_path / "tiles-bucket"

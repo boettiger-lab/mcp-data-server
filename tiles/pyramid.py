@@ -3,12 +3,10 @@
 register_hex_tiles() materializes a partitioned parquet pyramid to object storage.
 Tile requests read directly from the pyramid — no coordination needed.
 """
-import gzip
 import json
 import os
 import sys
 import time
-import urllib.request
 from decimal import Decimal
 from typing import List
 
@@ -29,22 +27,6 @@ MVT_LAYER_NAME = "layer"
 # the old fixed 900s so a dead build's "running" ghost resolves in ~2 min, not
 # 15 (#184). Configurable for ops.
 _LOCK_STALE_SECONDS = int(os.environ.get("TILE_LOCK_STALE_SECONDS", "120"))
-
-# Hex sets at or below this many finest-res cells are served as a single
-# GeoJSON FeatureCollection (streamed straight to object storage, fetched
-# client-side by MapLibre from the public gateway) instead of building an MVT
-# tile pyramid. Larger sets fall back to the pyramid. Env-overridable. See #178.
-#
-# 30k (was 100k): set from #190 step-2 measurement. Single-res GeoJSON is bound
-# by client-side time-to-interactive — MapLibre tessellates every cell on the
-# main thread on *every* view (measured ~4s at 25k, ~10s at 100k, ~18s at 200k
-# on a 4-core client), and having no pyramid it only shows real hexes near the
-# data's native zoom (sub-pixel blob otherwise). MVT now builds about as fast
-# for bounded sets (~6s flat, post-#207) and renders correctly at every zoom
-# with progressive ~viewport-bound loads, so it wins above this point on both
-# latency and appearance. GeoJSON stays the simpler choice only for small,
-# bounded sets viewed at their native extent. Full data on #190.
-_GEOJSON_MAX_FEATURES = int(os.environ.get("TILE_GEOJSON_MAX_FEATURES", "30000"))
 
 
 def build_pyramid_statements(
@@ -170,157 +152,10 @@ def _public_base_url() -> str:
     return os.environ.get("MCP_PUBLIC_BASE_URL", "https://duckdb-mcp.nrp-nautilus.io").rstrip("/")
 
 
-def _s3_public_http_base() -> str:
-    """Public HTTPS gateway for the object store (CORS-enabled, GET-only). A
-    browser fetches GeoJSON directly from here — see stac.py, same gateway."""
-    return os.environ.get("S3_PUBLIC_HTTP_BASE", "https://s3-west.nrp-nautilus.io").rstrip("/")
-
-
-def _to_public_http_url(uri: str) -> str:
-    """Map an s3://bucket/key write URI to the public HTTPS URL MapLibre can
-    fetch client-side. Non-s3 paths (local test dirs) are returned unchanged."""
-    if uri.startswith("s3://"):
-        return f"{_s3_public_http_base()}/{uri[len('s3://'):]}"
-    return uri
-
-
-# A cell's H3 boundary "spans the globe" when its longitude extent exceeds
-# 180 deg. Two kinds of cell trip this, both from un-clipped/noisy point data:
-#   - pole cells (latitude ~+/-90, e.g. GBIF coordinate junk at the South Pole)
-#     whose ring wraps every longitude;
-#   - cells whose raw boundary straddles the antimeridian (longitude jumps
-#     +179.9 -> -179.9, #164).
-# Emitted as raw GeoJSON, MapLibre draws either as a horizontal smear across the
-# whole map ("the layer isn't rendering"). The MVT serve path handles these
-# (#164/#201); the GeoJSON builder never did. Dropping them is the GeoJSON-path
-# analog of that robustness fix (#196). `g` is the boundary GEOMETRY column.
-_GEOJSON_GLOBE_SPANNING = "(ST_XMax(g) - ST_XMin(g)) > 180"
-
-
-def build_geojson_statement(finest_uri: str, geojson_uri: str, value_columns: List[str]) -> str:
-    """COPY that writes the finest-res hexes as one valid GeoJSON FeatureCollection.
-
-    Uses DuckDB's native JSON export (FORMAT JSON) plus ST_AsGeoJSON — a spatial
-    scalar, NOT the GDAL-backed ST_Write — so it streams to s3:// over httpfs.
-    A single output row becomes one line that is the whole FeatureCollection
-    object; json_group_array nests each cell's GeoJSON geometry and properties.
-
-    Globe-spanning pole/dateline cells are dropped (see _GEOJSON_GLOBE_SPANNING)
-    so noisy/un-clipped data never renders as a smear (#196).
-    """
-    cte, features = _geojson_body(finest_uri, value_columns)
-    return (
-        "COPY (\n"
-        f"{cte}"
-        "  SELECT 'FeatureCollection' AS type,\n"
-        f"         {features} AS features\n"
-        "  FROM _cells\n"
-        f"  WHERE NOT {_GEOJSON_GLOBE_SPANNING}\n"
-        f") TO '{geojson_uri}' (FORMAT JSON)"
-    )
-
-
-def _geojson_body(finest_uri: str, value_columns: List[str]):
-    """The `_cells` CTE and per-feature array shared by both GeoJSON emitters —
-    the COPY-to-file form (local/test) and the single-string fetch form (the
-    gzip-to-s3 path) — so the two can never drift on geometry or properties."""
-    props = ", ".join(f"'{c}', \"{c}\"" for c in value_columns)
-    cols = ", ".join(f'"{c}"' for c in value_columns)
-    cte = (
-        "  WITH _cells AS (\n"
-        f"    SELECT {cols}, h3_cell_to_boundary_wkt(h)::GEOMETRY AS g\n"
-        f"    FROM read_parquet('{finest_uri}')\n"
-        "  )\n"
-    )
-    features = (
-        "coalesce(json_group_array(json_object(\n"
-        "           'type', 'Feature',\n"
-        "           'geometry', CAST(ST_AsGeoJSON(g) AS JSON),\n"
-        f"           'properties', json_object({props})\n"
-        "         )), '[]'::JSON)"
-    )
-    return cte, features
-
-
-def geojson_fc_query(finest_uri: str, value_columns: List[str]) -> str:
-    """SELECT whose single `fc` column is the entire FeatureCollection as one
-    JSON value. DuckDB assembles it in its C/JSON layer; we fetch the string
-    once and gzip it — no intermediate file, the bytes stream straight out of
-    DuckDB. The COPY form (build_geojson_statement) stays for local/test writes."""
-    cte, features = _geojson_body(finest_uri, value_columns)
-    return (
-        f"{cte}"
-        "  SELECT json_object('type', 'FeatureCollection', 'features',\n"
-        f"         {features}) AS fc\n"
-        "  FROM _cells\n"
-        f"  WHERE NOT {_GEOJSON_GLOBE_SPANNING}"
-    )
-
-
-def count_globe_spanning_statement(finest_uri: str) -> str:
-    """COUNT of the globe-spanning cells build_geojson_statement drops — for a
-    log line so a smear-free render that silently shed junk cells is still
-    visible in the build logs (#196)."""
-    return (
-        "SELECT count(*) FROM (\n"
-        f"  SELECT h3_cell_to_boundary_wkt(h)::GEOMETRY AS g FROM read_parquet('{finest_uri}')\n"
-        f") WHERE {_GEOJSON_GLOBE_SPANNING}"
-    )
-
-
-def _s3_internal_write_url(uri: str) -> str:
-    """In-cluster write endpoint for the GeoJSON PUT — the same Ceph RGW the tile
-    build already writes parquet through (HTTP, no SSL, no public-ingress hop).
-    Browsers still GET via the public gateway (_to_public_http_url); one object,
-    two endpoints into the same store. Non-s3 paths pass through (local tests)."""
-    base = os.environ.get(
-        "S3_INTERNAL_HTTP_BASE", "http://rook-ceph-rgw-nautiluss3.rook"
-    ).rstrip("/")
-    if uri.startswith("s3://"):
-        return f"{base}/{uri[len('s3://'):]}"
-    return uri
-
-
-def _put_gzip(http_url: str, raw: bytes, content_type: str = "application/json") -> int:
-    """Anonymous PUT of gzip-compressed bytes carrying a Content-Encoding header,
-    so the public gateway (which does NOT negotiate Accept-Encoding) returns them
-    compressed and the browser inflates transparently — ~4x less wire for the
-    GeoJSON path (#190). Returns the compressed byte count.
-
-    Uses urllib + an unsigned PUT deliberately: it adds no dependency and avoids
-    boto3's flexible-checksum streaming, which appends `aws-chunked` to
-    Content-Encoding (`gzip,aws-chunked`) — a token list browsers won't inflate.
-    The bucket already accepts anonymous writes (same path DuckDB's httpfs uses).
-    """
-    # Level 6: ~same ratio as 9 (measured 4.5x on real payloads) at <half the
-    # CPU — the conventional HTTP-gzip default, and this runs at build time.
-    gz = gzip.compress(raw, compresslevel=6, mtime=0)
-    req = urllib.request.Request(
-        http_url,
-        data=gz,
-        method="PUT",
-        headers={
-            "Content-Encoding": "gzip",
-            "Content-Type": content_type,
-            "Content-Length": str(len(gz)),
-        },
-    )
-    with urllib.request.urlopen(req) as resp:
-        if resp.status not in (200, 201):
-            raise RuntimeError(f"gzip PUT to {http_url} returned HTTP {resp.status}")
-    return len(gz)
-
 
 def render_recipe(meta: dict, tile_url_template: str) -> dict:
-    """Return {format, source, layer}: a paste-ready MapLibre source + fill
-    layer with a default linear color ramp over the first value column.
-
-    The agent renders these verbatim and never branches on format. `format` is
-    read from meta ('geojson' or 'vector'; defaults to 'vector' for pre-#178
-    metadata). GeoJSON sources point at the public object-store URL; vector
-    sources at the tile endpoint and carry `source-layer`.
-    """
-    fmt = meta.get("format") or "vector"
+    """Return {source, layer}: a paste-ready MapLibre vector tile source + fill
+    layer with a default linear color ramp over the first value column."""
     col = meta["value_columns"][0]
     by_res = meta.get("value_stats", {}).get(col, {}).get("by_res", {})
     stats = by_res.get(str(meta["finest_res"])) or (next(iter(by_res.values())) if by_res else None)
@@ -332,13 +167,9 @@ def render_recipe(meta: dict, tile_url_template: str) -> dict:
         "fill-color": ["interpolate", ["linear"], ["get", col], vmin, "#fee5d9", vmax, "#a50f15"],
         "fill-opacity": 0.7,
     }
-    if fmt == "geojson":
-        source = {"type": "geojson", "data": meta.get("geojson_url")}
-        layer = {"type": "fill", "paint": paint}
-    else:
-        source = {"type": "vector", "tiles": [tile_url_template], "minzoom": 0, "maxzoom": 14}
-        layer = {"type": "fill", "source-layer": meta.get("layer_name", MVT_LAYER_NAME), "paint": paint}
-    return {"format": fmt, "source": source, "layer": layer}
+    source = {"type": "vector", "tiles": [tile_url_template], "minzoom": 0, "maxzoom": 14}
+    layer = {"type": "fill", "source-layer": meta.get("layer_name", MVT_LAYER_NAME), "paint": paint}
+    return {"source": source, "layer": layer}
 
 
 def _json_dumps_escaped(obj) -> str:
@@ -476,7 +307,6 @@ def cached_result_dict(plan: dict, cached: dict) -> dict:
         "value_stats": cached["value_stats"],
         "layer_name": cached.get("layer_name", MVT_LAYER_NAME),
         "feature_count_finest": cached["feature_count_finest"],
-        "geojson_url": cached.get("geojson_url"),
         "cache_hit": True,
     }
     result.update(render_recipe(cached, plan["tile_url_template"]))
@@ -627,28 +457,19 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     w, s, e, n, feature_count = bounds_row[2], bounds_row[0], bounds_row[3], bounds_row[1], bounds_row[4]
     bounds_seconds = time.perf_counter() - bounds_t0
 
-    # Auto-select (#178): small/bounded sets render fastest as a single
-    # client-side GeoJSON; larger sets need the tiled pyramid. The count comes
-    # free from the already-materialized Phase 1 level.
-    serve_format = "geojson" if feature_count <= _GEOJSON_MAX_FEATURES else "vector"
+    # Phase 2: build parent resolutions.
+    for i, stmt in enumerate(statements[1:], start=1):
+        s0 = time.perf_counter()
+        con.sql(stmt)
+        dt = time.perf_counter() - s0
+        copy_seconds += dt
+        print(
+            f"[tile-build] hash={h} phase=2 res={finest_res - i} copy={dt:.1f}s",
+            file=sys.stderr,
+        )
 
-    # Phase 2 (parent resolutions) is only for the tile path — GeoJSON renders
-    # the finest set directly, so coarser pyramid levels are never requested.
-    if serve_format == "vector":
-        for i, stmt in enumerate(statements[1:], start=1):
-            s0 = time.perf_counter()
-            con.sql(stmt)
-            dt = time.perf_counter() - s0
-            copy_seconds += dt
-            print(
-                f"[tile-build] hash={h} phase=2 res={finest_res - i} copy={dt:.1f}s",
-                file=sys.stderr,
-            )
-
-    # Per-resolution value stats. GeoJSON only uses the finest level (the
-    # client colors from it), so we skip the parent levels it never builds.
     stats_t0 = time.perf_counter()
-    stat_levels = range(min_res, finest_res + 1) if serve_format == "vector" else [finest_res]
+    stat_levels = range(min_res, finest_res + 1)
     value_stats = {}
     for col in value_columns:
         by_res = {}
@@ -663,44 +484,11 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
         value_stats[col] = {"by_res": by_res}
     stats_seconds = time.perf_counter() - stats_t0
 
-    # GeoJSON path: stream the FeatureCollection straight to object storage so
-    # MapLibre fetches it directly from the public gateway (no pod serving).
-    geojson_url = None
-    geojson_seconds = 0.0
-    if serve_format == "geojson":
-        gj_t0 = time.perf_counter()
-        geojson_uri = f"{output_uri}data.geojson"
-        geojson_url = _to_public_http_url(geojson_uri)
-        dropped = con.sql(count_globe_spanning_statement(finest_uri)).fetchone()[0]
-        if geojson_uri.startswith("s3://"):
-            # The public gateway serves objects uncompressed; pre-gzip the
-            # FeatureCollection and PUT it with Content-Encoding so the wire
-            # payload drops ~4x and browsers inflate transparently (#190).
-            # DuckDB builds the whole FC string in its C layer; we fetch it once
-            # (no temp file) and PUT to the internal RGW endpoint.
-            raw = con.sql(geojson_fc_query(finest_uri, value_columns)).fetchone()[0].encode()
-            gz_len = _put_gzip(_s3_internal_write_url(geojson_uri), raw)
-            print(
-                f"[tile-build] hash={h} geojson gzip raw={len(raw) / 1e6:.1f}MB "
-                f"gz={gz_len / 1e6:.1f}MB ratio={len(raw) / max(gz_len, 1):.1f}x (#190)",
-                file=sys.stderr,
-            )
-        else:
-            # Local/test path: write the file directly (no gateway to gzip for).
-            con.sql(build_geojson_statement(finest_uri, geojson_uri, value_columns))
-        geojson_seconds = time.perf_counter() - gj_t0
-        if dropped:
-            print(
-                f"[tile-build] hash={h} geojson dropped {dropped} globe-spanning "
-                f"(pole/dateline) cells of {feature_count} (#196)",
-                file=sys.stderr,
-            )
-
     print(
-        f"[tile-build] hash={h} DONE format={serve_format} "
+        f"[tile-build] hash={h} DONE "
         f"finest_res={finest_res} min_res={min_res} "
         f"copy={copy_seconds:.1f}s stats={stats_seconds:.1f}s bounds={bounds_seconds:.1f}s "
-        f"geojson={geojson_seconds:.1f}s total={time.perf_counter() - build_t0:.1f}s "
+        f"total={time.perf_counter() - build_t0:.1f}s "
         f"feature_count_finest={feature_count}",
         file=sys.stderr,
     )
@@ -715,8 +503,6 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
         "layer_name": MVT_LAYER_NAME,
         "bounds": [w, s, e, n],
         "feature_count_finest": feature_count,
-        "format": serve_format,
-        "geojson_url": geojson_url,
     }
     metadata_sql = (
         f"COPY (SELECT '{_json_dumps_escaped(metadata)}' AS j) "
@@ -735,7 +521,6 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
         "value_stats": value_stats,
         "layer_name": MVT_LAYER_NAME,
         "feature_count_finest": feature_count,
-        "geojson_url": geojson_url,
     }
     result.update(render_recipe(metadata, plan["tile_url_template"]))
     return result
