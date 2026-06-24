@@ -147,12 +147,19 @@ instructions.
 ## Validating guidance changes (headless model-suite test)
 
 **Every change to a prompt artifact** (`h3-guide.md`, `query-optimization.md`,
-`query-setup.md`, `assistant-role.md`, `datasets.md`) **should be tested across the
-open-model suite before it's considered done.** These files are runtime instructions
-for small open models — the ground truth is not "does the SQL I write run," it's
-"does the model *generate* the right SQL after reading this guidance." Only running
-the models confirms that. A fix verified solely by running the corrected query
-yourself proves the pattern works, not that the guidance steers the model to it.
+`query-setup.md`, `assistant-role.md`, `datasets.md`) **must be validated against the
+open-model suite on dev before it ships to prod.** It is not done until the matrix
+shows **both**: (a) the targeted failure is fixed, and (b) no regression on the
+standing baseline set (below). These files are runtime instructions for small open
+models — the ground truth is not "does the SQL I write run," it's "does the model
+*generate* the right SQL after reading this guidance." Only running the models confirms that. A fix verified solely by
+running the corrected query yourself proves the pattern works, not that the guidance
+steers the model to it.
+
+Guidance is shared context: text added for one trap is read by every query. Tighter
+wording is safer wording — say it once, in the most-read place, and stop. Prefer
+editing an existing rule over adding a parallel one; never restate a rule the suite
+already passes.
 
 The harness lives in the sibling repo **`boettiger-lab/open-llm-proxy`** under
 `headless/` (see its `README.md`). It replays the real geo-agent tool-use loop from
@@ -173,15 +180,22 @@ the MCP transport stay in sync with the browser app by construction.
    cd ../open-llm-proxy/headless
    cat > runs/q.txt <<'EOF'
    <a question that forces the behavior the guidance governs>
+   <the standing baseline questions — unrelated to this change>
    EOF
    QUESTIONS_FILE="$PWD/runs/q.txt" TAG=<short-tag> \
      MODELS="glm-5 kimi qwen3 gpt-oss minimax-m2" TRIALS=2 \
      ./run-matrix-k8s.sh boettiger-lab/geo-agent-template
    ```
 
+   Run the trap question and the baseline set in the **same** matrix so the fix and the
+   regression check share one job and one set of transcripts.
+
 3. Read the transcripts from `kubectl -n biodiversity logs job/<JOB_NAME>`: confirm
-   the models emit the intended SQL pattern and the correct answer, and that the
-   prior failure form is gone (zero occurrences).
+   (a) the models emit the intended SQL pattern and the correct answer and the prior
+   failure form is gone (zero occurrences), **and** (b) every baseline question still
+   resolves to its known-good answer — no question the change wasn't aimed at got worse.
+   A regression on the baseline blocks promotion to prod even if the targeted trap is
+   fixed — fix forward or revert on dev first.
 
 **Pick the models deliberately.** Always include any model that previously exhibited
 the failure (the logs naming the symptom are the regression set), plus a spread of the
@@ -189,6 +203,13 @@ suite — model values come from `geo-agent-template/k8s/configmap.yaml` (`glm-5
 `kimi`, `qwen3`, `qwen3-small`, `gpt-oss`, `nemotron`, `gemma`, `minimax-m2`).
 Establish a ground-truth answer first by running the correct query yourself, so the
 transcripts have something to check against.
+
+**The standing baseline set** is a small, fixed list of questions with computed
+golden answers, kept in the harness repo, that every guidance change is re-run
+against to catch collateral damage. Seed it from the #243 ground-truth set (the
+6-model × 34-question sweep with Opus-computed answers); when a change fixes a new
+trap, add the question that exposed it to the baseline so future changes can't
+silently reintroduce it. Keep the set small enough to run on every change.
 
 To A/B-test app-level *system prompt* wording (not the MCP-injected guides) without
 forking the app, `run-matrix-k8s.sh` takes `SYSTEM_PROMPT_APPEND_FILE`.
