@@ -617,6 +617,20 @@ class TestFetchResilience:
         _, kwargs = mock_get.call_args
         assert kwargs.get("timeout") == 3
 
+    def test_pystac_default_stac_io_is_callable(self):
+        """pystac.StacIO.default() must return an instance, not raise TypeError.
+
+        Regression for #239: set_default() expects a class (factory), not an
+        instance.  Passing _TimeoutStacIO() caused StacIO.default() to call the
+        instance as a callable, raising '_TimeoutStacIO' object is not callable
+        whenever pystac resolved a child link without an explicit stac_io
+        (link.py fallback path).
+        """
+        import pystac
+        import stac  # noqa: ensure module-level set_default ran
+        io = pystac.StacIO.default()
+        assert isinstance(io, stac._TimeoutStacIO)
+
     def test_child_identifier_prefers_fetched_id(self):
         """When JSON parse succeeded and we have a real id, use it."""
         import stac

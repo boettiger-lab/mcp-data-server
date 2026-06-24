@@ -114,7 +114,7 @@ class _TimeoutStacIO(DefaultStacIO):
         return super().read_text_from_href(href)
 
 
-pystac.StacIO.set_default(_TimeoutStacIO())
+pystac.StacIO.set_default(_TimeoutStacIO)
 
 
 def _href_to_s3(href: str) -> str:
