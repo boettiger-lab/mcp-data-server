@@ -7,7 +7,7 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from stac import list_datasets, get_dataset, fetch_stac_catalog, get_collection, _collection_to_dict, _fuzzy_lookup
+from stac import list_datasets, get_dataset, fetch_stac_catalog, get_collection, _collection_to_dict, _fuzzy_lookup, _format_collection
 
 
 class TestCatalogUrlParameter:
@@ -1366,6 +1366,41 @@ class TestInlineCollectionContent:
             mock_get.assert_not_called()
             mock_cat.assert_not_called()
         assert result["id"] == "inline-col"
+
+
+class TestFormatCollectionUrl:
+    """_format_collection surfaces the collection self href as collection_url."""
+
+    def _make_col(self, self_href=None):
+        col = MagicMock()
+        col.id = "test-ds"
+        col.title = "Test Dataset"
+        col.description = "A test."
+        col.assets = {}
+        col.extra_fields = {}
+        col.links = []
+        col.get_self_href.return_value = self_href
+        return col
+
+    def test_collection_url_present_when_self_href_known(self):
+        col = self._make_col(
+            self_href="https://s3-west.nrp-nautilus.io/public-data/stac/test-ds/stac-collection.json"
+        )
+        result = _format_collection(col, sub_children=[])
+        assert "collection_url" in result
+        assert "https://s3-west.nrp-nautilus.io/public-data/stac/test-ds/stac-collection.json" in result
+
+    def test_collection_url_absent_when_no_self_href(self):
+        col = self._make_col(self_href=None)
+        result = _format_collection(col, sub_children=[])
+        assert "collection_url" not in result
+
+    def test_sub_child_url_is_childs_own_href(self):
+        """Sub-children surface their own self href, not the parent's."""
+        child_href = "https://s3-west.nrp-nautilus.io/public-data/stac/parent/child/stac-collection.json"
+        col = self._make_col(self_href=child_href)
+        result = _format_collection(col, sub_children=[])
+        assert child_href in result
 
 
 class TestExtractParquetAssetsExtensions:

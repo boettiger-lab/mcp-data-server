@@ -205,6 +205,9 @@ def _format_collection(col, sub_children: list = None) -> str:
     lines = []
     lines.append(f"**{col.title or col.id}**")
     lines.append(f"Collection ID: `{col.id}`")
+    self_href = col.get_self_href()
+    if self_href:
+        lines.append(f"collection_url: `{self_href}`")
     if col.description:
         lines.append(col.description)
 
