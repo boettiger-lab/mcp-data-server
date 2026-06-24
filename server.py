@@ -473,8 +473,8 @@ def register_hex_tiles(
     Returns a dict with `status` ∈ {"done", "running", "failed"}:
     - status="done" (cache hit or fast build): includes the render recipe —
       `source` (pass to map.addSource) and `layer` (pass to map.addLayer),
-      both ready to use as-is with a default color ramp. Also `format`
-      ("geojson" or "vector"), `value_columns` and `value_stats` ({<col>:
+      both ready to use as-is with a default color ramp. Also `value_columns`
+      and `value_stats` ({<col>:
       {"by_res": {"<res>": {"min","max"}}}}) if you want to customize the
       palette, plus `hash`, `bounds`, `feature_count_finest`.
     - status="running": being built in the background. You get `hash` and
@@ -604,8 +604,8 @@ _STATUS_POLL_MAX_WAIT_SECONDS = 60
 def _done_response(base: dict, meta: dict) -> dict:
     """Build a status='done' response from either an S3 metadata dict or
     a build_hex_tiles return value — both have the same shape. Includes the
-    paste-ready render recipe (format + source + layer) so the agent renders
-    the result without choosing between GeoJSON and vector tiles (#178)."""
+    paste-ready render recipe (source + layer) so the agent renders
+    the result without further branching."""
     return {
         **base,
         "status": "done",
@@ -617,7 +617,6 @@ def _done_response(base: dict, meta: dict) -> dict:
         "value_stats": meta["value_stats"],
         "layer_name": meta.get("layer_name", MVT_LAYER_NAME),
         "feature_count_finest": meta["feature_count_finest"],
-        "geojson_url": meta.get("geojson_url"),
         **render_recipe(meta, base["tile_url_template"]),
     }
 
