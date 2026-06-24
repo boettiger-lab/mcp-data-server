@@ -128,3 +128,20 @@ single quote inside a SQL string literal — do not use a backslash:
 WHERE site = 'O''Brien Ranch'   -- correct
 WHERE site = 'O'Brien Ranch'    -- parse error
 ```
+
+## 7. Filter no-data values before SUM / AVG
+
+A single `NaN` turns the entire aggregate into `NaN` — one no-data cell poisons a
+whole `SUM` or `AVG`. No-data shows up as literal `NaN`, or as sentinel codes a
+dataset reserves for "no data" (e.g. land-cover classes 0, 80, 200). Exclude both
+before aggregating:
+
+```sql
+SELECT SUM(value) AS total
+FROM read_parquet('<hex>')
+WHERE value IS NOT NULL AND NOT isnan(value)
+  AND lc_class NOT IN (0, 80, 200);   -- dataset's no-data sentinels
+```
+
+Take the sentinel codes from the dataset's STAC description. A `NaN` total or a
+total far smaller than expected is the signature of this trap.

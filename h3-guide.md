@@ -67,8 +67,12 @@ The constants below are latitude/distortion-averaged, not true per-cell values (
 |---|---|---|
 | h5 | 252.9 | 62,502 |
 | h6 | 36.13 | 8,929 |
+| h7 | 5.161 | 1,275 |
 | h8 | 0.7373 | 182.2 |
+| h9 | 0.1053 | 26.02 |
 | h10 | 0.01505 | 3.718 |
+
+Use the constant for the dataset's **native** resolution — the column it is actually indexed on (check with `DESCRIBE`). Multiplying a cell count by the constant for a different resolution is off by ~7× per level.
 
 ## Coordinates from H3 Cells
 
@@ -148,6 +152,8 @@ JOIN gfw ON h3_cell_to_parent(wdpa.h8, 6) = gfw.h6
 ```
 
 When one side lacks h0, omit it from that side. Prefer hex-partitioned variants (with h0) when available for partition pruning.
+
+Some datasets carry NULL in their finest pre-computed parent column for very large features (e.g. WDPA's largest protected areas have h8 but NULL h9). Joining on that finer column silently drops those features and undercounts coverage. Join at the coarsest resolution both sides share, or fall back to `h3_cell_to_parent()` which is always populated.
 
 ## Multiple Rows per Hex: Four Different Problems
 

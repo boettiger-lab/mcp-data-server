@@ -105,6 +105,14 @@ TOOL_INJECTED_CONTEXT = f"""
    WHERE a.lc_class IS NOT NULL
    GROUP BY a.h8;
    ```
+5. **DEDUP BEFORE YOU COUNT OR SUM.** Vector and hex parquet routinely repeat
+   a feature across many rows (one row per hex cell, or per overlapping
+   feature). On such data `COUNT(*)` counts rows, not features, and `SUM()`
+   multiplies every value by its row count. Count and sum the distinct feature
+   instead: `COUNT(DISTINCT <feature_id>)`, and `SELECT DISTINCT <id>, h0 ...`
+   before any join or aggregate. See *Multiple Rows per Hex* below for the
+   per-shape fix. A 50-row result preview is never a count — read the actual
+   number off a `COUNT(...)`, never off the displayed row count.
 
 ### ⚡ OPTIMIZATION RULES
 {OPTIM_RAW}
@@ -230,9 +238,18 @@ def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint
                 keep = [f'"{c}"' for c in result.columns if c not in geom_cols]
                 result = result.select(", ".join(keep))
 
-            df = result.limit(50).df()
+            # Fetch one extra row to detect truncation without a second COUNT scan.
+            df = result.limit(51).df()
             if df.empty: return "No results found."
-            return df.to_markdown(index=False)
+            truncated = len(df) > 50
+            md = df.head(50).to_markdown(index=False)
+            if truncated:
+                md += (
+                    "\n\n⚠️ Showing the first 50 rows only — this is a preview, not the"
+                    " full result and NOT a count. The true number of matching rows is"
+                    " larger; use COUNT(...) / COUNT(DISTINCT ...) / SUM(...) for totals."
+                )
+            return md
 
     except Exception as e:
         return f"SQL Error: {str(e)}"

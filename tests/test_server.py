@@ -137,6 +137,17 @@ class TestQueryFunction:
         # Markdown table: header + separator + up to 50 rows
         assert len(lines) <= 55
 
+    def test_query_truncation_footer_when_over_50_rows(self):
+        """A result wider than the 50-row preview gets an explicit truncation note."""
+        result = query("SELECT range as num FROM range(100)")
+        assert "preview" in result.lower()
+        assert "COUNT" in result
+
+    def test_query_no_footer_when_50_rows_or_fewer(self):
+        """An un-truncated result must not claim to be a preview."""
+        result = query("SELECT range as num FROM range(50)")
+        assert "preview" not in result.lower()
+
 
 class TestResourceFunctions:
     """Test MCP resource functions."""
