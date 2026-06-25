@@ -144,6 +144,42 @@ instructions.
 
 ---
 
+## Where guidance lives (layering model)
+
+All of `query-optimization.md` and `h3-guide.md` are injected **verbatim into the
+`query` tool description** (`TOOL_INJECTED_CONTEXT` in `server.py`), right after the
+hardcoded CRITICAL block. So putting a rule in the server.py CRITICAL block instead of
+an `.md` file does **not** make it more available to the model — it's the same blob.
+The only differences are *maintainability* (hardcoded Python vs the designated runtime
+artifacts) and *prominence* (the CRITICAL block is first and stamped MUST-FOLLOW —
+scarce attention that every addition dilutes).
+
+So choose the home by **what kind of fact it is**, and pick the **most specific** layer
+that fits. Redundancy across layers is a cost (drift + diluted attention), not a
+feature — state a thing once, in one layer, and point to detail rather than copy it.
+
+| Layer | Owns | Examples |
+|---|---|---|
+| **dataset STAC** (in `boettiger-lab/data-workflows`) | facts true of *one dataset* — surfaced by `get_stac_details` exactly when the model is choosing columns | "this file repeats sites — dedup by `ramsarid`"; no-data sentinel codes; which column is the feature id; native resolution |
+| **`h3-guide.md`** | general H3 / hex model & patterns | resolution direction, cell-area table, parent-resolution joins, multiple-rows-per-*hex* |
+| **`query-optimization.md`** | general SQL-writing rules, cross-dataset | include `h0` in joins, NaN poisons `SUM`, fuzzy vs exact text match |
+| **server.py CRITICAL block** | the few foundational invariants, read first, ~never change | no tables, use `read_parquet`, trust STAC paths verbatim, DPP mask-before-aggregate |
+| **server.py code** | runtime tool *behavior* | the 50-row truncation footer, geometry-column drop |
+
+Decision rule when you catch a model error:
+- A wrong answer caused by a **property of one dataset** (duplicate rows, sentinel
+  values, an id column) → fix the **dataset STAC**, not the global prompt. A global rule
+  asserting "geoparquet has duplicate feature rows" is false for clean files and pollutes
+  every query; the per-dataset note is true exactly where it's needed.
+- A **general hex/SQL pattern** → the matching `.md` file. Use a concrete dataset only as
+  an *illustrative example* of the general pattern, never as the rule itself.
+- The **server.py CRITICAL block is not a priority flag.** "This error is the most common"
+  is not a reason to hardcode a rule there — that just crowds the invariants. Put the
+  guidance in its proper layer; if it's a per-dataset fact, STAC is what surfaces it at
+  the right moment.
+
+---
+
 ## Validating guidance changes (headless model-suite test)
 
 **Every change to a prompt artifact** (`h3-guide.md`, `query-optimization.md`,

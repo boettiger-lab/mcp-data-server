@@ -105,14 +105,6 @@ TOOL_INJECTED_CONTEXT = f"""
    WHERE a.lc_class IS NOT NULL
    GROUP BY a.h8;
    ```
-5. **DEDUP BEFORE YOU COUNT OR SUM.** Vector and hex parquet routinely repeat
-   a feature across many rows (one row per hex cell, or per overlapping
-   feature). On such data `COUNT(*)` counts rows, not features, and `SUM()`
-   multiplies every value by its row count. Count and sum the distinct feature
-   instead: `COUNT(DISTINCT <feature_id>)`, and `SELECT DISTINCT <id>, h0 ...`
-   before any join or aggregate. See *Multiple Rows per Hex* below for the
-   per-shape fix. A 50-row result preview is never a count — read the actual
-   number off a `COUNT(...)`, never off the displayed row count.
 
 ### ⚡ OPTIMIZATION RULES
 {OPTIM_RAW}
