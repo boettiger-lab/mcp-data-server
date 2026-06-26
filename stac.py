@@ -163,6 +163,11 @@ def _extract_parquet_assets(col) -> list[str]:
             size = asset.extra_fields.get("file:size")
             size_note = f" ({size/1024**3:.2f} GiB)" if size and size > 1024**2 else ""
             assets.append(f"  - {title}{size_note}: `read_parquet('{s3}')`")
+            # Asset-level description — carries per-asset facts (e.g. "this file has
+            # duplicate rows per feature; dedup by <id>") that the model needs at
+            # column-choice time. Without this line they never reach the prompt.
+            if asset.description:
+                assets.append(f"    - {asset.description}")
             # Asset-level STAC extension fields (h3, raster, vector)
             for ext_key in (
                 "h3:native_resolution",
