@@ -1,0 +1,49 @@
+# Decompose DuckDB S3 throughput (transport vs range-requests vs decode) on 2 nodes.
+#   kubectl apply -f benchmarks/k8s/s3-decomp-job.yaml
+#   kubectl logs -l job-name=s3-decomp -f --max-log-requests=4 --prefix
+#   kubectl delete job s3-decomp
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: s3-decomp
+spec:
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata: {labels: {job-name: s3-decomp}}
+    spec:
+      priorityClassName: opportunistic
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: topology.kubernetes.io/region, operator: In, values: ["us-west"]}
+                  - {key: feature.node.kubernetes.io/pci-10de.present, operator: NotIn, values: ["true"]}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: {matchLabels: {job-name: s3-decomp}}
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: bench
+        image: astral/uv:python3.12-bookworm-slim
+        env:
+          - name: NODE_NAME
+            valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            uv run --with boto3 --with duckdb python3 - << 'PYEOF'
+            import urllib.request, runpy
+            RAW = ("https://raw.githubusercontent.com/boettiger-lab/"
+                   "mcp-data-server/bench/s3-ceiling/benchmarks/s3-decomp-bench.py")
+            urllib.request.urlretrieve(RAW, "/tmp/bench.py")
+            runpy.run_path("/tmp/bench.py", run_name="__main__")
+            PYEOF
+        resources:
+          requests: {cpu: "16", memory: "16Gi"}
+          limits:   {cpu: "16", memory: "16Gi"}
