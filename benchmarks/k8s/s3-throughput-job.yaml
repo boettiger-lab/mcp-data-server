@@ -82,10 +82,11 @@ spec:
             PYEOF
         resources:
           # Throughput/network-bound, not CPU/RAM-bound: keep modest so it
-          # schedules widely and client CPU is never the explanation.
+          # schedules widely and client CPU is never the explanation. NRP requires
+          # limit/request ratio <=1.2, so requests==limits here.
           requests:
             cpu: "2"
             memory: "4Gi"
           limits:
-            cpu: "4"
-            memory: "8Gi"
+            cpu: "2"
+            memory: "4Gi"
