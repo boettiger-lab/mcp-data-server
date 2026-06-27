@@ -1,0 +1,91 @@
+# S3 read-throughput benchmark across multiple us-west nodes.
+#
+# Runs benchmarks/s3-throughput-bench.py on N DISTINCT nodes in us-west
+# (podAntiAffinity on hostname forces one pod per node), so we can see whether
+# read throughput from the in-cluster Ceph West pool is consistent across the
+# heterogeneous NRP fleet or varies node-to-node — and how it compares to the
+# AWS us-west-2 (source.coop) mirror over Internet2/CENIC. Each pod prints its
+# node name; correlate node -> throughput curve afterward.
+#
+# Requires benchmarks/s3-throughput-bench.py to be on `main` (the pod fetches it
+# by raw URL). Commit/push first, or edit RAW to point at your branch.
+#
+#   kubectl apply -f benchmarks/k8s/s3-throughput-job.yaml
+#   kubectl logs -l job-name=s3-throughput -f --max-log-requests=12 --prefix
+#   kubectl delete job s3-throughput
+#
+# completions/parallelism = number of nodes to sample. The Job stays pending if
+# fewer than `completions` schedulable us-west nodes satisfy one-pod-per-node.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: s3-throughput
+spec:
+  completions: 6
+  parallelism: 6
+  completionMode: Indexed
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        job-name: s3-throughput
+    spec:
+      priorityClassName: opportunistic
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  # Pin to the region where the West Ceph pool lives, so the
+                  # in-cluster vs WAN comparison is honest (no cross-region Ceph).
+                  - key: topology.kubernetes.io/region
+                    operator: In
+                    values: ["us-west"]
+                  # Stay off GPU nodes (match the other benchmark jobs).
+                  - key: feature.node.kubernetes.io/pci-10de.present
+                    operator: NotIn
+                    values: ["true"]
+        podAntiAffinity:
+          # One pod per node -> each completion samples a different node.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  job-name: s3-throughput
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: bench
+        image: astral/uv:python3.12-bookworm-slim
+        env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: NODE_REGION       # guaranteed by nodeAffinity; recorded for the report
+            value: "us-west"
+          - name: MRE_CONCURRENCY   # push aggregate throughput harder in-cluster
+            value: "1,4,8,16"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            uv run --with boto3 python3 - << 'PYEOF'
+            import urllib.request, runpy
+            RAW = ("https://raw.githubusercontent.com/boettiger-lab/"
+                   "mcp-data-server/main/benchmarks/s3-throughput-bench.py")
+            urllib.request.urlretrieve(RAW, "/tmp/bench.py")
+            runpy.run_path("/tmp/bench.py", run_name="__main__")
+            PYEOF
+        resources:
+          # Throughput/network-bound, not CPU/RAM-bound: keep modest so it
+          # schedules widely and client CPU is never the explanation.
+          requests:
+            cpu: "2"
+            memory: "4Gi"
+          limits:
+            cpu: "4"
+            memory: "8Gi"
