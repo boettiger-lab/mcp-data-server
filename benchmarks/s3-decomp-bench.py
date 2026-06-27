@@ -83,6 +83,16 @@ def main():
     s3_list = "[" + ",".join("'s3://%s/%s'" % (BUCKET, k) for k in keys) + "]"
     print(f"\nsubset: {N} files, {nbytes/1e9:.1f} GB\n", flush=True)
 
+    # column list for a FULL-data-read probe: sum() can't be answered from parquet
+    # metadata (unlike count), so summing every column forces reading+decoding all
+    # column data. (count(COLUMNS(*)) is a null-count metadata shortcut — invalid
+    # as a transfer probe.)
+    _con = duckcon(8)
+    cols = [r[0] for r in _con.sql(f"DESCRIBE SELECT * FROM read_parquet('s3://{BUCKET}/{keys[0]}')").fetchall()]
+    _con.close()
+    SUMALL = "SELECT " + ", ".join(f"sum({c})" for c in cols) + " FROM read_parquet({src})"
+    print(f"full-read probe sums {len(cols)} columns: {cols}\n", flush=True)
+
     # 1. boto3 whole-file (raw network transport) at matched concurrency
     print("[1] boto3 whole-file GET (raw network transport):", flush=True)
     for T in THREADS:
@@ -103,11 +113,13 @@ def main():
         run(con, f"SELECT sum(octet_length(content)) FROM read_blob({s3_list})", nbytes, f"THREADS={T}")
         con.close()
 
-    # 3. DuckDB read_parquet (httpfs range GETs + decode + count)
-    print("[3] DuckDB read_parquet count(COLUMNS(*)) (range GETs + decode):", flush=True)
+    # 3. DuckDB read_parquet sum(all cols) — forces full parallel data read+decode
+    #    (sum is NOT answerable from parquet metadata, unlike count). This is the
+    #    real-workload read path and DOES parallelize across files/row-groups.
+    print("[3] DuckDB read_parquet sum(all cols) (full parallel read+decode):", flush=True)
     for T in THREADS:
         con = duckcon(T)
-        run(con, f"SELECT count(COLUMNS(*)) FROM read_parquet({s3_list})", nbytes, f"THREADS={T}")
+        run(con, SUMALL.format(src=s3_list), nbytes, f"THREADS={T}")
         con.close()
 
     # 4. local floor (download once, read from disk)
@@ -120,7 +132,7 @@ def main():
     lg = f"{LOCAL_DIR}/*.parquet"
     con = duckcon(max(THREADS))
     run(con, f"SELECT sum(octet_length(content)) FROM read_blob('{lg}')", nbytes, f"local read_blob T={max(THREADS)}")
-    run(con, f"SELECT count(COLUMNS(*)) FROM read_parquet('{lg}')", nbytes, f"local read_parquet T={max(THREADS)}")
+    run(con, SUMALL.format(src=f"'{lg}'"), nbytes, f"local read_parquet sum T={max(THREADS)}")
     con.close()
 
 
