@@ -38,17 +38,19 @@ def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnecti
     con.sql("SET enable_object_cache=true")
     con.sql("SET temp_directory='/tmp'")
 
-    # httpfs read tuning (#190 I/O characterization). The build/scan cost is bound
-    # by per-file-open latency over the pod->Ceph path, NOT CPU (a scan pegs ~2 of
-    # 64 cores; ~170 MB/s on a many-file scan vs ~370 MB/s few-file). GBIF hex is
-    # sharded up to ~126 files per h0, so a country/global scan opens ~all 923
-    # files and pays serial per-file round-trips. Prefetch every parquet footer
-    # up-front in parallel and cache HTTP metadata + connections so those opens
-    # overlap. Measured ~17-26% faster on real GBIF builds (concurrent, swapped-pod
-    # A/B), same bytes read. NOTE: prefetch_all_parquet_files prefetches all footers
-    # in the read glob — fine at GBIF's ~10^3 files; revisit if a dataset globs 10^4+.
+    # httpfs read tuning. NOTE: the "~126 files per h0 / ~923 files" figure behind
+    # the original #190 characterization was a since-fixed GBIF over-sharding bug,
+    # NOT steady state. Every queryable hex dataset is now 1 file per h0 (carbon:
+    # 122 files @112 MB; gbif 2026: 122 @3 GB; padus: 21 @356 MB), so a pruned query
+    # opens ONE footer and a global scan opens <=122 — per-file-open latency is no
+    # longer the dominant cost; large scans are bandwidth-bound on the byte stream.
+    # metadata + connection caching still help the long-lived tile-serve connection
+    # that re-reads the same files across tile requests, so they stay.
     con.sql("SET enable_http_metadata_cache=true")
     con.sql("SET httpfs_connection_caching=true")
+    # prefetch_all_parquet_files: no-op for a 1-file pruned read; its measured
+    # ~17-26% gain came entirely from the over-sharded case. Kept pending a
+    # re-measure at 1-file/h0 (see benchmarks/s3-throughput-bench.py); drop if neutral.
     con.sql("SET prefetch_all_parquet_files=true")
 
     # S3 access: use the cluster-internal Ceph endpoint (same as query tool).

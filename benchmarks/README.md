@@ -56,10 +56,48 @@ kubectl apply -f k8s/concurrency-grid-job.yaml   # ~10–15 min
 kubectl logs -f job/duckdb-concurrency-grid
 ```
 
+### `s3-throughput-bench.py`
+
+Engine-independent (raw boto3, no DuckDB) read-throughput benchmark comparing the
+in-cluster Ceph West pool (`rook-ceph-rgw-nautiluss3.rook`), the public Ceph
+gateway (`s3-west.nrp-nautilus.io`), and the AWS us-west-2 source.coop mirror
+(`us-west-2.opendata.source.coop`, reached over Internet2/CENIC), all on the same
+carbon hex dataset. Reports: LIST latency, single-stream MB/s, **aggregate
+throughput vs concurrency {1,4,8,…}** (the headline — distinct objects per level
+to avoid cache warming), and per-object open latency (warm vs cold connection) as
+a secondary diagnostic.
+
+Framing note: this replaced an earlier per-object-latency MRE premised on
+"opening ~10³ Parquet footers". That premise was a now-fixed GBIF over-sharding
+bug — every queryable hex dataset is 1 file per h0 (carbon 122, padus 21, gbif
+2026 122), so a pruned query opens 1 footer and a global scan ≤122. The real open
+question is **bandwidth**, not open-latency, hence this throughput benchmark.
+
+```bash
+uv run --with boto3 python3 s3-throughput-bench.py
+MRE_ENDPOINTS=nrp-external,aws-sourcecoop uv run --with boto3 python3 s3-throughput-bench.py
+```
+
+### `k8s/s3-throughput-job.yaml`
+
+Runs `s3-throughput-bench.py` on N distinct us-west nodes (Indexed Job +
+podAntiAffinity on hostname → one pod per node) to check whether throughput is
+consistent across the heterogeneous NRP fleet vs driven by a few slow nodes. Each
+pod prints its node name. Fetches the script from `main` by raw URL, so commit
+first. Pins `topology.kubernetes.io/region=us-west` so the in-cluster-vs-WAN
+comparison is honest.
+
+```bash
+kubectl apply -f k8s/s3-throughput-job.yaml
+kubectl logs -l job-name=s3-throughput -f --max-log-requests=12 --prefix
+kubectl delete job s3-throughput
+```
+
 ## Key findings
 
 1. Always include `h0` in join conditions (e.g., `ON p.h8 = c.h8 AND p.h0 = c.h0`) — this is what enables DPP file-level pruning.
 2. Set `s3_allow_recursive_globbing=false` on DuckDB 1.5.0 when querying partitioned data on S3 to avoid reading all files at planning time.
 3. A static `WHERE c.h0 = X` literal is ~9s faster and ~200 fewer GETs than join-driven DPP for single-partition queries, due to build-side materialization overhead — but both open only 1 file.
+4. Queryable hex datasets are 1 file per h0 (carbon 122, padus 21, gbif-2026 122), so a pruned query opens 1 footer and a global scan ≤122. The historical "~923 files / ~126-per-h0" was a since-fixed GBIF over-sharding bug, not steady state — large scans are bandwidth-bound, not open-latency-bound. This retires the per-object-latency framing in older notes.
 
 See `../query-optimization.md` for the actionable rules derived from these findings.
