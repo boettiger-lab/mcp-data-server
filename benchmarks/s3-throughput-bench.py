@@ -69,7 +69,12 @@ ALL_ENDPOINTS = {
     ),
     "aws-sourcecoop": dict(
         endpoint_url=None,  # default AWS endpoint (s3.us-west-2.amazonaws.com)
-        bucket="us-west-2.opendata.source.coop", prefix="cboettig/carbon/",
+        # NOTE: must be the hex sub-prefix, not "cboettig/carbon/" — the parent
+        # also holds large non-hex carbon products (irrecoverable/manageable/v2)
+        # which would make the comparison non-apples-to-apples. This mirror is
+        # byte-identical to the NRP path: 122 files, 1/h0, ~112 MB avg.
+        bucket="us-west-2.opendata.source.coop",
+        prefix="cboettig/carbon/vulnerable-carbon-2024/hex/",
         region="us-west-2", use_ssl=True,
     ),
 }
