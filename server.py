@@ -449,6 +449,7 @@ def register_hex_tiles(
     min_res: int = 2,
     zoom_offset: int = 2,
     color_scale: str = "linear",
+    layer_style: str = "fill",
 ) -> dict:
     """Aggregate an H3 hex visualization to public object storage and return a
     paste-ready MapLibre render recipe.
@@ -486,6 +487,10 @@ def register_hex_tiles(
       else out. `value_stats[<col>].suggested_scale` (see below) is a free
       hint telling you when "log" is worth re-requesting — re-call with the
       same SQL and `color_scale="log"` for a cache hit that just re-styles.
+    - `layer_style`: "fill" (default, flat 2D) or "fill-extrusion" (3D — hex
+      height also encodes the value). Like color_scale this only restyles the
+      recipe, not the tiles. For 3D the map client must set pitch > 0 to see
+      the extrusions; the returned `layer` is a `fill-extrusion` layer.
 
     Returns a dict with `status` ∈ {"done", "running", "failed"}:
     - status="done" (cache hit or fast build): includes the render recipe —
@@ -545,7 +550,7 @@ def register_hex_tiles(
     if plan["cached"] is not None:
         result = cached_result_dict(plan, plan["cached"])
         result["status"] = "done"
-        return _apply_color_scale(result, color_scale)
+        return _apply_render_opts(result, color_scale, layer_style)
 
     failed = read_failed(read_con, plan["output_uri"])
     if failed is not None:
@@ -577,7 +582,7 @@ def register_hex_tiles(
     try:
         result = future.result(timeout=_BUILD_INLINE_WAIT_SECONDS)
         result["status"] = "done"
-        return _apply_color_scale(result, color_scale)
+        return _apply_render_opts(result, color_scale, layer_style)
     except concurrent.futures.TimeoutError:
         return {
             "hash": plan["hash"],
@@ -600,13 +605,14 @@ async def _register_hex_tiles_tool(
     min_res: int = 2,
     zoom_offset: int = 2,
     color_scale: str = "linear",
+    layer_style: str = "fill",
 ) -> dict:
     # Served MCP tool. register_hex_tiles is sync (and the directly-tested core);
     # FastMCP would run a sync tool inline on the uvicorn event loop, where its
     # S3 marker I/O + bounded inline build-wait block /healthz and every other
     # request (#176). Offload it to a worker thread so the loop stays free.
     return await anyio.to_thread.run_sync(
-        register_hex_tiles, sql, agg, finest_res, min_res, zoom_offset, color_scale
+        register_hex_tiles, sql, agg, finest_res, min_res, zoom_offset, color_scale, layer_style
     )
 
 
@@ -620,14 +626,19 @@ mcp.tool(name="register_hex_tiles", description=register_hex_tiles.__doc__)(
 _STATUS_POLL_MAX_WAIT_SECONDS = 60
 
 
-def _apply_color_scale(result: dict, color_scale: str) -> dict:
-    """Re-render the recipe with a non-default color scale. color_scale is a
-    pure render choice — it never changes the tiles — so it is applied here at
-    the tool boundary by rebuilding {source, layer} from the already-populated
-    stats in `result`, rather than threaded through the content hash or build.
-    No-op unless status="done" and color_scale=="log"."""
-    if result.get("status") == "done" and (color_scale or "").lower() == "log":
-        result.update(render_recipe(result, result["tile_url_template"], color_scale="log"))
+def _apply_render_opts(result: dict, color_scale: str, layer_style: str) -> dict:
+    """Re-render the recipe with non-default render options. color_scale and
+    layer_style are pure render choices — they never change the tiles — so they
+    are applied here at the tool boundary by rebuilding {source, layer} from the
+    already-populated stats in `result`, rather than threaded through the content
+    hash or build. No-op unless status="done" and at least one option is
+    non-default."""
+    cs = (color_scale or "linear").lower()
+    ls = (layer_style or "fill").lower()
+    if result.get("status") == "done" and (cs == "log" or ls == "fill-extrusion"):
+        result.update(render_recipe(
+            result, result["tile_url_template"], color_scale=cs, layer_style=ls,
+        ))
     return result
 
 
@@ -695,7 +706,9 @@ def _status_check_once(hash: str, con=None):
     })
 
 
-def get_hex_tile_status(hash: str, wait_seconds: int = 0, color_scale: str = "linear") -> dict:
+def get_hex_tile_status(
+    hash: str, wait_seconds: int = 0, color_scale: str = "linear", layer_style: str = "fill",
+) -> dict:
     """Poll the status of a pyramid build started by register_hex_tiles.
 
     Call this when register_hex_tiles returned {status: "running"}.
@@ -708,9 +721,10 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0, color_scale: str = "li
     without giving the build time to make progress. wait_seconds=0 returns
     immediately (the legacy non-blocking poll).
 
-    `color_scale` ("linear" default, or "log") restyles the recipe returned on
-    completion, exactly as in register_hex_tiles — pass it here so a build you
-    polled comes back with the log ramp without a second register call.
+    `color_scale` ("linear" default, or "log") and `layer_style` ("fill"
+    default, or "fill-extrusion") restyle the recipe returned on completion,
+    exactly as in register_hex_tiles — pass them here so a build you polled
+    comes back already styled, without a second register call.
 
     Returns one of:
     - {hash, tile_url_template, status: "done", bounds, value_stats, ...} —
@@ -736,11 +750,13 @@ def get_hex_tile_status(hash: str, wait_seconds: int = 0, color_scale: str = "li
     while True:
         kind, payload = _status_check_once(hash, con)
         if kind != "running" or time.time() >= deadline:
-            return _apply_color_scale(payload, color_scale)
+            return _apply_render_opts(payload, color_scale, layer_style)
         time.sleep(min(2.0, max(0.1, deadline - time.time())))
 
 
-async def _get_hex_tile_status_tool(hash: str, wait_seconds: int = 0, color_scale: str = "linear") -> dict:
+async def _get_hex_tile_status_tool(
+    hash: str, wait_seconds: int = 0, color_scale: str = "linear", layer_style: str = "fill",
+) -> dict:
     # Served MCP tool. Truly async long-poll: `await anyio.sleep` frees the
     # event loop (vs the old time.sleep-on-the-loop that blocked /healthz and
     # every other request for up to 60s per poll — #176), and each one-shot
@@ -751,7 +767,7 @@ async def _get_hex_tile_status_tool(hash: str, wait_seconds: int = 0, color_scal
     while True:
         kind, payload = await anyio.to_thread.run_sync(_status_check_once, hash, con)
         if kind != "running" or time.time() >= deadline:
-            return _apply_color_scale(payload, color_scale)
+            return _apply_render_opts(payload, color_scale, layer_style)
         await anyio.sleep(min(2.0, max(0.1, deadline - time.time())))
 
 

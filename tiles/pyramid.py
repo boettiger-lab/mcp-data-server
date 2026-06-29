@@ -179,37 +179,61 @@ def _suggest_scale(by_res: dict, finest_res: int) -> str:
     return "linear"
 
 
+# Max fill-extrusion height (meters) the largest value maps to. A starting
+# default for the 3D variant (#238) — the client owns pitch and can rescale
+# this paint property for its zoom range.
+_EXTRUSION_MAX_HEIGHT = 50000
+
+
+def _ramp_value(frac: float, vmin: float, vmax: float, color_scale: str) -> float:
+    """Map a ramp fraction (0..1) to a data value across [vmin, vmax].
+    color_scale="log" spaces inputs geometrically (low values get more of the
+    ramp — right for the skewed data hex maps usually show); log needs positive
+    inputs, so the low bound is floored to a positive value. Anything other than
+    "log" is linear."""
+    if color_scale == "log":
+        lo = vmin if vmin and vmin > 0 else (vmax / 1000.0 if vmax and vmax > 0 else 1.0)
+        hi = vmax if vmax and vmax > lo else lo * 10.0
+        return lo * ((hi / lo) ** frac)
+    return vmin + frac * (vmax - vmin)
+
+
 def _color_ramp_stops(vmin: float, vmax: float, color_scale: str = "linear") -> list:
     """Flatten the viridis ramp into a MapLibre `interpolate` stop list over
     [vmin, vmax]: [value0, color0, value1, color1, ...]. Inputs are strictly
     ascending (vmax > vmin is guaranteed by the caller's degenerate guard), as
-    MapLibre requires.
-
-    color_scale="log" spaces the stop *inputs* geometrically rather than
-    evenly, so low values get more of the ramp — the right default for the
-    right-skewed data (counts, populations) hex maps usually show. Log spacing
-    needs positive inputs, so the low bound is floored to a positive value."""
-    if color_scale == "log":
-        lo = vmin if vmin and vmin > 0 else (vmax / 1000.0 if vmax and vmax > 0 else 1.0)
-        hi = vmax if vmax and vmax > lo else lo * 10.0
-        ratio = hi / lo
-        stops: list = []
-        for frac, color in _VIRIDIS_STOPS:
-            stops.extend([lo * (ratio ** frac), color])
-        return stops
-    span = vmax - vmin
-    stops = []
+    MapLibre requires."""
+    stops: list = []
     for frac, color in _VIRIDIS_STOPS:
-        stops.extend([vmin + frac * span, color])
+        stops.extend([_ramp_value(frac, vmin, vmax, color_scale), color])
     return stops
 
 
-def render_recipe(meta: dict, tile_url_template: str, color_scale: str = "linear") -> dict:
-    """Return {source, layer}: a paste-ready MapLibre vector tile source + fill
-    layer with a viridis color ramp over the first value column.
+def _height_ramp_stops(vmin: float, vmax: float, color_scale: str, height_max: float) -> list:
+    """Like _color_ramp_stops but the outputs are extrusion heights (0..height_max)
+    instead of colors, over the same (possibly log-spaced) stop inputs — so the
+    3D height and the color encode the value identically."""
+    stops: list = []
+    for frac, _color in _VIRIDIS_STOPS:
+        stops.extend([_ramp_value(frac, vmin, vmax, color_scale), frac * height_max])
+    return stops
+
+
+def render_recipe(
+    meta: dict,
+    tile_url_template: str,
+    color_scale: str = "linear",
+    layer_style: str = "fill",
+) -> dict:
+    """Return {source, layer}: a paste-ready MapLibre vector tile source + layer
+    with a viridis color ramp over the first value column.
 
     color_scale ∈ {"linear", "log"} controls how the ramp is spread across the
-    data domain; anything other than "log" is treated as linear."""
+    data domain; anything other than "log" is treated as linear.
+
+    layer_style ∈ {"fill", "fill-extrusion"} picks a flat 2D fill (default) or a
+    3D extrusion whose height also encodes the value; anything other than
+    "fill-extrusion" is treated as "fill"."""
     col = meta["value_columns"][0]
     by_res = meta.get("value_stats", {}).get(col, {}).get("by_res", {})
     stats = by_res.get(str(meta["finest_res"])) or (next(iter(by_res.values())) if by_res else None)
@@ -217,12 +241,23 @@ def render_recipe(meta: dict, tile_url_template: str, color_scale: str = "linear
     vmax = stats["max"] if stats and stats.get("max") is not None else vmin
     if vmax == vmin:
         vmax = vmin + 1  # degenerate domain — keep the interpolate stops distinct
-    paint = {
-        "fill-color": ["interpolate", ["linear"], ["get", col], *_color_ramp_stops(vmin, vmax, color_scale)],
-        "fill-opacity": 0.7,
-    }
     source = {"type": "vector", "tiles": [tile_url_template], "minzoom": 0, "maxzoom": 14}
-    layer = {"type": "fill", "source-layer": meta.get("layer_name", MVT_LAYER_NAME), "paint": paint}
+    source_layer = meta.get("layer_name", MVT_LAYER_NAME)
+    color_stops = ["interpolate", ["linear"], ["get", col], *_color_ramp_stops(vmin, vmax, color_scale)]
+    if layer_style == "fill-extrusion":
+        paint = {
+            "fill-extrusion-color": color_stops,
+            "fill-extrusion-height": [
+                "interpolate", ["linear"], ["get", col],
+                *_height_ramp_stops(vmin, vmax, color_scale, _EXTRUSION_MAX_HEIGHT),
+            ],
+            "fill-extrusion-base": 0,
+            "fill-extrusion-opacity": 0.85,
+        }
+        layer = {"type": "fill-extrusion", "source-layer": source_layer, "paint": paint}
+    else:
+        paint = {"fill-color": color_stops, "fill-opacity": 0.7}
+        layer = {"type": "fill", "source-layer": source_layer, "paint": paint}
     return {"source": source, "layer": layer}
 
 
