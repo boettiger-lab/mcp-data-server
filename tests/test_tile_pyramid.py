@@ -1,5 +1,5 @@
 import pytest
-from tiles.pyramid import build_pyramid_statements
+from tiles.pyramid import build_pyramid_statements, render_recipe
 
 
 class TestBuildPyramidStatements:
@@ -814,3 +814,48 @@ class TestFailedMarkers:
         msg = "table 't' doesn't exist; check 'schema'"
         write_failed(con, output_uri, error=msg)
         assert read_failed(con, output_uri)["error"] == msg
+
+
+class TestRenderRecipe:
+    """render_recipe is a pure function over the build metadata dict — no S3."""
+
+    def _meta(self, vmin, vmax, col="count", res=6):
+        return {
+            "value_columns": [col],
+            "finest_res": res,
+            "value_stats": {col: {"by_res": {str(res): {"min": vmin, "max": vmax}}}},
+            "layer_name": "layer",
+        }
+
+    def test_uses_viridis_endpoints_not_red(self):
+        recipe = render_recipe(self._meta(0, 100), "https://x/{z}/{x}/{y}.pbf")
+        stops = recipe["layer"]["paint"]["fill-color"]
+        # Old red ramp must be gone; viridis endpoints present.
+        assert "#fee5d9" not in stops and "#a50f15" not in stops
+        # structure: ["interpolate", ["linear"], ["get", col], v0, c0, ...]
+        assert stops[4] == "#440154"   # first color (lowest value)
+        assert stops[-1] == "#fde725"  # last color (highest value)
+
+    def test_stop_inputs_span_domain_and_ascend(self):
+        recipe = render_recipe(self._meta(10, 60), "https://x/{z}/{x}/{y}.pbf")
+        stops = recipe["layer"]["paint"]["fill-color"]
+        # structure: ["interpolate", ["linear"], ["get", col], v0, c0, v1, c1, ...]
+        values = stops[3::2]
+        colors = stops[4::2]
+        assert len(values) == len(colors) == 6
+        assert values[0] == 10 and values[-1] == 60          # span the data domain
+        assert values == sorted(values) and len(set(values)) == 6  # strictly ascending
+
+    def test_degenerate_domain_keeps_stops_distinct(self):
+        # vmin == vmax must not produce duplicate interpolate inputs (MapLibre errors).
+        recipe = render_recipe(self._meta(5, 5), "https://x/{z}/{x}/{y}.pbf")
+        values = recipe["layer"]["paint"]["fill-color"][3::2]
+        assert len(set(values)) == len(values)
+
+    def test_source_and_layer_shape(self):
+        recipe = render_recipe(self._meta(0, 1), "https://x/{z}/{x}/{y}.pbf")
+        assert recipe["source"]["type"] == "vector"
+        assert recipe["source"]["tiles"] == ["https://x/{z}/{x}/{y}.pbf"]
+        assert recipe["layer"]["type"] == "fill"
+        assert recipe["layer"]["source-layer"] == "layer"
+        assert recipe["layer"]["paint"]["fill-opacity"] == 0.7
