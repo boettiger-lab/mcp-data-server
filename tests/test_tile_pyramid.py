@@ -1,5 +1,5 @@
 import pytest
-from tiles.pyramid import build_pyramid_statements, render_recipe
+from tiles.pyramid import build_pyramid_statements, render_recipe, _suggest_scale
 
 
 class TestBuildPyramidStatements:
@@ -477,6 +477,22 @@ class TestRegisterHexTiles:
         assert stats["val"]["by_res"]["5"]["min"] == 1.0
         assert stats["val"]["by_res"]["5"]["max"] == 5.0
 
+    def test_value_stats_includes_mean_and_suggested_scale(self, local_bucket, h3_conn):
+        # Right-skewed counts: one hot cell (100 points) plus 20 singleton cells
+        # far apart, so at the finest res max/mean (~100/5.7 ≈ 17) clears the
+        # log threshold (#238).
+        user_sql = (
+            "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5 FROM range(100) "
+            "UNION ALL "
+            "SELECT h3_latlng_to_cell(30.0 + i, -120.0, 5) AS h5 FROM range(20) t(i)"
+        )
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=3, agg="COUNT", zoom_offset=4,
+        )
+        col = result["value_stats"]["count"]
+        assert "mean" in col["by_res"]["5"]          # mean now computed per res
+        assert col["suggested_scale"] == "log"       # skewed → log hint
+
 
 import json as _json
 
@@ -859,3 +875,45 @@ class TestRenderRecipe:
         assert recipe["layer"]["type"] == "fill"
         assert recipe["layer"]["source-layer"] == "layer"
         assert recipe["layer"]["paint"]["fill-opacity"] == 0.7
+
+    def test_log_scale_spaces_stops_geometrically(self):
+        recipe = render_recipe(self._meta(1, 1000), "https://x/{z}/{x}/{y}.pbf", color_scale="log")
+        values = recipe["layer"]["paint"]["fill-color"][3::2]
+        colors = recipe["layer"]["paint"]["fill-color"][4::2]
+        assert colors[0] == "#440154" and colors[-1] == "#fde725"  # same viridis ramp
+        assert values[0] == pytest.approx(1) and values[-1] == pytest.approx(1000)  # spans domain
+        # Geometric spacing → constant ratio between consecutive stop inputs.
+        ratios = [values[i + 1] / values[i] for i in range(len(values) - 1)]
+        assert all(r == pytest.approx(ratios[0]) for r in ratios)
+        # Distinctly different from linear spacing (which would step by 199.8).
+        assert values[1] < 500  # log puts the 2nd stop low, not near the midpoint
+
+    def test_log_scale_floors_nonpositive_min(self):
+        # vmin=0 is illegal for a log scale; the floor must keep all inputs > 0.
+        recipe = render_recipe(self._meta(0, 500), "https://x/{z}/{x}/{y}.pbf", color_scale="log")
+        values = recipe["layer"]["paint"]["fill-color"][3::2]
+        assert values[0] > 0
+        assert values == sorted(values) and len(set(values)) == len(values)
+
+    def test_unknown_scale_falls_back_to_linear(self):
+        weird = render_recipe(self._meta(0, 100), "https://x/{z}/{x}/{y}.pbf", color_scale="bogus")
+        linear = render_recipe(self._meta(0, 100), "https://x/{z}/{x}/{y}.pbf")
+        assert weird["layer"]["paint"]["fill-color"] == linear["layer"]["paint"]["fill-color"]
+
+
+class TestSuggestScale:
+    def _by_res(self, mn, mx, mean, res=6):
+        return {str(res): {"min": mn, "max": mx, "mean": mean}}
+
+    def test_right_skewed_suggests_log(self):
+        # max/mean = 100 > 10 → log.
+        assert _suggest_scale(self._by_res(0, 1000, 10), 6) == "log"
+
+    def test_even_distribution_stays_linear(self):
+        # max/mean = 2 → linear.
+        assert _suggest_scale(self._by_res(1, 10, 5), 6) == "linear"
+
+    def test_zero_or_missing_mean_is_linear(self):
+        assert _suggest_scale(self._by_res(0, 0, 0), 6) == "linear"
+        assert _suggest_scale({"6": {"min": 1, "max": 9, "mean": None}}, 6) == "linear"
+        assert _suggest_scale({}, 6) == "linear"

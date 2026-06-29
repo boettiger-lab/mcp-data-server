@@ -167,21 +167,49 @@ _VIRIDIS_STOPS = (
 )
 
 
-def _color_ramp_stops(vmin: float, vmax: float) -> list:
+def _suggest_scale(by_res: dict, finest_res: int) -> str:
+    """Heuristic scale hint (#238): right-skewed data (max far above the mean)
+    reads better on a log color ramp. Computed from the finest-res stats already
+    scanned, so it costs nothing extra. Informational only — render_recipe stays
+    linear unless the caller explicitly passes color_scale="log"."""
+    finest = by_res.get(str(finest_res), {})
+    mx, mean = finest.get("max"), finest.get("mean")
+    if mean and mean > 0 and mx is not None and mx / mean > 10:
+        return "log"
+    return "linear"
+
+
+def _color_ramp_stops(vmin: float, vmax: float, color_scale: str = "linear") -> list:
     """Flatten the viridis ramp into a MapLibre `interpolate` stop list over
     [vmin, vmax]: [value0, color0, value1, color1, ...]. Inputs are strictly
     ascending (vmax > vmin is guaranteed by the caller's degenerate guard), as
-    MapLibre requires."""
+    MapLibre requires.
+
+    color_scale="log" spaces the stop *inputs* geometrically rather than
+    evenly, so low values get more of the ramp — the right default for the
+    right-skewed data (counts, populations) hex maps usually show. Log spacing
+    needs positive inputs, so the low bound is floored to a positive value."""
+    if color_scale == "log":
+        lo = vmin if vmin and vmin > 0 else (vmax / 1000.0 if vmax and vmax > 0 else 1.0)
+        hi = vmax if vmax and vmax > lo else lo * 10.0
+        ratio = hi / lo
+        stops: list = []
+        for frac, color in _VIRIDIS_STOPS:
+            stops.extend([lo * (ratio ** frac), color])
+        return stops
     span = vmax - vmin
-    stops: list = []
+    stops = []
     for frac, color in _VIRIDIS_STOPS:
         stops.extend([vmin + frac * span, color])
     return stops
 
 
-def render_recipe(meta: dict, tile_url_template: str) -> dict:
+def render_recipe(meta: dict, tile_url_template: str, color_scale: str = "linear") -> dict:
     """Return {source, layer}: a paste-ready MapLibre vector tile source + fill
-    layer with a default linear viridis color ramp over the first value column."""
+    layer with a viridis color ramp over the first value column.
+
+    color_scale ∈ {"linear", "log"} controls how the ramp is spread across the
+    data domain; anything other than "log" is treated as linear."""
     col = meta["value_columns"][0]
     by_res = meta.get("value_stats", {}).get(col, {}).get("by_res", {})
     stats = by_res.get(str(meta["finest_res"])) or (next(iter(by_res.values())) if by_res else None)
@@ -190,7 +218,7 @@ def render_recipe(meta: dict, tile_url_template: str) -> dict:
     if vmax == vmin:
         vmax = vmin + 1  # degenerate domain — keep the interpolate stops distinct
     paint = {
-        "fill-color": ["interpolate", ["linear"], ["get", col], *_color_ramp_stops(vmin, vmax)],
+        "fill-color": ["interpolate", ["linear"], ["get", col], *_color_ramp_stops(vmin, vmax, color_scale)],
         "fill-opacity": 0.7,
     }
     source = {"type": "vector", "tiles": [tile_url_template], "minzoom": 0, "maxzoom": 14}
@@ -501,13 +529,19 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
         by_res = {}
         for res in stat_levels:
             # Recursive glob — h0 hive sub-partitions live under res=N/.
+            # MEAN comes free from the same scan as MIN/MAX and drives the
+            # log-scale suggestion below (#238).
             uri = f"{output_uri}res={res}/**/*.parquet"
             row = con.sql(
-                f'SELECT MIN("{col}") AS mn, MAX("{col}") AS mx '
+                f'SELECT MIN("{col}") AS mn, MAX("{col}") AS mx, AVG("{col}") AS av '
                 f"FROM read_parquet('{uri}')"
             ).fetchone()
-            by_res[str(res)] = {"min": _jsonable(row[0]), "max": _jsonable(row[1])}
-        value_stats[col] = {"by_res": by_res}
+            by_res[str(res)] = {
+                "min": _jsonable(row[0]),
+                "max": _jsonable(row[1]),
+                "mean": _jsonable(row[2]),
+            }
+        value_stats[col] = {"by_res": by_res, "suggested_scale": _suggest_scale(by_res, finest_res)}
     stats_seconds = time.perf_counter() - stats_t0
 
     print(
