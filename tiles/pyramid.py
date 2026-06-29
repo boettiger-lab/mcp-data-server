@@ -153,9 +153,35 @@ def _public_base_url() -> str:
 
 
 
+# Viridis color ramp — matplotlib's `viridis` sampled at 6 evenly-spaced
+# points. Perceptually uniform and colorblind-safe, and legible on both light
+# and dark basemaps; replaces the old red ramp (#238). 6 stops is plenty for
+# MapLibre's linear interpolation to read as a smooth gradient.
+_VIRIDIS_STOPS = (
+    (0.0, "#440154"),
+    (0.2, "#414487"),
+    (0.4, "#2a788e"),
+    (0.6, "#22a884"),
+    (0.8, "#7ad151"),
+    (1.0, "#fde725"),
+)
+
+
+def _color_ramp_stops(vmin: float, vmax: float) -> list:
+    """Flatten the viridis ramp into a MapLibre `interpolate` stop list over
+    [vmin, vmax]: [value0, color0, value1, color1, ...]. Inputs are strictly
+    ascending (vmax > vmin is guaranteed by the caller's degenerate guard), as
+    MapLibre requires."""
+    span = vmax - vmin
+    stops: list = []
+    for frac, color in _VIRIDIS_STOPS:
+        stops.extend([vmin + frac * span, color])
+    return stops
+
+
 def render_recipe(meta: dict, tile_url_template: str) -> dict:
     """Return {source, layer}: a paste-ready MapLibre vector tile source + fill
-    layer with a default linear color ramp over the first value column."""
+    layer with a default linear viridis color ramp over the first value column."""
     col = meta["value_columns"][0]
     by_res = meta.get("value_stats", {}).get(col, {}).get("by_res", {})
     stats = by_res.get(str(meta["finest_res"])) or (next(iter(by_res.values())) if by_res else None)
@@ -164,7 +190,7 @@ def render_recipe(meta: dict, tile_url_template: str) -> dict:
     if vmax == vmin:
         vmax = vmin + 1  # degenerate domain — keep the interpolate stops distinct
     paint = {
-        "fill-color": ["interpolate", ["linear"], ["get", col], vmin, "#fee5d9", vmax, "#a50f15"],
+        "fill-color": ["interpolate", ["linear"], ["get", col], *_color_ramp_stops(vmin, vmax)],
         "fill-opacity": 0.7,
     }
     source = {"type": "vector", "tiles": [tile_url_template], "minzoom": 0, "maxzoom": 14}
