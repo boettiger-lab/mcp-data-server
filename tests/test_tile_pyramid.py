@@ -900,6 +900,45 @@ class TestRenderRecipe:
         linear = render_recipe(self._meta(0, 100), "https://x/{z}/{x}/{y}.pbf")
         assert weird["layer"]["paint"]["fill-color"] == linear["layer"]["paint"]["fill-color"]
 
+    def test_fill_extrusion_layer_shape(self):
+        recipe = render_recipe(
+            self._meta(0, 100), "https://x/{z}/{x}/{y}.pbf", layer_style="fill-extrusion"
+        )
+        layer = recipe["layer"]
+        assert layer["type"] == "fill-extrusion"
+        paint = layer["paint"]
+        # 3D paint props, not the 2D ones.
+        assert "fill-extrusion-color" in paint and "fill-extrusion-height" in paint
+        assert paint["fill-extrusion-base"] == 0
+        assert "fill-color" not in paint and "fill-opacity" not in paint
+        # Color encoding matches the 2D fill ramp (viridis endpoints).
+        assert paint["fill-extrusion-color"][4] == "#440154"
+        assert paint["fill-extrusion-color"][-1] == "#fde725"
+
+    def test_fill_extrusion_height_scales_with_value(self):
+        recipe = render_recipe(
+            self._meta(0, 100), "https://x/{z}/{x}/{y}.pbf", layer_style="fill-extrusion"
+        )
+        height = recipe["layer"]["paint"]["fill-extrusion-height"]
+        outputs = height[4::2]   # [interpolate,[linear],[get,col], v0,h0, v1,h1, ...]
+        assert outputs[0] == 0                    # lowest value → flat
+        assert outputs[-1] > outputs[0]           # highest value → tallest
+        assert outputs == sorted(outputs)         # monotonic with value
+
+    def test_extrusion_honors_log_scale(self):
+        recipe = render_recipe(
+            self._meta(1, 1000), "https://x/{z}/{x}/{y}.pbf",
+            color_scale="log", layer_style="fill-extrusion",
+        )
+        # height stop inputs use the same geometric spacing as the color ramp
+        height_inputs = recipe["layer"]["paint"]["fill-extrusion-height"][3::2]
+        color_inputs = recipe["layer"]["paint"]["fill-extrusion-color"][3::2]
+        assert height_inputs == color_inputs
+
+    def test_unknown_layer_style_falls_back_to_fill(self):
+        weird = render_recipe(self._meta(0, 1), "https://x/{z}/{x}/{y}.pbf", layer_style="globe")
+        assert weird["layer"]["type"] == "fill"
+
 
 class TestSuggestScale:
     def _by_res(self, mn, mx, mean, res=6):
