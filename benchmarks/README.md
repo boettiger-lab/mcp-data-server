@@ -126,6 +126,46 @@ did **not** help — these large, rarely-requested files aren't hot, so the prox
 just an extra hop to the same origin. Conclusion: **map to the direct AWS bucket**
 (which the fallback already does); the proxy buys nothing here.
 
+### `s3-compute-bench.py` + `k8s/s3-compute-job.yaml`
+
+Compute-scaling benchmark for the DuckDB+httpfs read path (issue #250). Sweeps
+representative MCP aggregates (`mean carbon / h0`, `mean carbon / h1` via h3
+rollup, `sum(carbon)`, `sum(all cols)`) across a `THREADS` sweep and reports
+**uncompressed GB/s + Mrow/s** (not compressed-byte MB/s). Near-linear thread
+scaling ⇒ compute-bound; flat ⇒ I/O-bound. Sets `memory_limit` explicitly.
+
+```bash
+MRE_THREADS=4,8,16,32,48 MRE_MEM=8GB uv run --with duckdb python3 s3-compute-bench.py
+# endpoint defaults to cirrus internal MinIO; override MRE_ENDPOINT / MRE_SSL for NRP Ceph
+```
+
+### `s3-decomp-bench.py` + `k8s/s3-decomp-job.yaml`
+
+Decomposes throughput into transport vs range-requests vs decode: boto3 whole-file
+vs DuckDB `read_blob` (httpfs transport, same work) vs `read_parquet sum(all cols)`
+(parallel ranged read+decode) vs a local floor. Shows `read_blob` is slow/non-parallel
+(~95 MB/s) while `read_parquet` parallelizes — i.e. the transport "gap" doesn't gate
+real queries.
+
+## Benchmarking methodology (issue #250)
+
+**Report uncompressed GB/s + Mrow/s** — never compressed-byte MB/s (hex parquet
+compresses ~4–6×, so compressed rates understate decode ~5×). Use real
+data-reading queries (`sum`/`avg`/materialize). Determine rate-limiting via
+thread-scaling (scales→compute-bound) and local-vs-remote (equal→compute-bound).
+**Always `SET memory_limit`** (DuckDB sizes from host RAM → cgroup OOM otherwise),
+and check `cat /sys/fs/cgroup/cpu.max` for the real core count (`cpu_count()` reports
+the node, not the pod quota). On NRP, `opportunistic` Jobs can be CPU-starved — a
+compute-bound query that took 11s on dedicated CPU took 420s on a contended
+opportunistic pod (`kubectl top` showed 0.19 of 16 requested cores).
+
+**Invalid probes — never use to measure read throughput:**
+- `count(*)` → parquet row-count metadata; reads ≈ no data.
+- `count(COLUMNS(*))` → per-column null-count metadata; reads ≈ no data (produced a
+  bogus "~180 MB/s ceiling" early on — it was reading footers, not data).
+- `read_blob` as a query-path proxy → sequential whole-file transfer that doesn't
+  parallelize across files; `read_parquet` is 13–23× faster over the same httpfs.
+
 ## Key findings
 
 1. Always include `h0` in join conditions (e.g., `ON p.h8 = c.h8 AND p.h0 = c.h0`) — this is what enables DPP file-level pruning.
@@ -133,5 +173,8 @@ just an extra hop to the same origin. Conclusion: **map to the direct AWS bucket
 3. A static `WHERE c.h0 = X` literal is ~9s faster and ~200 fewer GETs than join-driven DPP for single-partition queries, due to build-side materialization overhead — but both open only 1 file.
 4. Queryable hex datasets are 1 file per h0 (carbon 122, padus 21, gbif-2026 122), so a pruned query opens 1 footer and a global scan ≤122. The historical "~923 files / ~126-per-h0" was a since-fixed GBIF over-sharding bug, not steady state — large scans are bandwidth-bound, not open-latency-bound. This retires the per-object-latency framing in older notes.
 5. For the source.coop mirror, read the **direct AWS bucket** (`us-west-2.opendata.source.coop` → AWS S3), not the `data.source.coop` Cloudflare proxy: direct is ~25–27% faster on throughput-bound reads and the CDN provides no caching benefit for these large, cold objects. The #260/#261 fallback already maps to the direct bucket.
+6. **Real queries are compute/decode-bound, not network/httpfs-bound** — S3 ≈ local ≈ internal-MinIO for heavy aggregates; every shape (scans, joins, h3 rollups) scales ~linearly with threads. DuckDB local/httpfs parquet reads are GB/s-class uncompressed and competitive with Polars / faster than PyArrow.
+7. **Column pruning is the ~10× lever**: `sum(carbon)` (1 col) ≈ 873 Mrow/s vs `sum(all 7)` ≈ 471 Mrow/s. Far bigger than thread/network tuning. Column selection is governed by the registration SQL — recipes should select only the h3 index + value column(s).
+8. **`THREADS=48` is well-chosen**: 1-column queries saturate at ~32 threads; multi-column / h3 queries still benefit past 48. Pushing higher raises connection fan-out risk (#103) under concurrency. (Full 4.84B-row carbon hex: mean-carbon/h0 in ~5s, /h1 in ~7s at T=48 on a dedicated machine.)
 
 See `../query-optimization.md` for the actionable rules derived from these findings.
