@@ -7,8 +7,8 @@ apiVersion: batch/v1
 kind: Job
 metadata: {name: s3-rgw}
 spec:
-  completions: 4
-  parallelism: 4
+  completions: 8
+  parallelism: 8
   completionMode: Indexed
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
@@ -16,13 +16,14 @@ spec:
     metadata: {labels: {jn: s3-rgw}}
     spec:
       restartPolicy: Never
+      tolerations:
+        - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
                   - {key: topology.kubernetes.io/region, operator: In, values: ["us-west"]}
-                  - {key: feature.node.kubernetes.io/pci-10de.present, operator: NotIn, values: ["true"]}
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
