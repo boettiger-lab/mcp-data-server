@@ -7,8 +7,8 @@ apiVersion: batch/v1
 kind: Job
 metadata: {name: s3-rgw}
 spec:
-  completions: 4
-  parallelism: 4
+  completions: 6
+  parallelism: 6
   completionMode: Indexed
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
@@ -24,9 +24,11 @@ spec:
                   - {key: topology.kubernetes.io/zone, operator: In, values: ["ucsd","ucsd-sdsc"]}
                   - {key: feature.node.kubernetes.io/pci-10de.present, operator: NotIn, values: ["true"]}
         podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector: {matchLabels: {jn: s3-rgw}}
-              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: {matchLabels: {jn: s3-rgw}}
+                topologyKey: kubernetes.io/hostname
       containers:
       - name: probe
         image: astral/uv:python3.12-bookworm-slim

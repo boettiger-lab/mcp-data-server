@@ -50,7 +50,10 @@ def main():
         with ThreadPoolExecutor(C) as ex:
             got = sum(ex.map(lambda k: gw(cc, k), keys))
         dt = time.perf_counter() - t0
-        print(f"[RGW] node={NODE} conc={C} {got/1e9/dt:.2f} GB/s = {got*8/1e9/dt:.1f} Gb/s", flush=True)
+        t_end = time.time()
+        # start/end epoch let us verify the N pods actually overlapped in time
+        print(f"[RGW] node={NODE} conc={C} {got/1e9/dt:.2f} GB/s = {got*8/1e9/dt:.1f} Gb/s "
+              f"window=[{t_end-dt:.0f},{t_end:.0f}]", flush=True)
 
 
 if __name__ == "__main__":
