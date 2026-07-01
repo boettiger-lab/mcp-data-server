@@ -1,0 +1,46 @@
+# S3 I/O-ceiling report on a 100 Gb/s DTN (issue #250). boto3 fabric ceiling +
+# DuckDB core httpfs scaling + cache_httpfs, all in Gb/s of compressed wire bytes.
+#   kubectl apply -f benchmarks/k8s/s3-io-ceiling-job.yaml
+#   kubectl logs -l jn=s3-io-ceiling -f --request-timeout=30s
+apiVersion: batch/v1
+kind: Job
+metadata: {name: s3-io-ceiling}
+spec:
+  completions: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata: {labels: {jn: s3-io-ceiling}}
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - "k8s-100g-dtn-1.ucsc.edu"
+                      - "k8s-100g-dtn-2.ucsc.edu"
+                      - "k8s-100g-dtn-3.ucsc.edu"
+                      - "k8s-100g-dtn-4.ucsc.edu"
+                      - "k8s-100g-dtn-5.ucsc.edu"
+                      - "k8s-100g-dtn-6.ucsc.edu"
+                      - "k8s-100g-dtn-7.ucsc.edu"
+                      - "k8s-100g-dtn-8.ucsc.edu"
+      containers:
+      - name: bench
+        image: astral/uv:python3.12-bookworm-slim
+        env:
+          - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+          - {name: MRE_ENDPOINT, value: "rook-ceph-rgw-nautiluss3.rook"}
+          - {name: MRE_SSL, value: "false"}
+          - {name: MRE_THREADS, value: "16,48,96,192"}
+          - {name: MRE_BOTO_CONC, value: "16,64,128,256"}
+          - {name: MRE_MEM, value: "10GB"}
+        command: ["/bin/sh","-c"]
+        args: ["uv run --with boto3 --with duckdb python3 -c \"import urllib.request,runpy; urllib.request.urlretrieve('https://raw.githubusercontent.com/boettiger-lab/mcp-data-server/bench/s3-ceiling/benchmarks/s3-io-ceiling-bench.py','/tmp/b.py'); runpy.run_path('/tmp/b.py',run_name='__main__')\""]
+        resources:
+          requests: {cpu: "24", memory: "32Gi"}
+          limits: {cpu: "24", memory: "32Gi"}
