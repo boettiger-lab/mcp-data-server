@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata: {name: s3-cache}
+spec:
+  completions: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata: {labels: {jn: s3-cache}}
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: topology.kubernetes.io/zone, operator: In, values: ["ucsd","ucsd-sdsc"]}
+                  - {key: feature.node.kubernetes.io/pci-10de.present, operator: NotIn, values: ["true"]}
+      containers:
+      - name: bench
+        image: astral/uv:python3.12-bookworm-slim
+        env:
+          - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+          - {name: MRE_THREADS, value: "32,48"}
+          - {name: MRE_FANOUT, value: "8"}
+        command: ["/bin/sh","-c"]
+        args: ["uv run --with duckdb python3 -c \"import urllib.request,runpy; urllib.request.urlretrieve('https://raw.githubusercontent.com/boettiger-lab/mcp-data-server/bench/s3-ceiling/benchmarks/s3-cache-bench.py','/tmp/b.py'); runpy.run_path('/tmp/b.py',run_name='__main__')\""]
+        resources:
+          requests: {cpu: "12", memory: "16Gi"}
+          limits: {cpu: "12", memory: "16Gi"}
