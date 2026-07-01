@@ -7,8 +7,8 @@ apiVersion: batch/v1
 kind: Job
 metadata: {name: s3-rgw}
 spec:
-  completions: 6
-  parallelism: 6
+  completions: 4
+  parallelism: 4
   completionMode: Indexed
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
@@ -21,7 +21,7 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
-                  - {key: topology.kubernetes.io/zone, operator: In, values: ["ucsd","ucsd-sdsc"]}
+                  - {key: topology.kubernetes.io/region, operator: In, values: ["us-west"]}
                   - {key: feature.node.kubernetes.io/pci-10de.present, operator: NotIn, values: ["true"]}
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -38,5 +38,5 @@ spec:
         command: ["/bin/sh","-c"]
         args: ["uv run --with boto3 python3 -c \"import urllib.request,runpy; urllib.request.urlretrieve('https://raw.githubusercontent.com/boettiger-lab/mcp-data-server/bench/s3-ceiling/benchmarks/s3-rgw-probe.py','/tmp/b.py'); runpy.run_path('/tmp/b.py',run_name='__main__')\""]
         resources:
-          requests: {cpu: "12", memory: "8Gi"}
-          limits: {cpu: "12", memory: "8Gi"}
+          requests: {cpu: "8", memory: "8Gi"}
+          limits: {cpu: "8", memory: "8Gi"}
