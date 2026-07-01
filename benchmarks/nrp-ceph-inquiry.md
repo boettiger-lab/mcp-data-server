@@ -34,14 +34,23 @@ high concurrency.
   more clients; single-pod degrades at very high concurrency from AWS anonymous throttling.)
 
 ## Questions
-1. Is ~20 Gb/s the expected read ceiling for the West RGW gateway tier? How many RGW daemons
-   back `rook-ceph-rgw-nautiluss3.rook`, and how is it fronted/load-balanced?
-2. Is ~120 ms median GET latency expected? It dominates our read performance.
-3. Can per-client and/or aggregate read throughput be raised (more RGW replicas, ingress/
-   HAProxy tuning, a higher-throughput or per-tenant endpoint)?
-4. Recommended per-client concurrency ceiling to avoid connection resets (~1024 conns broke it)?
-5. For large sequential/bulk reads, is there a recommended lower-latency/higher-throughput
-   path (dedicated RGW, RADOS, or client settings)?
+We use the **internal** endpoint `rook-ceph-rgw-nautiluss3.rook` — a ClusterIP Service, so the
+path is `client → kube-proxy (L4) → RGW daemon pod(s)`, no ingress/TLS/HAProxy (those are only
+on the external `s3-west.nrp-nautilus.io`). So our questions are about the RGW daemons + Service:
+
+1. How many RGW **daemon replicas** back the West pool / `rook-ceph-rgw-nautiluss3.rook`? Our
+   Prometheus (`ceph_rgw_get_b`, West exporter `67.58.50.67`) shows a single active series
+   peaking **19.5 Gb/s over 24h** — is West effectively served by one RGW daemon?
+2. Does the ClusterIP spread a *single* client's connections across multiple RGW daemons
+   (per-connection L4)? Our single-pod read is flat at ~7 Gb/s regardless of concurrency.
+3. Would **adding RGW daemon replicas** raise aggregate (and per-client) read throughput?
+4. Is ~**120 ms** median GET latency (`ceph_rgw_get_initial_lat`, 24h baseline) expected? It
+   dominates our read performance (many small range-requests).
+5. Recommended per-client concurrency ceiling to avoid connection resets (~1024 conns broke it)?
+6. For large sequential/bulk reads, would you recommend bypassing S3/RGW with a POSIX path —
+   **CephFS** (RWX, parallel streams; our data is few large files/h0) or **LINSTOR** (RWO NVMe) —
+   over the object gateway? Any throughput guidance / gotchas for reading ~10s–100s GB of
+   Parquet that way vs the S3 endpoint?
 
 **Reproduce:** `benchmarks/s3-rgw-probe.py`, `s3-io-ceiling-bench.py` +
 `benchmarks/k8s/*.yaml` (github.com/boettiger-lab/mcp-data-server, branch `bench/s3-ceiling`;
