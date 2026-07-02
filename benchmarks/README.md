@@ -172,6 +172,15 @@ compute/decode-bound (h3 rollup / 7-col reads scale only 2–3× with threads). 
 warm numbers are OS-page-cache-served (the hot-dataset steady state), not raw NVMe;
 a clean cold-NVMe ceiling needs O_DIRECT / `drop_caches`.
 
+`k8s/cephfs-read-job.yaml` is the same job on a `rook-cephfs` **RWX** PVC (the
+multi-replica-serving comparison). Same node, **CephFS warm ≈ LINSTOR** (mean-carbon/h0
+2.6s vs 2.5s; h1 11.8s vs 11.9s; sum-all 23.8s vs 24.1s) — no throughput penalty for the
+RWX filesystem path. CephFS's only cost is a heavier **one-time cold first-touch**
+(mean-carbon/h0 T=8 = 238.5s vs LINSTOR 66.6s — MDS metadata/cap negotiation over 122
+files), which amortizes to zero on a long-lived pod. **Decision: CephFS-RWX for the
+6-replica serve path** (mountable by all replicas; RWO can't be); LINSTOR only for a
+dedicated single-node builder if cold-start ever matters.
+
 ## Benchmarking methodology (issue #250)
 
 **Report uncompressed GB/s + Mrow/s** — never compressed-byte MB/s (hex parquet
