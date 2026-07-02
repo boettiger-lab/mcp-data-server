@@ -147,6 +147,31 @@ vs DuckDB `read_blob` (httpfs transport, same work) vs `read_parquet sum(all col
 (~95 MB/s) while `read_parquet` parallelizes — i.e. the transport "gap" doesn't gate
 real queries.
 
+### `local-read-bench.py` + `k8s/linstor-read-job.yaml`
+
+Local-filesystem read benchmark (issue #258): DuckDB reading Parquet off a mounted
+volume (LINSTOR NVMe / CephFS) instead of `s3://`, to test bypassing the NRP RGW
+read ceiling for hot datasets. Same #250 methodology (valid probes, uncompressed
+GB/s + Mrow/s, explicit `memory_limit`). The k8s Job provisions a `linstor-sdsu`
+PVC (RWO), an **initContainer copies the carbon hex S3→PVC once**, then the main
+container runs the local-file thread-sweep. Point `storageClassName` at
+`rook-cephfs` (RWX) for the multi-replica serving comparison. GPU nodes are fine
+(tolerate `nvidia.com/gpu`, don't request one). Give the copy initContainer explicit
+resources — the ns `LimitRange` defaults to 1Gi and OOM-kills it otherwise.
+
+```bash
+kubectl apply -f k8s/linstor-read-job.yaml
+kubectl logs -l jn=linstor-read -f --request-timeout=30s
+kubectl delete job linstor-read; kubectl delete pvc linstor-carbon
+```
+
+Result (SDSU `linstor-sdsu`, 4.84B-row carbon hex): **mean-carbon/h0 = 2.5s warm
+vs 77.8s on NRP S3/RGW (~31×), beating cirrus on-box MinIO (5.1s)** — the ~120ms
+RGW GET-latency wall and ~20 Gb/s ceiling vanish. Once removed, queries revert to
+compute/decode-bound (h3 rollup / 7-col reads scale only 2–3× with threads). Caveat:
+warm numbers are OS-page-cache-served (the hot-dataset steady state), not raw NVMe;
+a clean cold-NVMe ceiling needs O_DIRECT / `drop_caches`.
+
 ## Benchmarking methodology (issue #250)
 
 **Report uncompressed GB/s + Mrow/s** — never compressed-byte MB/s (hex parquet
