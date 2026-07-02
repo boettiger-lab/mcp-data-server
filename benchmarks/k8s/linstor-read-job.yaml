@@ -42,6 +42,9 @@ spec:
         - name: copy-from-s3
           image: astral/uv:python3.12-bookworm-slim
           volumeMounts: [{name: data, mountPath: /data}]
+          resources:                              # ns LimitRange defaults to 1Gi -> OOMKilled; set explicitly
+            requests: {cpu: "4", memory: "4Gi"}
+            limits: {cpu: "4", memory: "4Gi"}
           command: ["/bin/sh","-c"]
           args:
             - |
@@ -59,7 +62,7 @@ spec:
               def dl(k):
                   d="/data/"+os.path.dirname(k); os.makedirs(d,exist_ok=True)
                   c.download_file(B,k,"/data/"+k); return 1
-              with ThreadPoolExecutor(32) as ex: n=sum(ex.map(dl,keys))
+              with ThreadPoolExecutor(16) as ex: n=sum(ex.map(dl,keys))
               print(f"copied {n} files to /data/{PRE}",flush=True)
               PY
       containers:
