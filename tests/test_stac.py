@@ -7,7 +7,7 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from stac import list_datasets, get_dataset, fetch_stac_catalog, get_collection, _collection_to_dict, _fuzzy_lookup, _format_collection
+from stac import list_datasets, get_dataset, fetch_stac_catalog, get_collection, _collection_to_dict, _fuzzy_lookup, _format_collection, _href_to_s3
 
 
 class TestCatalogUrlParameter:
@@ -354,6 +354,66 @@ class TestCollectionToDict:
         intervals = result["extent"]["temporal"]["interval"]
         assert intervals[0][0].startswith("2020-01-01")
         assert intervals[0][1] is None
+
+
+class TestSourceCoopFallback:
+    """Fallback to the public source.coop mirror when Ceph S3-west is down (#260)."""
+
+    def test_href_to_s3_ceph(self):
+        assert _href_to_s3("https://s3-west.nrp-nautilus.io/public-carbon/x.parquet") == \
+            "s3://public-carbon/x.parquet"
+
+    def test_href_to_s3_source_coop(self):
+        # source.coop STAC assets are published under the data.source.coop HTTPS
+        # gateway, which cannot list/glob. Rewrite to the S3 bucket form so DuckDB
+        # can expand h0=* globs against the mirror.
+        href = "https://data.source.coop/cboettig/carbon/vulnerable-carbon-2024/hex/h0=*/data_0.parquet"
+        assert _href_to_s3(href) == \
+            "s3://us-west-2.opendata.source.coop/cboettig/carbon/vulnerable-carbon-2024/hex/h0=*/data_0.parquet"
+
+    def test_href_to_s3_passthrough(self):
+        assert _href_to_s3("https://example.com/other.parquet") == \
+            "https://example.com/other.parquet"
+
+    def test_source_coop_asset_rewritten_in_collection(self):
+        col = MagicMock()
+        col.id, col.title, col.description = "carbon", "Carbon", "d"
+        col.license, col.keywords, col.providers = "CC-BY", [], []
+        col.links, col.summaries, col.extra_fields = [], None, {}
+        spatial = MagicMock(); spatial.bboxes = [[-180, -90, 180, 90]]
+        temporal = MagicMock(); temporal.intervals = []
+        col.extent = MagicMock(spatial=spatial, temporal=temporal)
+        asset = MagicMock()
+        asset.href = "https://data.source.coop/cboettig/carbon/vulnerable-carbon-2024/hex/h0=*/data_0.parquet"
+        asset.media_type = "application/x-parquet"
+        asset.title, asset.description, asset.extra_fields = "hex", None, {}
+        col.assets = {"hex": asset}
+        result = _collection_to_dict(col)
+        assert result["assets"]["hex"]["href"].startswith(
+            "s3://us-west-2.opendata.source.coop/cboettig/carbon/"
+        )
+
+    def test_link_render_does_not_resolve_root(self):
+        # Regression: rendering an inline collection must not touch the network.
+        # lnk.href resolves the (possibly unreachable) root; get_target_str() must
+        # be used instead so a Ceph outage doesn't crash mirror-backed rendering.
+        col = MagicMock()
+        col.id, col.title, col.description = "carbon", "Carbon", "d"
+        col.license, col.keywords, col.providers = "CC-BY", [], []
+        col.summaries, col.extra_fields, col.assets = None, {}, {}
+        spatial = MagicMock(); spatial.bboxes = [[-180, -90, 180, 90]]
+        temporal = MagicMock(); temporal.intervals = []
+        col.extent = MagicMock(spatial=spatial, temporal=temporal)
+        lnk = MagicMock()
+        lnk.rel = "derived_from"
+        lnk.title = None
+        lnk.get_target_str.return_value = "https://doi.org/10.5281/zenodo.4091029"
+        type(lnk).href = property(
+            lambda self: (_ for _ in ()).throw(Exception("root not reachable"))
+        )
+        col.links = [lnk]
+        result = _collection_to_dict(col)  # must not raise
+        assert result["links"][0]["href"] == "https://doi.org/10.5281/zenodo.4091029"
 
 
 class TestGetCollection:

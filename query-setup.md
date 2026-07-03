@@ -11,6 +11,7 @@ LOAD httpfs;
 LOAD h3;
 LOAD spatial;
 CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '');
+CREATE OR REPLACE SECRET source_coop (TYPE S3, SCOPE 's3://us-west-2.opendata.source.coop', REGION 'us-west-2', ENDPOINT 's3.us-west-2.amazonaws.com', URL_STYLE 'path', USE_SSL 'true', KEY_ID '', SECRET '');
 ```
 
 **Why these settings?**
@@ -21,6 +22,7 @@ CREATE OR REPLACE SECRET s3 (TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', 
 - `httpfs` - Required for S3 access
 - `h3` - Required for H3 functions
 - `spatial` - Required for `ST_*` functions (line-data exact mileage, GeoParquet inspection)
+- `source_coop` secret - Anonymous, prefix-scoped fallback for the public source.coop mirror. DuckDB routes `s3://us-west-2.opendata.source.coop/...` paths to it automatically; `s3://public-*` paths still go to Ceph. Use mirror paths (returned by the STAC tools as `s3://us-west-2.opendata.source.coop/cboettig/<dataset>/...`) when the primary Ceph endpoint is unavailable.
 
 **Note:** `rook-ceph-rgw-nautiluss3.rook` is an internal endpoint that only your tool running on k8s can access. The publicly accessible external endpoint is `s3-west.nrp-nautilus.io`, which requires `USE_SSL true` and `SET THREADS=2`. Always use the internal endpoint to run queries.
 

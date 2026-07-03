@@ -118,9 +118,19 @@ pystac.StacIO.set_default(_TimeoutStacIO)
 
 
 def _href_to_s3(href: str) -> str:
-    """Convert an HTTPS S3 URL to an s3:// path for DuckDB read_parquet()."""
+    """Convert an HTTPS S3 URL to an s3:// path for DuckDB read_parquet().
+
+    Handles both the primary NRP Ceph endpoint and the source.coop mirror. The
+    source.coop STAC entries publish assets under the `data.source.coop` HTTPS
+    gateway, which cannot list/glob; rewriting to the `us-west-2.opendata.source.coop`
+    S3 bucket form lets DuckDB expand `h0=*` globs against the mirror (see #260).
+    """
     if href.startswith("https://s3-west.nrp-nautilus.io/"):
         return href.replace("https://s3-west.nrp-nautilus.io/", "s3://")
+    if href.startswith("https://data.source.coop/"):
+        return href.replace(
+            "https://data.source.coop/", "s3://us-west-2.opendata.source.coop/"
+        )
     return href
 
 
@@ -282,11 +292,15 @@ def _collection_to_dict(col, sub_children=None) -> dict:
         },
     }
 
-    # External links (exclude navigational rel types)
+    # External links (exclude navigational rel types). Use get_target_str()
+    # rather than lnk.href: the latter calls get_root(), which resolves the root
+    # link over the network — so rendering an inline collection whose root points
+    # at an unreachable catalog (e.g. the source.coop mirror path during a Ceph
+    # outage, #260) would crash. get_target_str() returns the raw href, no I/O.
     result["links"] = [
         {k: v for k, v in {
             "rel": lnk.rel,
-            "href": lnk.href,
+            "href": lnk.get_target_str(),
             "title": getattr(lnk, "title", None),
         }.items() if v is not None}
         for lnk in (col.links or [])
