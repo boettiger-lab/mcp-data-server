@@ -955,5 +955,40 @@ class TestBuildFailureMarker:
         assert "synthetic build failure" in failed["error"]
 
 
+class TestStacStartupGate:
+    """_enforce_stac_startup_gate: fail-fast on an unreachable root catalog, with
+    an opt-in degraded start for serving the source.coop mirror during an outage (#260)."""
+
+    def test_boots_normally_when_root_loaded(self, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "STAC_LOAD_ERRORS", {})
+        assert server._enforce_stac_startup_gate() is False
+
+    def test_exits_when_root_failed_and_flag_unset(self, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "STAC_LOAD_ERRORS", {"__root__": "ConnectTimeout"})
+        monkeypatch.delenv("STAC_ALLOW_DEGRADED_START", raising=False)
+        with pytest.raises(SystemExit) as exc:
+            server._enforce_stac_startup_gate()
+        assert exc.value.code == 1
+
+    def test_degraded_start_when_flag_set(self, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "STAC_LOAD_ERRORS", {"__root__": "ConnectTimeout"})
+        monkeypatch.setenv("STAC_ALLOW_DEGRADED_START", "true")
+        assert server._enforce_stac_startup_gate() is True
+
+    def test_flag_is_case_and_value_tolerant(self, monkeypatch):
+        import server
+        monkeypatch.setattr(server, "STAC_LOAD_ERRORS", {"__root__": "boom"})
+        for val in ("1", "TRUE", "Yes", "on"):
+            monkeypatch.setenv("STAC_ALLOW_DEGRADED_START", val)
+            assert server._enforce_stac_startup_gate() is True
+        # A non-truthy value still fails fast.
+        monkeypatch.setenv("STAC_ALLOW_DEGRADED_START", "false")
+        with pytest.raises(SystemExit):
+            server._enforce_stac_startup_gate()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
