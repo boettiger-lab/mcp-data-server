@@ -93,11 +93,45 @@ kubectl logs -l job-name=s3-throughput -f --max-log-requests=12 --prefix
 kubectl delete job s3-throughput
 ```
 
+### `source-coop-endpoint-bench.py`
+
+Compares the two front doors to the *same* source.coop objects: the **direct AWS
+S3 bucket** (`us-west-2.opendata.source.coop`, a CNAME straight to
+`s3.us-west-2.amazonaws.com` — what the #260/#261 fallback maps to) vs the
+**`data.source.coop` gateway** (Cloudflare-fronted CDN proxy over the same S3
+origin, the host that appears in the source.coop STAC hrefs). Raw HTTP probes
+(footer latency, single-stream MB/s, aggregate MB/s) isolate transport; DuckDB
+`count(*)` and single-column `sum()` over the whole dataset show the query-path
+impact. Cold and warm passes both reported (Cloudflare may edge-cache).
+
+```bash
+uv run --with 'duckdb>=1.1' --with requests python3 source-coop-endpoint-bench.py
+```
+
+Result (2026-07-03, run from **UC Berkeley campus egress — not NRP**; relative
+comparison holds directionally, absolute numbers differ on-cluster over
+Internet2/CENIC — re-run the k8s form for production numbers):
+
+| metric | aws-direct | data.source.coop proxy |
+|---|---|---|
+| footer latency (median) | 133 ms | 138 ms |
+| single-stream throughput (median) | **80.8 MB/s** | 64.5 MB/s |
+| aggregate throughput (c=8) | 96.9 MB/s | 108.9 MB/s (n=1, noisy) |
+| DuckDB `count(*)` (warm) | 2.7 s | 2.9 s |
+| DuckDB `sum(1 col)` (warm) | **176 s** | 224 s |
+
+Direct AWS is as-good-or-better on every robust metric and ~25–27% faster on the
+throughput-bound cases (single-stream, full-column scan). Cloudflare edge caching
+did **not** help — these large, rarely-requested files aren't hot, so the proxy is
+just an extra hop to the same origin. Conclusion: **map to the direct AWS bucket**
+(which the fallback already does); the proxy buys nothing here.
+
 ## Key findings
 
 1. Always include `h0` in join conditions (e.g., `ON p.h8 = c.h8 AND p.h0 = c.h0`) — this is what enables DPP file-level pruning.
 2. Set `s3_allow_recursive_globbing=false` on DuckDB 1.5.0 when querying partitioned data on S3 to avoid reading all files at planning time.
 3. A static `WHERE c.h0 = X` literal is ~9s faster and ~200 fewer GETs than join-driven DPP for single-partition queries, due to build-side materialization overhead — but both open only 1 file.
 4. Queryable hex datasets are 1 file per h0 (carbon 122, padus 21, gbif-2026 122), so a pruned query opens 1 footer and a global scan ≤122. The historical "~923 files / ~126-per-h0" was a since-fixed GBIF over-sharding bug, not steady state — large scans are bandwidth-bound, not open-latency-bound. This retires the per-object-latency framing in older notes.
+5. For the source.coop mirror, read the **direct AWS bucket** (`us-west-2.opendata.source.coop` → AWS S3), not the `data.source.coop` Cloudflare proxy: direct is ~25–27% faster on throughput-bound reads and the CDN provides no caching benefit for these large, cold objects. The #260/#261 fallback already maps to the direct bucket.
 
 See `../query-optimization.md` for the actionable rules derived from these findings.
