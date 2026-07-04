@@ -817,19 +817,49 @@ async def _version(_request):
 # -------------------------------------------------------------------------
 # 10. SERVER START
 # -------------------------------------------------------------------------
-if __name__ == "__main__":
-    # If the STAC root catalog was unreachable at startup, serving would give
-    # clients a useless empty catalog. Exit non-zero so Kubernetes restarts the
-    # pod and gets a fresh attempt against whatever S3 looks like now. Child
-    # failures (partial catalog) are fine — the resilience design serves what
-    # loaded and records the rest in STAC_LOAD_ERRORS for list_datasets's footer.
-    if "__root__" in STAC_LOAD_ERRORS:
+def _enforce_stac_startup_gate() -> bool:
+    """Decide whether to boot when the STAC root catalog failed to load.
+
+    Normally, an unreachable root catalog means serving would give clients a
+    useless empty catalog, so we exit non-zero and let Kubernetes restart the
+    pod for a fresh attempt against whatever S3 looks like now. (Child failures —
+    a partial catalog — are fine: the resilience design serves what loaded and
+    records the rest in STAC_LOAD_ERRORS for list_datasets's footer.)
+
+    But during a sustained Ceph outage that fail-fast prevents the server from
+    booting at all — which defeats the source.coop mirror fallback (#260): a
+    running process can still serve known datasets and resolve source.coop STAC
+    entries directly. STAC_ALLOW_DEGRADED_START=true opts into booting anyway
+    with an empty catalog. Returns True if starting degraded, False if the root
+    loaded fine. Default behavior (flag unset) is unchanged: exit(1).
+    """
+    if "__root__" not in STAC_LOAD_ERRORS:
+        return False
+    reason = STAC_LOAD_ERRORS["__root__"]
+    allow_degraded = os.environ.get("STAC_ALLOW_DEGRADED_START", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if allow_degraded:
         print(
-            "💀 STAC root catalog unreachable at startup — exiting so k8s can "
-            f"restart and retry. Reason: {STAC_LOAD_ERRORS['__root__']}",
+            "⚠️ STAC root catalog unreachable at startup — booting in DEGRADED mode "
+            "(STAC_ALLOW_DEGRADED_START set). Discovery (browse_stac_catalog / "
+            "list_datasets) will be empty until the catalog is reachable; clients can "
+            "still query known datasets and pass source.coop STAC entries directly. "
+            f"Reason: {reason}",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return True
+    print(
+        "💀 STAC root catalog unreachable at startup — exiting so k8s can restart "
+        "and retry. Set STAC_ALLOW_DEGRADED_START=true to boot anyway (e.g. to serve "
+        f"the source.coop mirror during a Ceph outage). Reason: {reason}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    _enforce_stac_startup_gate()
 
     app = mcp.streamable_http_app()
     app.router.redirect_slashes = False

@@ -30,6 +30,12 @@ spec:
           value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
         - name: MCP_PUBLIC_BASE_URL
           value: "https://dev-duckdb-mcp.nrp-nautilus.io"
+        # Boot even if the Ceph STAC catalog is unreachable at startup, so the
+        # server can serve the source.coop mirror during a Ceph outage (#260).
+        # Discovery is empty until Ceph returns; known/inline datasets still work.
+        # Dev-only for now; prod keeps the default fail-fast until proven out.
+        - name: STAC_ALLOW_DEGRADED_START
+          value: "true"
         resources:
           # Requests intentionally kept small (≤2 GiB memory, ≤1 CPU) to land in
           # NRP's "Ignored" bucket for utilization violations. Limits stay high so
