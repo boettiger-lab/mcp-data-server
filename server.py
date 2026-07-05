@@ -126,6 +126,26 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
                 conn.sql(stmt)
             except Exception as e:
                 print(f"⚠️ Setup statement skipped: {stmt!r}: {e}", file=sys.stderr)
+        # Default S3 endpoint — server-owned and per-deployment configurable (#268).
+        # Lets you deploy this codebase as a data-access head pointed at any storage
+        # (Ceph / MinIO / source.coop) purely via env, no code change. Unset =
+        # the NRP Ceph internal endpoint (back-compat). USE_SSL is inferred from the
+        # endpoint (rook = in-cluster http) unless S3_DEFAULT_USE_SSL overrides it.
+        default_endpoint = os.environ.get("S3_DEFAULT_ENDPOINT", "rook-ceph-rgw-nautiluss3.rook")
+        default_url_style = os.environ.get("S3_DEFAULT_URL_STYLE", "path")
+        default_use_ssl = (
+            os.environ.get("S3_DEFAULT_USE_SSL")
+            or ("false" if default_endpoint.startswith("rook") else "true")
+        ).strip().lower()
+        try:
+            conn.sql(
+                f"CREATE OR REPLACE SECRET s3 ("
+                f"TYPE S3, KEY_ID '', SECRET '', "
+                f"ENDPOINT '{default_endpoint}', URL_STYLE '{default_url_style}', "
+                f"USE_SSL '{default_use_ssl}')"
+            )
+        except Exception as e:
+            print(f"⚠️ Default S3 secret setup skipped: {e}", file=sys.stderr)
         # Bring-your-own-bucket. Two symmetric cases, both routed through one
         # per-request `client_s3` secret:
         #   - credentialed: both s3_key and s3_secret given (private data).

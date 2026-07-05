@@ -310,6 +310,42 @@ class TestAnonymousBYOBucket:
             assert "client_s3" not in names
 
 
+class TestDefaultEndpoint:
+    """S3_DEFAULT_ENDPOINT: per-deployment default storage endpoint, server-owned (#268).
+    Lets the codebase be deployed as a data-access head pointed at any backend via env."""
+
+    def _s3_secret_string(self, conn):
+        row = conn.sql("SELECT secret_string FROM duckdb_secrets() WHERE name='s3'").fetchone()
+        return row[0] if row else ""
+
+    def test_default_falls_back_to_rook(self, monkeypatch):
+        monkeypatch.delenv("S3_DEFAULT_ENDPOINT", raising=False)
+        monkeypatch.delenv("S3_DEFAULT_USE_SSL", raising=False)
+        with get_isolated_db() as conn:
+            s = self._s3_secret_string(conn)
+            assert "rook-ceph-rgw-nautiluss3.rook" in s
+            assert "use_ssl=false" in s  # inferred: rook = in-cluster http
+
+    def test_default_endpoint_from_env(self, monkeypatch):
+        monkeypatch.setenv("S3_DEFAULT_ENDPOINT", "minio.example.org")
+        monkeypatch.delenv("S3_DEFAULT_USE_SSL", raising=False)
+        with get_isolated_db() as conn:
+            s = self._s3_secret_string(conn)
+            assert "minio.example.org" in s
+            assert "use_ssl=true" in s  # inferred: non-rook = https
+
+    def test_default_use_ssl_override(self, monkeypatch):
+        monkeypatch.setenv("S3_DEFAULT_ENDPOINT", "minio.example.org")
+        monkeypatch.setenv("S3_DEFAULT_USE_SSL", "false")
+        with get_isolated_db() as conn:
+            assert "use_ssl=false" in self._s3_secret_string(conn)
+
+    def test_query_still_works_with_default_endpoint(self, monkeypatch):
+        """A deployment-configured default endpoint doesn't break normal queries."""
+        monkeypatch.setenv("S3_DEFAULT_ENDPOINT", "minio.example.org")
+        assert "5" in query("SELECT 5 as n")
+
+
 class TestTileRouteMounted:
     def test_tile_route_exists_in_starlette_app(self):
         """After importing server, the streamable_http_app should have a /tiles route."""
