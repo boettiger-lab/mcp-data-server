@@ -558,6 +558,36 @@ class TestBuildTileConnection:
         finally:
             con.close()
 
+    def _s3_secret_string(self, con):
+        row = con.sql("SELECT secret_string FROM duckdb_secrets() WHERE name='s3'").fetchone()
+        return row[0] if row else ""
+
+    def test_default_endpoint_falls_back_to_rook(self, monkeypatch):
+        """Unset env keeps the NRP Ceph internal endpoint (back-compat)."""
+        monkeypatch.delenv("S3_DEFAULT_ENDPOINT", raising=False)
+        monkeypatch.delenv("S3_DEFAULT_USE_SSL", raising=False)
+        con = build_tile_connection()
+        try:
+            s = self._s3_secret_string(con)
+            assert "rook-ceph-rgw-nautiluss3.rook" in s
+            assert "use_ssl=false" in s
+        finally:
+            con.close()
+
+    def test_honors_s3_default_endpoint_env(self, monkeypatch):
+        """The tile connection uses the same deployment default as the query
+        tool (#268/#271) — previously hardcoded to rook, so a deployment
+        repointed via S3_DEFAULT_ENDPOINT broke hex tile reads and writes."""
+        monkeypatch.setenv("S3_DEFAULT_ENDPOINT", "minio.example.org")
+        monkeypatch.delenv("S3_DEFAULT_USE_SSL", raising=False)
+        con = build_tile_connection()
+        try:
+            s = self._s3_secret_string(con)
+            assert "minio.example.org" in s
+            assert "use_ssl=true" in s  # inferred: non-rook = https
+        finally:
+            con.close()
+
 
 class TestPyramidMathCorrectness:
     """Assert mathematical invariants on built pyramids — independent of
