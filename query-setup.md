@@ -10,12 +10,14 @@ SET temp_directory='/tmp';
 LOAD httpfs;
 LOAD h3;
 LOAD spatial;
-CREATE OR REPLACE SECRET source_coop (TYPE S3, SCOPE 's3://us-west-2.opendata.source.coop', REGION 'us-west-2', ENDPOINT 's3.us-west-2.amazonaws.com', URL_STYLE 'path', USE_SSL 'true', KEY_ID '', SECRET '');
 ```
 
-The default `s3` secret (for `s3://public-*` and other paths) is created by the
-server per request, with its endpoint set by the deployment (`S3_DEFAULT_ENDPOINT`,
-default the NRP Ceph internal endpoint). Do not create or override it in query SQL.
+S3 secrets are created by the server per connection, not in query SQL — do not
+create or override them here. The default `s3` secret (for `s3://public-*` and
+other paths) takes its endpoint from the deployment (`S3_DEFAULT_ENDPOINT`,
+default the NRP Ceph internal endpoint); prefix-scoped secrets for every other
+known source (e.g. the anonymous `source_coop` mirror) come from the source
+registry (`s3config.py`, extensible per deployment via `S3_SOURCES`).
 
 **Why these settings?**
 
@@ -25,7 +27,13 @@ default the NRP Ceph internal endpoint). Do not create or override it in query S
 - `httpfs` - Required for S3 access
 - `h3` - Required for H3 functions
 - `spatial` - Required for `ST_*` functions (line-data exact mileage, GeoParquet inspection)
-- `source_coop` secret - Anonymous, prefix-scoped fallback for the public source.coop mirror. DuckDB routes `s3://us-west-2.opendata.source.coop/...` paths to it automatically; `s3://public-*` paths still go to Ceph. Use mirror paths (returned by the STAC tools as `s3://us-west-2.opendata.source.coop/cboettig/<dataset>/...`) when the primary Ceph endpoint is unavailable.
+
+The registry-created `source_coop` secret is the anonymous, prefix-scoped
+fallback for the public source.coop mirror: DuckDB routes
+`s3://us-west-2.opendata.source.coop/...` paths to it automatically, while
+`s3://public-*` paths still go to Ceph. Use mirror paths (returned by the STAC
+tools as `s3://us-west-2.opendata.source.coop/cboettig/<dataset>/...`) when the
+primary Ceph endpoint is unavailable.
 
 **Note:** On the default NRP deployment, the server's `s3` secret points at the internal endpoint `rook-ceph-rgw-nautiluss3.rook` (only reachable from inside the k8s cluster; the public external endpoint is `s3-west.nrp-nautilus.io`, which needs `USE_SSL true` and `SET THREADS=2`). A deployment can repoint this default at another backend (e.g. a MinIO mirror) via `S3_DEFAULT_ENDPOINT` without any query changes.
 

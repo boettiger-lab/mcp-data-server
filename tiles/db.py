@@ -8,7 +8,7 @@ import os
 
 import duckdb
 
-from s3config import default_s3_secret_sql
+from s3config import default_s3_secret_sql, source_secret_sql
 
 
 def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnection:
@@ -60,4 +60,9 @@ def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnecti
     # cluster-internal Ceph endpoint, which broke hex tiles (source reads AND
     # s3://public-output writes) on any deployment repointed via env.
     con.sql(default_s3_secret_sql())
+    # Scoped registry-source secrets (#264), same set as the query tool — so a
+    # register_hex_tiles SQL over e.g. source.coop mirror paths routes correctly
+    # here too (previously only the query connections had the mirror secret).
+    for stmt in source_secret_sql():
+        con.sql(stmt)
     return con

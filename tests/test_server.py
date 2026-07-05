@@ -352,8 +352,8 @@ class TestUnscopedClientRouting:
             assert "s3" in self._names(conn)
 
     def test_scoped_source_coop_survives_unscoped_client(self):
-        """The prefix-scoped source_coop secret (SETUP_SQL) still wins its own
-        paths over an unscoped client_s3 — longest-scope match beats unscoped."""
+        """The prefix-scoped source_coop secret (source registry) still wins its
+        own paths over an unscoped client_s3 — longest-scope match beats unscoped."""
         with get_isolated_db(s3_key="K", s3_secret="S") as conn:
             assert (
                 self._which(conn, "s3://us-west-2.opendata.source.coop/a.parquet")
@@ -369,6 +369,38 @@ class TestUnscopedClientRouting:
     def test_quote_in_scope_does_not_break_secret_sql(self):
         with get_isolated_db(s3_endpoint="minio.example.org", s3_scope="s3://pub'lic-") as conn:
             assert "client_s3" in self._names(conn)
+
+
+class TestSourceRegistrySecrets:
+    """Registry sources (s3config, #264) get prefix-scoped secrets on every
+    query connection — built-ins and S3_SOURCES env additions alike."""
+
+    def _names(self, conn):
+        return [r[0] for r in conn.sql("SELECT name FROM duckdb_secrets()").fetchall()]
+
+    def test_source_coop_secret_present(self, monkeypatch):
+        monkeypatch.delenv("S3_SOURCES", raising=False)
+        with get_isolated_db() as conn:
+            assert "source_coop" in self._names(conn)
+
+    def test_env_source_secret_created_and_scoped(self, monkeypatch):
+        monkeypatch.setenv(
+            "S3_SOURCES",
+            '[{"name": "campus_minio", "https_prefix": "https://minio.example.edu/",'
+            ' "s3_prefix": "s3://", "secret": {"endpoint": "minio.example.edu",'
+            ' "scope": "s3://mirror-"}}]',
+        )
+        with get_isolated_db() as conn:
+            assert "campus_minio" in self._names(conn)
+            row = conn.sql(
+                "SELECT name FROM which_secret('s3://mirror-data/x.parquet', 's3')"
+            ).fetchone()
+            assert row[0] == "campus_minio"
+            # Paths outside the scope keep the deployment default.
+            row = conn.sql(
+                "SELECT name FROM which_secret('s3://public-data/x.parquet', 's3')"
+            ).fetchone()
+            assert row[0] == "s3"
 
 
 class TestDefaultEndpoint:

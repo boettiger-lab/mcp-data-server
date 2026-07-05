@@ -375,6 +375,16 @@ class TestSourceCoopFallback:
         assert _href_to_s3("https://example.com/other.parquet") == \
             "https://example.com/other.parquet"
 
+    def test_env_registered_source_rewrites(self, monkeypatch):
+        """S3_SOURCES entries extend the rewrite table without code changes (#264)."""
+        monkeypatch.setenv(
+            "S3_SOURCES",
+            '[{"name": "campus_minio", "https_prefix": "https://minio.example.edu/",'
+            ' "s3_prefix": "s3://"}]',
+        )
+        assert _href_to_s3("https://minio.example.edu/mirror-x/y.parquet") == \
+            "s3://mirror-x/y.parquet"
+
     def test_source_coop_asset_rewritten_in_collection(self):
         col = MagicMock()
         col.id, col.title, col.description = "carbon", "Carbon", "d"
@@ -414,6 +424,78 @@ class TestSourceCoopFallback:
         col.links = [lnk]
         result = _collection_to_dict(col)  # must not raise
         assert result["links"][0]["href"] == "https://doi.org/10.5281/zenodo.4091029"
+
+
+class TestUnknownHostRouteHints:
+    """Assets on hosts outside the source registry get per-request routing
+    advisories (#264/#271): the derived s3:// form plus the s3_endpoint/s3_scope
+    to pass to `query` — instead of a broken https glob or a silent wrong-endpoint
+    rewrite. 'Carry the links' for endpoints nobody pre-configured."""
+
+    def _make_col(self, href, media_type="application/x-parquet"):
+        col = MagicMock()
+        col.id, col.title, col.description = "foreign", "Foreign", "d"
+        col.license, col.keywords, col.providers = "CC-BY", [], []
+        col.links, col.summaries, col.extra_fields = [], None, {}
+        spatial = MagicMock(); spatial.bboxes = [[-180, -90, 180, 90]]
+        temporal = MagicMock(); temporal.intervals = []
+        col.extent = MagicMock(spatial=spatial, temporal=temporal)
+        asset = MagicMock()
+        asset.href = href
+        asset.media_type = media_type
+        asset.title, asset.description, asset.extra_fields = "hex", None, {}
+        col.assets = {"hex": asset}
+        return col
+
+    def test_markdown_renders_s3_form_with_params(self):
+        col = self._make_col("https://minio.other.edu/public-x/hex/h0=*/data_0.parquet")
+        md = _format_collection(col, sub_children=[])
+        assert "read_parquet('s3://public-x/hex/h0=*/data_0.parquet')" in md
+        assert "s3_endpoint='minio.other.edu'" in md
+        assert "s3_scope='s3://public-x'" in md
+
+    def test_markdown_directory_asset_gets_glob_and_params(self):
+        col = self._make_col("https://minio.other.edu/public-x/hex/")
+        md = _format_collection(col, sub_children=[])
+        assert "read_parquet('s3://public-x/hex/**')" in md
+        assert "s3_endpoint='minio.other.edu'" in md
+
+    def test_dict_keeps_https_href_and_adds_advisory_fields(self):
+        """The structured form must stay additive: original href untouched (still
+        fetchable over HTTPS), advisory fields alongside."""
+        href = "https://minio.other.edu/public-x/hex/h0=*/data_0.parquet"
+        result = _collection_to_dict(self._make_col(href))
+        a = result["assets"]["hex"]
+        assert a["href"] == href
+        assert a["s3_href"] == "s3://public-x/hex/h0=*/data_0.parquet"
+        assert a["s3_endpoint"] == "minio.other.edu"
+        assert a["s3_scope"] == "s3://public-x"
+
+    def test_dict_non_queryable_asset_gets_no_advisory(self):
+        """PMTiles/COGs are fetched over HTTPS by map clients — no s3 advisory."""
+        result = _collection_to_dict(self._make_col(
+            "https://minio.other.edu/public-x/map.pmtiles",
+            media_type="application/vnd.pmtiles",
+        ))
+        a = result["assets"]["hex"]
+        assert "s3_endpoint" not in a
+        assert a["href"].startswith("https://")
+
+    def test_registry_host_gets_no_advisory(self):
+        """Registry-rewritten paths route via server-side secrets — no params needed."""
+        result = _collection_to_dict(self._make_col(
+            "https://data.source.coop/cboettig/carbon/hex/h0=*/data_0.parquet"
+        ))
+        a = result["assets"]["hex"]
+        assert a["href"].startswith("s3://us-west-2.opendata.source.coop/")
+        assert "s3_endpoint" not in a
+
+    def test_underivable_href_passes_through_unchanged(self):
+        """No bucket/key split → no hint; the https href renders as before."""
+        col = self._make_col("https://example.com/other.parquet")
+        md = _format_collection(col, sub_children=[])
+        assert "read_parquet('https://example.com/other.parquet')" in md
+        assert "s3_endpoint=" not in md
 
 
 class TestGetCollection:

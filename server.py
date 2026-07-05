@@ -117,7 +117,12 @@ TOOL_INJECTED_CONTEXT = f"""
 # -------------------------------------------------------------------------
 # 4. ISOLATION ENGINE
 # -------------------------------------------------------------------------
-from s3config import default_s3_secret_sql, infer_use_ssl, sql_quote as _sql_quote
+from s3config import (
+    default_s3_secret_sql,
+    infer_use_ssl,
+    source_secret_sql,
+    sql_quote as _sql_quote,
+)
 
 
 @contextmanager
@@ -129,6 +134,15 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
                 conn.sql(stmt)
             except Exception as e:
                 print(f"⚠️ Setup statement skipped: {stmt!r}: {e}", file=sys.stderr)
+        # Prefix-scoped secrets for every registry source (#264) — e.g. the
+        # anonymous source.coop mirror. Scoped, so they coexist deterministically
+        # with both the default `s3` secret and any client_s3 below (longest-
+        # scope match wins); shared with the tile connection via s3config.
+        for stmt in source_secret_sql():
+            try:
+                conn.sql(stmt)
+            except Exception as e:
+                print(f"⚠️ Source secret skipped: {e}", file=sys.stderr)
         # Bring-your-own-bucket. Two symmetric cases, both routed through one
         # per-request `client_s3` secret:
         #   - credentialed: both s3_key and s3_secret given (private data).
