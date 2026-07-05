@@ -126,14 +126,26 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
                 conn.sql(stmt)
             except Exception as e:
                 print(f"⚠️ Setup statement skipped: {stmt!r}: {e}", file=sys.stderr)
-        if s3_key and s3_secret:
+        # Bring-your-own-bucket. Two symmetric cases, both routed through one
+        # per-request `client_s3` secret:
+        #   - credentialed: both s3_key and s3_secret given (private data).
+        #   - anonymous:    only s3_endpoint given, no creds (a public mirror,
+        #     e.g. MinIO/source.coop during a Ceph outage — #264). We key off
+        #     s3_endpoint here because an anonymous bucket has no other signal.
+        # Pass s3_scope (e.g. 's3://public-') so this secret wins for those paths
+        # over the default `s3` secret; without a scope, routing between two
+        # unscoped secrets is ambiguous.
+        credentialed = bool(s3_key and s3_secret)
+        if credentialed or s3_endpoint:
             endpoint = s3_endpoint or "s3-west.nrp-nautilus.io"
+            key = s3_key if credentialed else ""
+            secret = s3_secret if credentialed else ""
             use_ssl = "false" if endpoint.startswith("rook") else "true"
             scope_clause = f", SCOPE '{s3_scope}'" if s3_scope else ""
-            # Credentials injected here; intentionally not logged
+            # Credentials (if any) injected here; intentionally not logged.
             conn.sql(
                 f"CREATE OR REPLACE SECRET client_s3 ("
-                f"TYPE S3, KEY_ID '{s3_key}', SECRET '{s3_secret}', "
+                f"TYPE S3, KEY_ID '{key}', SECRET '{secret}', "
                 f"ENDPOINT '{endpoint}', URL_STYLE 'path', USE_SSL '{use_ssl}'"
                 f"{scope_clause})"
             )
@@ -255,8 +267,9 @@ BEFORE writing any SQL:
 3. Use ONLY paths returned by those tools — never guess or hardcode any S3 URLs.
 
 For private data, pass s3_key, s3_secret, and optionally s3_endpoint and s3_scope alongside the SQL query.
-Use s3_scope (e.g. 's3://private-wyoming') when the query mixes private and public S3 paths so DuckDB routes each to the correct endpoint.
-Credentials are scoped to this request only and never persisted.
+For an anonymous public source (e.g. a read-only mirror), pass s3_endpoint alone (no key/secret) with s3_scope — useful to read a mirror like s3://public-* from a backup endpoint when the primary is unavailable.
+Use s3_scope (e.g. 's3://private-wyoming' or 's3://public-') so DuckDB routes those paths to your endpoint rather than the server default; supply it whenever a query mixes sources.
+Credentials, when given, are scoped to this request only and never persisted.
 
 {TOOL_INJECTED_CONTEXT}
 """
