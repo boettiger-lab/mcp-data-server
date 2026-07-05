@@ -117,6 +117,17 @@ TOOL_INJECTED_CONTEXT = f"""
 # -------------------------------------------------------------------------
 # 4. ISOLATION ENGINE
 # -------------------------------------------------------------------------
+def _sql_quote(value: str) -> str:
+    """Escape a value for embedding in a single-quoted SQL string literal.
+
+    Client-supplied secret parameters are interpolated into CREATE SECRET
+    statements; a stray quote would otherwise break the statement — and the
+    resulting parser error can echo the statement (credentials included) back
+    in the tool's "SQL Error" response (#271).
+    """
+    return (value or "").replace("'", "''")
+
+
 @contextmanager
 def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None):
     conn = duckdb.connect(database=":memory:")
@@ -126,49 +137,57 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
                 conn.sql(stmt)
             except Exception as e:
                 print(f"⚠️ Setup statement skipped: {stmt!r}: {e}", file=sys.stderr)
-        # Default S3 endpoint — server-owned and per-deployment configurable (#268).
-        # Lets you deploy this codebase as a data-access head pointed at any storage
-        # (Ceph / MinIO / source.coop) purely via env, no code change. Unset =
-        # the NRP Ceph internal endpoint (back-compat). USE_SSL is inferred from the
-        # endpoint (rook = in-cluster http) unless S3_DEFAULT_USE_SSL overrides it.
-        default_endpoint = os.environ.get("S3_DEFAULT_ENDPOINT", "rook-ceph-rgw-nautiluss3.rook")
-        default_url_style = os.environ.get("S3_DEFAULT_URL_STYLE", "path")
-        default_use_ssl = (
-            os.environ.get("S3_DEFAULT_USE_SSL")
-            or ("false" if default_endpoint.startswith("rook") else "true")
-        ).strip().lower()
-        try:
-            conn.sql(
-                f"CREATE OR REPLACE SECRET s3 ("
-                f"TYPE S3, KEY_ID '', SECRET '', "
-                f"ENDPOINT '{default_endpoint}', URL_STYLE '{default_url_style}', "
-                f"USE_SSL '{default_use_ssl}')"
-            )
-        except Exception as e:
-            print(f"⚠️ Default S3 secret setup skipped: {e}", file=sys.stderr)
         # Bring-your-own-bucket. Two symmetric cases, both routed through one
         # per-request `client_s3` secret:
         #   - credentialed: both s3_key and s3_secret given (private data).
         #   - anonymous:    only s3_endpoint given, no creds (a public mirror,
         #     e.g. MinIO/source.coop during a Ceph outage — #264). We key off
         #     s3_endpoint here because an anonymous bucket has no other signal.
-        # Pass s3_scope (e.g. 's3://public-') so this secret wins for those paths
-        # over the default `s3` secret; without a scope, routing between two
-        # unscoped secrets is ambiguous.
+        # Pass s3_scope (e.g. 's3://public-') so this secret applies only to those
+        # paths and everything else keeps the deployment default below.
         credentialed = bool(s3_key and s3_secret)
-        if credentialed or s3_endpoint:
+        has_client = credentialed or bool(s3_endpoint)
+        if has_client:
             endpoint = s3_endpoint or "s3-west.nrp-nautilus.io"
             key = s3_key if credentialed else ""
             secret = s3_secret if credentialed else ""
             use_ssl = "false" if endpoint.startswith("rook") else "true"
-            scope_clause = f", SCOPE '{s3_scope}'" if s3_scope else ""
+            scope_clause = f", SCOPE '{_sql_quote(s3_scope)}'" if s3_scope else ""
             # Credentials (if any) injected here; intentionally not logged.
             conn.sql(
                 f"CREATE OR REPLACE SECRET client_s3 ("
-                f"TYPE S3, KEY_ID '{key}', SECRET '{secret}', "
-                f"ENDPOINT '{endpoint}', URL_STYLE 'path', USE_SSL '{use_ssl}'"
+                f"TYPE S3, KEY_ID '{_sql_quote(key)}', SECRET '{_sql_quote(secret)}', "
+                f"ENDPOINT '{_sql_quote(endpoint)}', URL_STYLE 'path', USE_SSL '{use_ssl}'"
                 f"{scope_clause})"
             )
+        # Default S3 endpoint — server-owned and per-deployment configurable (#268).
+        # Lets you deploy this codebase as a data-access head pointed at any storage
+        # (Ceph / MinIO / source.coop) purely via env, no code change. Unset =
+        # the NRP Ceph internal endpoint (back-compat). USE_SSL is inferred from the
+        # endpoint (rook = in-cluster http) unless S3_DEFAULT_USE_SSL overrides it.
+        #
+        # Skipped when client_s3 exists UNSCOPED: DuckDB's pick between two unscoped
+        # secrets is an undocumented tie-break (empirically client_s3 captured every
+        # path on duckdb 1.5.4, regardless of creation order — #271). Rather than
+        # depend on that, make the de-facto semantic explicit and deterministic:
+        # without s3_scope, the client's endpoint/creds own ALL s3:// paths for this
+        # request; with s3_scope, the default serves everything outside the scope.
+        if not (has_client and not s3_scope):
+            default_endpoint = os.environ.get("S3_DEFAULT_ENDPOINT", "rook-ceph-rgw-nautiluss3.rook")
+            default_url_style = os.environ.get("S3_DEFAULT_URL_STYLE", "path")
+            default_use_ssl = (
+                os.environ.get("S3_DEFAULT_USE_SSL")
+                or ("false" if default_endpoint.startswith("rook") else "true")
+            ).strip().lower()
+            try:
+                conn.sql(
+                    f"CREATE OR REPLACE SECRET s3 ("
+                    f"TYPE S3, KEY_ID '', SECRET '', "
+                    f"ENDPOINT '{default_endpoint}', URL_STYLE '{default_url_style}', "
+                    f"USE_SSL '{default_use_ssl}')"
+                )
+            except Exception as e:
+                print(f"⚠️ Default S3 secret setup skipped: {e}", file=sys.stderr)
         yield conn
     finally:
         conn.close()
@@ -289,6 +308,7 @@ BEFORE writing any SQL:
 For private data, pass s3_key, s3_secret, and optionally s3_endpoint and s3_scope alongside the SQL query.
 For an anonymous public source (e.g. a read-only mirror), pass s3_endpoint alone (no key/secret) with s3_scope — useful to read a mirror like s3://public-* from a backup endpoint when the primary is unavailable.
 Use s3_scope (e.g. 's3://private-wyoming' or 's3://public-') so DuckDB routes those paths to your endpoint rather than the server default; supply it whenever a query mixes sources.
+WITHOUT s3_scope, your endpoint/credentials apply to EVERY s3:// path in the query and the server-default endpoint is disabled for this request — fine for a query touching only your bucket, wrong for a query mixing your bucket with catalog data. When mixing, always pass s3_scope.
 Credentials, when given, are scoped to this request only and never persisted.
 
 {TOOL_INJECTED_CONTEXT}
