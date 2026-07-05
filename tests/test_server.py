@@ -310,6 +310,67 @@ class TestAnonymousBYOBucket:
             assert "client_s3" not in names
 
 
+class TestUnscopedClientRouting:
+    """Two unscoped S3 secrets must never coexist (#271). DuckDB's pick between
+    them is an undocumented tie-break (empirically client_s3 captured EVERY path
+    on duckdb 1.5.4, regardless of creation order), so the server makes that
+    de-facto semantic explicit: an unscoped client_s3 disables the default `s3`
+    secret for the request; a scoped one coexists with it."""
+
+    def _names(self, conn):
+        return [r[0] for r in conn.sql("SELECT name FROM duckdb_secrets()").fetchall()]
+
+    def _which(self, conn, path):
+        return conn.sql(f"SELECT name FROM which_secret('{path}', 's3')").fetchone()[0]
+
+    def test_unscoped_creds_disable_default_secret(self):
+        with get_isolated_db(s3_key="K", s3_secret="S") as conn:
+            names = self._names(conn)
+            assert "client_s3" in names
+            assert "s3" not in names
+
+    def test_unscoped_anon_endpoint_disables_default_secret(self):
+        with get_isolated_db(s3_endpoint="minio.example.org") as conn:
+            names = self._names(conn)
+            assert "client_s3" in names
+            assert "s3" not in names
+
+    def test_unscoped_client_routes_all_paths(self):
+        """Deterministically, not via tie-break: the client owns every path."""
+        with get_isolated_db(s3_endpoint="minio.example.org") as conn:
+            assert self._which(conn, "s3://public-data/x.parquet") == "client_s3"
+            assert self._which(conn, "s3://anything-else/y.parquet") == "client_s3"
+
+    def test_scoped_client_keeps_default_secret(self):
+        with get_isolated_db(s3_endpoint="minio.example.org", s3_scope="s3://public-") as conn:
+            names = self._names(conn)
+            assert "client_s3" in names
+            assert "s3" in names
+
+    def test_no_client_keeps_default_secret(self):
+        with get_isolated_db() as conn:
+            assert "s3" in self._names(conn)
+
+    def test_scoped_source_coop_survives_unscoped_client(self):
+        """The prefix-scoped source_coop secret (SETUP_SQL) still wins its own
+        paths over an unscoped client_s3 — longest-scope match beats unscoped."""
+        with get_isolated_db(s3_key="K", s3_secret="S") as conn:
+            assert (
+                self._which(conn, "s3://us-west-2.opendata.source.coop/a.parquet")
+                == "source_coop"
+            )
+
+    def test_quote_in_credentials_does_not_break_secret_sql(self):
+        """A quote in a client-supplied value must not break out of the SQL
+        string literal (or echo the statement back in a parser error)."""
+        with get_isolated_db(s3_key="K'--", s3_secret="S'x") as conn:
+            assert "client_s3" in self._names(conn)
+
+    def test_quote_in_scope_does_not_break_secret_sql(self):
+        with get_isolated_db(s3_endpoint="minio.example.org", s3_scope="s3://pub'lic-") as conn:
+            assert "client_s3" in self._names(conn)
+
+
 class TestDefaultEndpoint:
     """S3_DEFAULT_ENDPOINT: per-deployment default storage endpoint, server-owned (#268).
     Lets the codebase be deployed as a data-access head pointed at any backend via env."""
