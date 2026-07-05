@@ -8,6 +8,8 @@ import os
 
 import duckdb
 
+from s3config import default_s3_secret_sql
+
 
 def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnection:
     """Create a :memory: connection with extensions loaded and S3 configured.
@@ -53,10 +55,9 @@ def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnecti
     # re-measure at 1-file/h0 (see benchmarks/s3-throughput-bench.py); drop if neutral.
     con.sql("SET prefetch_all_parquet_files=true")
 
-    # S3 access: use the cluster-internal Ceph endpoint (same as query tool).
-    con.sql(
-        "CREATE OR REPLACE SECRET s3 ("
-        "TYPE S3, ENDPOINT 'rook-ceph-rgw-nautiluss3.rook', "
-        "URL_STYLE 'path', USE_SSL 'false', KEY_ID '', SECRET '')"
-    )
+    # S3 access: the deployment default endpoint (S3_DEFAULT_ENDPOINT, same env
+    # surface as the query tool — #268/#271). Previously hardcoded to the
+    # cluster-internal Ceph endpoint, which broke hex tiles (source reads AND
+    # s3://public-output writes) on any deployment repointed via env.
+    con.sql(default_s3_secret_sql())
     return con
