@@ -14,6 +14,8 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pystac.stac_io import DefaultStacIO
 
+import s3config
+
 
 STAC_CATALOG_URL = os.environ.get(
     "STAC_CATALOG_URL",
@@ -40,11 +42,6 @@ _STAC_CHILD_RETRY_TIMEOUT = int(os.environ.get("STAC_CHILD_RETRY_TIMEOUT", "8"))
 
 # Legacy alias retained so external callers (if any) that read the old name still work.
 _STAC_TIMEOUT = _STAC_CHILD_TIMEOUT
-
-_S3_PUBLIC = "https://s3-west.nrp-nautilus.io/"
-_S3_INTERNAL = (
-    os.environ.get("S3_ENDPOINT_URL", "http://rook-ceph-rgw-nautiluss3.rook").rstrip("/") + "/"
-)
 
 # Navigational STAC link rel types excluded from _collection_to_dict output.
 _NAV_RELS = {"root", "parent", "self", "child", "item"}
@@ -104,8 +101,9 @@ class _TimeoutStacIO(DefaultStacIO):
         self._timeout = timeout if timeout is not None else _STAC_CHILD_TIMEOUT
 
     def read_text_from_href(self, href: str) -> str:
-        if href.startswith(_S3_PUBLIC):
-            href = _S3_INTERNAL + href[len(_S3_PUBLIC):]
+        # Registry-driven reroute (s3config): e.g. NRP external SSL hrefs are
+        # fetched via the in-cluster endpoint for speed.
+        href = s3config.metadata_href(href)
         if href.startswith("http"):
             headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
             resp = requests.get(href, timeout=self._timeout, headers=headers)
@@ -120,18 +118,14 @@ pystac.StacIO.set_default(_TimeoutStacIO)
 def _href_to_s3(href: str) -> str:
     """Convert an HTTPS S3 URL to an s3:// path for DuckDB read_parquet().
 
-    Handles both the primary NRP Ceph endpoint and the source.coop mirror. The
-    source.coop STAC entries publish assets under the `data.source.coop` HTTPS
-    gateway, which cannot list/glob; rewriting to the `us-west-2.opendata.source.coop`
-    S3 bucket form lets DuckDB expand `h0=*` globs against the mirror (see #260).
+    Registry-driven (s3config, #264): built-ins cover the primary NRP Ceph
+    endpoint and the source.coop mirror (whose `data.source.coop` HTTPS gateway
+    cannot list/glob — the AWS-bucket form can, see #260); deployments add
+    sources via S3_SOURCES. Hrefs on unknown hosts pass through unchanged —
+    the renderers surface a per-request routing hint for those instead
+    (s3config.route_hint) rather than guessing a rewrite.
     """
-    if href.startswith("https://s3-west.nrp-nautilus.io/"):
-        return href.replace("https://s3-west.nrp-nautilus.io/", "s3://")
-    if href.startswith("https://data.source.coop/"):
-        return href.replace(
-            "https://data.source.coop/", "s3://us-west-2.opendata.source.coop/"
-        )
-    return href
+    return s3config.rewrite_href(href)
 
 
 def _format_columns(table_cols: list) -> list[str]:
@@ -153,6 +147,18 @@ def _format_columns(table_cols: list) -> list[str]:
     return lines
 
 
+def _is_queryable_asset(href: str, atype: str) -> bool:
+    """True for assets the `query` tool reads via read_parquet()."""
+    if "pmtiles" in atype or href.endswith(".pmtiles"):
+        return False
+    if "tif" in atype or href.endswith(".tif") or href.endswith(".tiff"):
+        return False
+    return (
+        "parquet" in atype or href.endswith(".parquet")
+        or href.endswith("/") or "/hex/" in href
+    )
+
+
 def _extract_parquet_assets(col) -> list[str]:
     """Extract parquet/hex asset lines (with inline column schemas) from a collection's assets."""
     assets = []
@@ -161,18 +167,25 @@ def _extract_parquet_assets(col) -> list[str]:
         atype = asset.media_type or ""
         title = asset.title or asset_id
 
-        if "parquet" in atype or href.endswith(".parquet") or href.endswith("/") or "/hex/" in href:
-            # Skip PMTiles and COGs that might match loosely
-            if "pmtiles" in atype or href.endswith(".pmtiles"):
-                continue
-            if "tif" in atype or href.endswith(".tif") or href.endswith(".tiff"):
-                continue
+        if _is_queryable_asset(href, atype):
             s3 = _href_to_s3(href)
+            # Unknown host (no registry rewrite): render the derived s3:// form —
+            # the only form that can glob — with the per-request routing params
+            # the caller must pass to `query` (see s3config.route_hint, #264).
+            hint = s3config.route_hint(s3) if s3.startswith("http") else None
+            if hint:
+                s3 = hint["path"]
             if s3.endswith("/"):
                 s3 = s3.rstrip("/") + "/**"
             size = asset.extra_fields.get("file:size")
             size_note = f" ({size/1024**3:.2f} GiB)" if size and size > 1024**2 else ""
             assets.append(f"  - {title}{size_note}: `read_parquet('{s3}')`")
+            if hint:
+                assets.append(
+                    f"    - ⚠️ non-default endpoint (derived from `{href}` assuming "
+                    f"path-style S3): call `query` with s3_endpoint='{hint['endpoint']}', "
+                    f"s3_scope='{hint['scope']}' (anonymous; add s3_key/s3_secret if private)"
+                )
             # Asset-level description — carries per-asset facts (e.g. "this file has
             # duplicate rows per feature; dedup by <id>") that the model needs at
             # column-choice time. Without this line they never reach the prompt.
@@ -325,6 +338,17 @@ def _collection_to_dict(col, sub_children=None) -> dict:
             "title": asset.title,
             "description": asset.description,
         }
+        # Queryable asset on a host outside the registry: keep the original href
+        # (still fetchable over HTTPS by map clients) and attach the derived
+        # per-request routing advisory — s3_href + the s3_endpoint/s3_scope to
+        # pass to `query` (s3config.route_hint, #264). Additive only, so inline
+        # round-trips and non-DuckDB consumers are unaffected.
+        if a["href"].startswith("http") and _is_queryable_asset(asset.href, asset.media_type or ""):
+            hint = s3config.route_hint(a["href"])
+            if hint:
+                a["s3_href"] = hint["path"]
+                a["s3_endpoint"] = hint["endpoint"]
+                a["s3_scope"] = hint["scope"]
         # Merge extra_fields (table:columns, raster:bands, vector:layers, file:size, …)
         a.update(asset.extra_fields)
         assets[asset_id] = {k: v for k, v in a.items() if v is not None}

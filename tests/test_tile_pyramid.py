@@ -574,6 +574,17 @@ class TestBuildTileConnection:
         finally:
             con.close()
 
+    def test_registry_source_secrets_present(self, monkeypatch):
+        """The tile connection gets the same scoped registry secrets as the query
+        tool (#264), so hex-tile builds over e.g. mirror paths route correctly."""
+        monkeypatch.delenv("S3_SOURCES", raising=False)
+        con = build_tile_connection()
+        try:
+            names = [r[0] for r in con.sql("SELECT name FROM duckdb_secrets()").fetchall()]
+            assert "source_coop" in names
+        finally:
+            con.close()
+
     def test_honors_s3_default_endpoint_env(self, monkeypatch):
         """The tile connection uses the same deployment default as the query
         tool (#268/#271) — previously hardcoded to rook, so a deployment

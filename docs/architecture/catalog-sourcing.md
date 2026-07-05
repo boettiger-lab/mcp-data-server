@@ -58,14 +58,19 @@ Therefore:
   case is handled per-collection; a minio backup can provide a real root.
 - **Mix sources.** Natural *at the link level* — each dataset carries its own
   `collection_url` from any host, and MCP `get_stac_details` renders whatever
-  inline STAC it's given. Two chokepoints trip up *novel* sources (tracked in
-  [#264](https://github.com/boettiger-lab/mcp-data-server/issues/264)):
-  1. **Query endpoint secrets** — `query()` routes `s3://` paths to DuckDB
-     secrets, and only `s3` (Ceph) + `source_coop` (mirror) are wired. A new
-     source needs its own secret or per-call `s3_endpoint`/creds.
-  2. **href → `s3://` rewriting** — `_href_to_s3` only special-cases `s3-west`
-     and `data.source.coop`; other hosts pass through as HTTPS, which DuckDB
-     can't glob.
+  inline STAC it's given. The two chokepoints that tripped up *novel* sources
+  ([#264](https://github.com/boettiger-lab/mcp-data-server/issues/264)) are now
+  handled by the **source registry** (`s3config.py`, extensible per deployment
+  via `S3_SOURCES`):
+  1. **Query endpoint secrets** — every registry source with a `secret` entry
+     gets a prefix-scoped DuckDB secret on every connection (query *and* tiles);
+     unregistered sources are reachable per-request via `s3_endpoint`/`s3_scope`
+     (+ creds if private).
+  2. **href → `s3://` rewriting** — registry-driven prefix rewrites (built-ins:
+     `s3-west`, `data.source.coop`). Hosts outside the registry still pass
+     through as HTTPS, but the STAC tools now surface a derived routing hint
+     alongside them (the s3:// form + the `s3_endpoint`/`s3_scope` to pass to
+     `query`), so carry-the-links works without pre-configuration.
   Composition by **linking whole catalogs** (catalog-of-catalogs) is separately
   blocked by the catalog-walk limits in
   [#263](https://github.com/boettiger-lab/mcp-data-server/issues/263); composition
@@ -84,9 +89,11 @@ is already addressed.
 ## Design north star
 
 Lean into "carry the links" as the primary contract; keep the whole-catalog a
-thin, swappable discovery/default. Make arbitrary mix/match clean by replacing
-host-string special-casing with **data-driven routing** — a source registry that
-drives both the query secrets and the href rewrite (#264) — and, if
-catalog-of-catalogs composition is ever wanted, a recursive type-agnostic walk
-(#263). The fully STAC-native end state carries endpoint/routing on the asset
-(storage extension) rather than in server-side tables.
+thin, swappable discovery/default. Data-driven routing shipped with #264: the
+`s3config.py` source registry drives the query/tile secrets, the href rewrite,
+and the STAC-metadata reroute, with per-request hints covering unregistered
+hosts. Remaining: a recursive type-agnostic walk if catalog-of-catalogs
+composition is ever wanted (#263), and a structured `s3_sources` query parameter
+for multi-endpoint bring-your-own requests. The fully STAC-native end state
+carries endpoint/routing on the asset (storage extension) rather than in
+server-side tables.
