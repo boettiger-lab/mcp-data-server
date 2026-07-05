@@ -273,6 +273,43 @@ class TestS3Credentials:
         assert "MY_SECRET_VALUE" not in captured.err
 
 
+class TestAnonymousBYOBucket:
+    """Anonymous bring-your-own-bucket: s3_endpoint with no credentials, symmetric
+    with the credentialed path — routes reads to an anonymous public mirror (#264)."""
+
+    def test_anon_endpoint_creates_secret(self):
+        """s3_endpoint alone (no creds) creates the client_s3 secret."""
+        with get_isolated_db(s3_endpoint="minio.example.org") as conn:
+            names = [r[0] for r in conn.sql("SELECT name FROM duckdb_secrets()").fetchall()]
+            assert "client_s3" in names
+
+    def test_anon_scope_routes_only_scoped_paths(self):
+        """A scoped anonymous secret wins for its prefix; other paths keep the default."""
+        with get_isolated_db(s3_endpoint="minio.example.org", s3_scope="s3://public-") as conn:
+            def which(p):
+                return conn.sql(f"SELECT name FROM which_secret('{p}', 's3')").fetchone()[0]
+            assert which("s3://public-carbon/x.parquet") == "client_s3"
+            assert which("s3://private-foo/x.parquet") == "s3"
+
+    def test_query_with_anon_endpoint_succeeds(self):
+        """query accepts an anonymous endpoint (no creds) without error."""
+        result = query("SELECT 7 as n", s3_endpoint="minio.example.org", s3_scope="s3://public-")
+        assert "7" in result
+
+    def test_endpoint_with_partial_creds_is_anonymous(self):
+        """s3_endpoint + only a key (no secret) still creates a secret (treated anonymous),
+        rather than injecting a half-credential or erroring."""
+        with get_isolated_db(s3_endpoint="minio.example.org", s3_key="ONLY_KEY") as conn:
+            names = [r[0] for r in conn.sql("SELECT name FROM duckdb_secrets()").fetchall()]
+            assert "client_s3" in names
+
+    def test_no_endpoint_no_creds_still_no_secret(self):
+        """The anonymous path must not fire without an endpoint (no accidental secret)."""
+        with get_isolated_db() as conn:
+            names = [r[0] for r in conn.sql("SELECT name FROM duckdb_secrets()").fetchall()]
+            assert "client_s3" not in names
+
+
 class TestTileRouteMounted:
     def test_tile_route_exists_in_starlette_app(self):
         """After importing server, the streamable_http_app should have a /tiles route."""
