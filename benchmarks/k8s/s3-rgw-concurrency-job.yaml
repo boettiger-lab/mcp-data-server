@@ -1,0 +1,43 @@
+# RGW read-ceiling: N pods reading the full carbon hex simultaneously on distinct
+# fast nodes (issue #250). Aggregate ≈ single-pod ~7 Gb/s => shared RGW ceiling;
+# aggregate ≈ N× => per-client. Also samples per-node variability.
+#   kubectl apply -f benchmarks/k8s/s3-rgw-concurrency-job.yaml
+#   kubectl logs -l jn=s3-rgw -f --request-timeout=30s | grep RGW
+apiVersion: batch/v1
+kind: Job
+metadata: {name: s3-rgw}
+spec:
+  completions: 8
+  parallelism: 8
+  completionMode: Indexed
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata: {labels: {jn: s3-rgw}}
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: topology.kubernetes.io/region, operator: In, values: ["us-west"]}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: {matchLabels: {jn: s3-rgw}}
+                topologyKey: kubernetes.io/hostname
+      containers:
+      - name: probe
+        image: astral/uv:python3.12-bookworm-slim
+        env:
+          - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+          - {name: MRE_CONC, value: "128"}
+        command: ["/bin/sh","-c"]
+        args: ["uv run --with boto3 python3 -c \"import urllib.request,runpy; urllib.request.urlretrieve('https://raw.githubusercontent.com/boettiger-lab/mcp-data-server/bench/s3-ceiling/benchmarks/s3-rgw-probe.py','/tmp/b.py'); runpy.run_path('/tmp/b.py',run_name='__main__')\""]
+        resources:
+          requests: {cpu: "8", memory: "8Gi"}
+          limits: {cpu: "8", memory: "8Gi"}

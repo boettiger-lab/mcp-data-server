@@ -1,0 +1,80 @@
+# LINSTOR-local read benchmark (issue #258): initContainer copies the carbon hex
+# from S3/RGW onto a LINSTOR NVMe PVC (RWO), then DuckDB reads it as LOCAL files
+# (no httpfs, no RGW) — testing whether we beat the ~20 Gb/s RGW ceiling / ~120ms
+# latency. Pin to the region of the chosen StorageClass (linstor-sdsu = SDSU).
+#   kubectl apply -f benchmarks/k8s/linstor-read-job.yaml
+#   kubectl logs -l jn=linstor-read -f --request-timeout=30s
+#   kubectl delete job linstor-read; kubectl delete pvc linstor-carbon
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: linstor-carbon}
+spec:
+  storageClassName: linstor-sdsu          # US-West NVMe, 2x repl (or linstor-igrok = UCSD)
+  accessModes: ["ReadWriteOnce"]
+  resources: {requests: {storage: 25Gi}}  # carbon hex ~13.7 GB; pre-allocated, keep tight
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: linstor-read}
+spec:
+  completions: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata: {labels: {jn: linstor-read}}
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+      # LINSTOR is region-pinned; the pod must schedule where linstor-sdsu lives.
+      # (linstor topology usually enforces this; region hint kept for clarity.)
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: topology.kubernetes.io/region, operator: In, values: ["us-west"]}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: linstor-carbon}
+      initContainers:
+        - name: copy-from-s3
+          image: astral/uv:python3.12-bookworm-slim
+          volumeMounts: [{name: data, mountPath: /data}]
+          resources:                              # ns LimitRange defaults to 1Gi -> OOMKilled; set explicitly
+            requests: {cpu: "4", memory: "4Gi"}
+            limits: {cpu: "4", memory: "4Gi"}
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              uv run --with boto3 python3 - <<'PY'
+              import os
+              from concurrent.futures import ThreadPoolExecutor
+              import boto3
+              from botocore import UNSIGNED
+              from botocore.config import Config
+              c=boto3.client("s3",endpoint_url="http://rook-ceph-rgw-nautiluss3.rook",use_ssl=False,
+                config=Config(signature_version=UNSIGNED,s3={"addressing_style":"path"},region_name="us-east-1",
+                max_pool_connections=64,read_timeout=600))
+              B,PRE="public-carbon","vulnerable-carbon-2024/hex/"
+              keys=[o["Key"] for pg in c.get_paginator("list_objects_v2").paginate(Bucket=B,Prefix=PRE) for o in pg.get("Contents",[]) if o["Key"].endswith(".parquet")]
+              def dl(k):
+                  d="/data/"+os.path.dirname(k); os.makedirs(d,exist_ok=True)
+                  c.download_file(B,k,"/data/"+k); return 1
+              with ThreadPoolExecutor(16) as ex: n=sum(ex.map(dl,keys))
+              print(f"copied {n} files to /data/{PRE}",flush=True)
+              PY
+      containers:
+        - name: bench
+          image: astral/uv:python3.12-bookworm-slim
+          volumeMounts: [{name: data, mountPath: /data}]
+          env:
+            - {name: MRE_GLOB, value: "/data/vulnerable-carbon-2024/hex/**/*.parquet"}
+            - {name: MRE_THREADS, value: "8,16,32,48"}
+            - {name: MRE_MEM, value: "8GB"}
+          command: ["/bin/sh","-c"]
+          args: ["uv run --with duckdb python3 -c \"import urllib.request,runpy; urllib.request.urlretrieve('https://raw.githubusercontent.com/boettiger-lab/mcp-data-server/bench/s3-ceiling/benchmarks/local-read-bench.py','/tmp/b.py'); runpy.run_path('/tmp/b.py',run_name='__main__')\""]
+          resources:
+            requests: {cpu: "16", memory: "16Gi"}
+            limits: {cpu: "16", memory: "16Gi"}
