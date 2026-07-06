@@ -42,27 +42,40 @@ TiTiler reads the mirror's COG URLs server-side (verified).
 
 ## 2. Query / analytics (through the MCP server)
 
-Query paths are the canonical `s3://public-*` form. These are **identical across
-the primary and the mirror** (same bucket names) — only *where they resolve*
-changes, which is the server's endpoint config, not the query.
+The server owns endpoint routing via a data-driven **source registry**
+(`s3config.py`, #264/#271): it rewrites known mirror hrefs to globbable `s3://`
+paths and creates the matching (anonymous, prefix-scoped) DuckDB secrets. The
+`query` paths themselves are the `s3://` form, and the STAC tools return them
+ready to use — you don't hand-edit query SQL. There are two ways to route
+queries to the mirror during an outage:
 
-Point your app's **`mcp_url`** at an MCP head configured for the mirror — e.g. a
-head deployed with `S3_DEFAULT_ENDPOINT=minio.carlboettiger.info` (see
-[deployment.md](deployment.md) and issue #268). All `s3://public-*` reads then
-resolve to the mirror, with no per-query changes and no credentials (the mirror
-is anonymous).
+**a. Point `mcp_url` at a mirror-configured MCP head (recommended).** Deploy the
+server with `S3_DEFAULT_ENDPOINT=<mirror host>` (and, so the mirror's own hrefs
+rewrite cleanly, register it via `S3_SOURCES` — see [deployment.md](deployment.md)
+and issues #268/#264):
 
-Alternatively, a client can pass `s3_endpoint` + `s3_scope` per query (issue
-#264) to route to the mirror without switching `mcp_url`.
+```
+S3_DEFAULT_ENDPOINT=minio.carlboettiger.info
+S3_SOURCES='[{"name":"minio","https_prefix":"https://minio.carlboettiger.info/","s3_prefix":"s3://"}]'
+STAC_CATALOG_URL=https://minio.carlboettiger.info/public-data/stac/catalog.json
+```
 
-> **Known caveat (client-side).** geo-agent's `get_schema` forwards the app's
-> cached collection *inline* to the server, so on a mirror-repointed app the
-> `read_parquet` path it returns is an `https://<mirror>/…` URL — and DuckDB
-> cannot glob generic HTTP (needed for `hex/h0=*` datasets). The query path must
-> use the canonical `s3://public-*` form (which the mirror head routes
-> correctly). This is being addressed so the browser-href and query-path
-> concerns are cleanly separated; until then, hex/analytics queries on a
-> repointed app may need the `s3://` form explicitly.
+Point the app's `mcp_url` at this head. `s3://public-*` reads (and hex-tile
+generation, which now honors the same default endpoint — #275) resolve to the
+mirror, anonymously, with no per-query changes.
+
+**b. Or keep your `mcp_url` and pass routing per query (#264/#267).** For a
+source the server doesn't know, `get_stac_details` now returns the derived
+`s3://` path **and an in-band ⚠️ line telling you exactly what to pass** — e.g.
+`s3_endpoint='minio.carlboettiger.info', s3_scope='s3://public-<name>'`
+(anonymous; add `s3_key`/`s3_secret` if private). Following that instruction
+routes the read to the mirror.
+
+> **When mixing sources, always pass `s3_scope`.** A per-request `s3_endpoint`
+> (or credentials) **without** a scope applies to *every* `s3://` path in that
+> query and disables the server default for the request (deterministic since
+> #273) — correct for a query hitting only your bucket, wrong for one mixing
+> your bucket with catalog data. The scope confines your endpoint to its prefix.
 
 ## Reverting
 
