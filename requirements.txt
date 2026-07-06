@@ -9,3 +9,9 @@ uvicorn
 tabulate
 pystac
 requests
+# Polars backs the optional QUERY_ENGINE=polars-* backends (#227). It is a
+# pure-CPU dependency (the GPU-only deps — cudf-polars, kvikio — live in
+# requirements-gpu.txt and never in the base image). Kept in the base so the
+# CPU engine is available everywhere: for CI parity tests and as the fallback
+# target when a GPU collect fails.
+polars>=1.0

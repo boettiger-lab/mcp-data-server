@@ -124,6 +124,12 @@ from s3config import (
     sql_quote as _sql_quote,
 )
 
+# Query engine seam (#227). Default "duckdb" reproduces the historical path
+# byte-for-byte; QUERY_ENGINE can select an optional Polars/GPU backend. The
+# DuckDB engine reuses get_isolated_db() below via a lazy import, so this stays
+# import-cycle-free. See docs/architecture/gpu-query-engine.md.
+from engines import select_engine, S3Request
+
 
 @contextmanager
 def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None):
@@ -260,36 +266,17 @@ def analyst_persona() -> str:
 # -------------------------------------------------------------------------
 # 8. TOOL DEFINITION — SQL Query
 # -------------------------------------------------------------------------
+# The active query backend, chosen once at import from QUERY_ENGINE. Default is
+# the DuckDB engine, whose run() reproduces the historical query() exactly.
+_ENGINE = select_engine()
+
+
 def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None) -> str:
-    """Placeholder (overwritten below)."""
-    print(f"🔍 Executing: {sql_query}", file=sys.stderr)
-    try:
-        with get_isolated_db(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope) as db:
-            result = db.sql(sql_query)
-            if result is None: return "Command executed successfully."
-
-            # Drop geometry columns — GEOMETRY('OGC:CRS84') crashes pandas conversion
-            # (DuckDB issue: unsupported NumPy type). Geometry is not useful in tabular output.
-            geom_cols = [c for c, t in zip(result.columns, result.dtypes) if "GEOMETRY" in str(t).upper()]
-            if geom_cols:
-                keep = [f'"{c}"' for c in result.columns if c not in geom_cols]
-                result = result.select(", ".join(keep))
-
-            # Fetch one extra row to detect truncation without a second COUNT scan.
-            df = result.limit(51).df()
-            if df.empty: return "No results found."
-            truncated = len(df) > 50
-            md = df.head(50).to_markdown(index=False)
-            if truncated:
-                md += (
-                    "\n\n⚠️ Showing the first 50 rows only — this is a preview, not the"
-                    " full result and NOT a count. The true number of matching rows is"
-                    " larger; use COUNT(...) / COUNT(DISTINCT ...) / SUM(...) for totals."
-                )
-            return md
-
-    except Exception as e:
-        return f"SQL Error: {str(e)}"
+    """Placeholder (docstring set below). Delegates to the selected engine."""
+    return _ENGINE.run(
+        sql_query,
+        S3Request(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope),
+    )
 
 query.__doc__ = f"""
 Executes optimized DuckDB SQL against S3 parquet files.

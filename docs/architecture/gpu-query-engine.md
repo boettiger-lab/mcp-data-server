@@ -175,8 +175,10 @@ enable them (DuckDB stays a dependency regardless).
 
 ## Deps, image, CI
 
-- `requirements-gpu.txt`: `polars`, `cudf-polars`, `kvikio`, `s3fs`. Never
-  installed by the base image.
+- `polars` lives in the **base** `requirements.txt`: it is a pure-CPU dependency
+  that powers `polars-cpu` (CI parity + the GPU-failure fallback), so it belongs
+  everywhere. `requirements-gpu.txt` holds only the true GPU deps —
+  `cudf-polars`, `kvikio`, `s3fs` — and is **never** installed by the base image.
 - `Dockerfile.gpu`: `FROM nvcr.io/nvidia/rapidsai/base:<cuda12>` , conda-install
   `kvikio` pinned to the matching CUDA/py build, then `pip install` the repo's
   base requirements + `requirements-gpu.txt`. The default `Dockerfile` and the
