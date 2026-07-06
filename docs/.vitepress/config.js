@@ -38,6 +38,7 @@ export default {
         items: [
           { text: 'Deployment', link: '/guide/deployment' },
           { text: 'Architecture', link: '/guide/architecture' },
+          { text: 'Mirror failover (S3 outage)', link: '/guide/mirror-failover' },
         ],
       },
     ],
