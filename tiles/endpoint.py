@@ -15,7 +15,7 @@ import sys
 import time
 import anyio
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 
 from tiles.tile_math import (
     h3_edge_padding_deg,
@@ -265,32 +265,6 @@ def _run_tile_query(con, sql: str) -> bytes:
     if row is None or row[0] is None:
         return b""
     return bytes(row[0])
-
-
-async def serve_metadata(request: Request) -> Response:
-    """GET /tiles/{namespace}/{name}/metadata.json
-
-    Serve the tileset's metadata sidecar (value_stats, bounds, layer_name,
-    value_columns, finest_res, ...) from the same origin as the tiles. The
-    client derives this URL from the tile_url template by swapping the
-    `/{z}/{x}/{y}.pbf` suffix for `metadata.json`, then reads the color-scale
-    inputs directly — so they never have to be transcribed through an LLM's
-    tool-call arguments (where weak models corrupt the large value_stats JSON,
-    silently dropping the layer-add; see the hex-not-showing investigation).
-    """
-    namespace = request.path_params["namespace"]
-    name = request.path_params["name"]
-
-    if namespace != "hex":
-        return Response(status_code=404)
-
-    con = request.app.state.tile_con
-    meta = await anyio.to_thread.run_sync(
-        _get_cached_metadata, request.app.state, con, namespace, name
-    )
-    if meta is None:
-        return Response(status_code=404)
-    return JSONResponse(meta, headers={"Cache-Control": TILE_CACHE_CONTROL})
 
 
 async def serve_tile(request: Request) -> Response:
