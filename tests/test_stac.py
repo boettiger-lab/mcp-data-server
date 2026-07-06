@@ -1396,6 +1396,25 @@ class TestInlineCollectionContent:
             d["children"] = children
         return d
 
+    def test_inline_dict_without_links_or_description_works(self):
+        """Hand-built inline dicts (not round-tripped from _collection_to_dict)
+        commonly omit `links`/`description`; pystac raises a bare KeyError for
+        both, so the coercion must default them (#278)."""
+        d = self._minimal_collection_dict()
+        del d["links"]
+        del d["description"]
+        result = get_dataset("inline-col", collection=d)
+        assert "Inline" in result
+        assert "s3://bucket/data.parquet" in result
+
+    def test_inline_dict_missing_id_raises_readable_error(self):
+        """Remaining parse failures surface as 'Invalid inline collection: ...'
+        rather than a bare KeyError bubbling into the tool response (#278)."""
+        d = self._minimal_collection_dict()
+        del d["id"]
+        with pytest.raises(ValueError, match="Invalid inline collection"):
+            get_dataset("whatever", collection=d)
+
     def test_get_collection_inline_returns_dict_no_http(self):
         with patch("stac.requests.get") as mock_get, \
              patch("stac.pystac.Catalog.from_file") as mock_cat, \
