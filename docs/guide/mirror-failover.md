@@ -61,8 +61,21 @@ STAC_CATALOG_URL=https://minio.carlboettiger.info/public-data/stac/catalog.json
 ```
 
 Point the app's `mcp_url` at this head. `s3://public-*` reads (and hex-tile
-generation, which now honors the same default endpoint — #275) resolve to the
+*reads*, which now honor the same default endpoint — #275) resolve to the
 mirror, anonymously, with no per-query changes.
+
+> **Two caveats on a mirror-configured head:**
+> - **Hex-tile builds write.** `register_hex_tiles` writes its pyramid output to
+>   `s3://public-output` on the default backend. NRP Ceph accepts those writes
+>   anonymously; the mirror bucket likely requires credentials, so expect builds
+>   to fail at write time until the scoped write secret in
+>   [#279](https://github.com/boettiger-lab/mcp-data-server/issues/279) is in
+>   place. `query` reads are unaffected.
+> - **Booting mid-outage.** With `STAC_CATALOG_URL` swapped to the mirror as
+>   above, the head starts normally. If you keep the Ceph catalog URL (or the
+>   mirror lacks a root catalog), also set `STAC_ALLOW_DEGRADED_START=true`
+>   (#262) or the fail-fast startup will crashloop until the primary returns —
+>   discovery is empty in that mode, but inline/known-path queries all work.
 
 **b. Or keep your `mcp_url` and pass routing per query (#264/#267).** For a
 source the server doesn't know, `get_stac_details` now returns the derived
