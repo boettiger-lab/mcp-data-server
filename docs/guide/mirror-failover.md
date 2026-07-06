@@ -66,11 +66,15 @@ mirror, anonymously, with no per-query changes.
 
 > **Two caveats on a mirror-configured head:**
 > - **Hex-tile builds write.** `register_hex_tiles` writes its pyramid output to
->   `s3://public-output` on the default backend. NRP Ceph accepts those writes
->   anonymously; the mirror bucket likely requires credentials, so expect builds
->   to fail at write time until the scoped write secret in
->   [#279](https://github.com/boettiger-lab/mcp-data-server/issues/279) is in
->   place. `query` reads are unaffected.
+>   `s3://public-output` on the default backend, anonymously. Both NRP Ceph and
+>   the minio mirror accept these writes (verified end-to-end in
+>   [#279](https://github.com/boettiger-lab/mcp-data-server/issues/279): build on
+>   a mirror head → pyramid on minio → tiles served) — the requirement is that
+>   the mirror's bucket policy is open for anonymous Get/Put/List
+>   (`mc anonymous set public <alias>/public-output`). No credentials are
+>   involved. To redirect *only* tile output at the mirror while the default
+>   backend stays on Ceph, add a scoped registry entry instead:
+>   `{"name": "minio_output", "secret": {"endpoint": "minio.carlboettiger.info", "scope": "s3://public-output"}}`.
 > - **Booting mid-outage.** With `STAC_CATALOG_URL` swapped to the mirror as
 >   above, the head starts normally. If you keep the Ceph catalog URL (or the
 >   mirror lacks a root catalog), also set `STAC_ALLOW_DEGRADED_START=true`
