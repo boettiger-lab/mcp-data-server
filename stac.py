@@ -739,8 +739,9 @@ def get_dataset(
 def _coerce_inline_collection(d: dict):
     """Parse an inline STAC collection dict into a pystac.Collection.
 
-    Tolerates dicts that omit STAC envelope fields (`type`, `stac_version`) so
-    that `_collection_to_dict` output can round-trip back through the inline
+    Tolerates dicts that omit STAC envelope fields (`type`, `stac_version`,
+    `links`, `description`) so that both `_collection_to_dict` output AND
+    hand-built/client-cached dicts (#105) can pass through the inline
     `collection=` parameter. The `children` key is consumed by the caller and
     must be stripped before pystac sees the dict.
     """
@@ -751,7 +752,16 @@ def _coerce_inline_collection(d: dict):
     # values — so a license-less collection round-tripped through this path
     # would crash pystac's parser. "various" is the STAC-recommended placeholder.
     payload.setdefault("license", "various")
-    return pystac.Collection.from_dict(payload)
+    # pystac raises a bare KeyError for these two (unlike `extent`, which it
+    # defaults with a warning) — a hand-built dict shouldn't need them (#278).
+    payload.setdefault("links", [])
+    payload.setdefault("description", "")
+    try:
+        return pystac.Collection.from_dict(payload)
+    except Exception as e:
+        # Surface remaining parse failures (e.g. a missing `id`) as a readable
+        # message instead of pystac's bare KeyError reaching the tool response.
+        raise ValueError(f"Invalid inline collection: {type(e).__name__}: {e}") from e
 
 
 def get_collection(
