@@ -8,7 +8,12 @@
 # kvikio (GPU-direct S3 I/O for polars-gpu-cudf) is intentionally NOT installed
 # yet: the cudf-io reader that would import it is a later step, so adding it now
 # would be dead weight. It arrives with that reader.
-FROM nvcr.io/nvidia/rapidsai/base:25.02-cuda12.8-py3.12
+# RAPIDS 25.10 ships polars 1.32.3 + cudf-polars 25.10 (verified on the cirrus
+# RTX 8000 / Turing sm_75). 25.02's polars 1.21 had a SQL COUNT(*) bug (bare
+# COUNT without GROUP BY returned N rows) — 25.10 fixes it. requirements.txt
+# pins polars to this same 1.32.3 so the CPU engine / CI parity tests exercise
+# the exact dialect the GPU image runs.
+FROM nvcr.io/nvidia/rapidsai/base:25.10-cuda12.9-py3.12
 
 WORKDIR /app
 

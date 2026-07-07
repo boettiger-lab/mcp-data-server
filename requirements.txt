@@ -9,9 +9,11 @@ uvicorn
 tabulate
 pystac
 requests
-# Polars backs the optional QUERY_ENGINE=polars-* backends (#227). It is a
-# pure-CPU dependency (the GPU-only deps — cudf-polars, kvikio — live in
-# requirements-gpu.txt and never in the base image). Kept in the base so the
-# CPU engine is available everywhere: for CI parity tests and as the fallback
-# target when a GPU collect fails.
-polars>=1.0
+# Polars backs the optional QUERY_ENGINE=polars-* backends (#227). Pure-CPU dep
+# (the GPU-only deps — cudf-polars, kvikio — live in the GPU image only). Pinned
+# to the exact version the GPU image's RAPIDS base ships (rapidsai/base:25.10 →
+# polars 1.32.3) so the CPU engine, the GPU-failure fallback, and the CI parity
+# tests all exercise the SAME Polars SQL dialect the GPU image runs — otherwise
+# a newer CI polars masks version-specific dialect bugs (e.g. the 1.21 COUNT(*)
+# bug that shipped in 25.02). Bump in lockstep when bumping Dockerfile.gpu's base.
+polars==1.32.3
