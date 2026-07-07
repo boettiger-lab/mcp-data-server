@@ -223,9 +223,11 @@ GPU (sm_12x) and unified memory — so this means an **arm64** image, not amd64
 
 - The RAPIDS base must have an **arm64** tag *and* support Blackwell — i.e. a
   CUDA-13-class / recent RAPIDS release. Verify both before picking a tag.
-- `docker-gpu.yml` would build multi-arch (`linux/amd64,linux/arm64`). Building
-  the arm64 CUDA layers on x86 GH runners needs QEMU (slow) or arm64 runners —
-  budget for that, or publish the arm64 variant from an arm builder.
+- `docker-gpu.yml` would build multi-arch (`linux/amd64,linux/arm64`). GitHub now
+  has **native arm64 hosted runners** (`ubuntu-24.04-arm`, GA 2025, free for
+  public repos), so build the arm64 variant natively there — no slow QEMU
+  emulation. Likely a matrix over runner+platform, each pushing its arch, joined
+  by a manifest, or the arm build publishing an `-arm64` tag.
 - Unified memory changes the VRAM calculus (no separate device memory ceiling),
   which may relax the concurrency/VRAM guards we set for the discrete RTX 8000.
 
