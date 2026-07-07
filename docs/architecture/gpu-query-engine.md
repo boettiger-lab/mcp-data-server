@@ -214,6 +214,23 @@ node the collision probability is low and not a concern; we do not design around
 contention. (If that changes, MPS or a different sharing config would be the
 lever — out of scope here.)
 
+## Future: multi-arch / NVIDIA DGX Spark
+
+A later goal is a GPU image that runs on an **NVIDIA DGX Spark** (GB10 Grace
+Blackwell). Note the DGX Spark is **aarch64** (Grace ARM CPU) with a Blackwell
+GPU (sm_12x) and unified memory — so this means an **arm64** image, not amd64
+(an x86 image will not run on it). Implications when we get there:
+
+- The RAPIDS base must have an **arm64** tag *and* support Blackwell — i.e. a
+  CUDA-13-class / recent RAPIDS release. Verify both before picking a tag.
+- `docker-gpu.yml` would build multi-arch (`linux/amd64,linux/arm64`). Building
+  the arm64 CUDA layers on x86 GH runners needs QEMU (slow) or arm64 runners —
+  budget for that, or publish the arm64 variant from an arm builder.
+- Unified memory changes the VRAM calculus (no separate device memory ceiling),
+  which may relax the concurrency/VRAM guards we set for the discrete RTX 8000.
+
+Tracked as a follow-up; out of scope for the initial cirrus (RTX 8000) work.
+
 ## PR plan
 
 1. **Engine seam + `polars-cpu`.** Introduce `engines/`, move DuckDB into

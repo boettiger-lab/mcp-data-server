@@ -59,7 +59,8 @@ class PolarsEngine(QueryEngine):
         print(f"🔍 [{self.name}] Executing: {sql_query}", file=sys.stderr)
         try:
             rewritten, ctx = sql_translate.build_context(
-                sql_query, s3, use_cudf_io=self.want_cudf_io
+                sql_query, s3, want_gpu=self._gpu is not None,
+                use_cudf_io=self.want_cudf_io,
             )
             # SQLContext defaults to lazy: execute() returns a LazyFrame.
             lf = ctx.execute(rewritten).limit(RESULT_LIMIT + 1)

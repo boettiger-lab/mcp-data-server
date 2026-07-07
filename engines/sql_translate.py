@@ -194,30 +194,49 @@ def _hive(path: str) -> bool:
     return "*" in path or "h0=" in path
 
 
+def _lazyframe_for(path: str, s3: S3Request, want_gpu: bool,
+                   use_cudf_io: bool) -> "pl.LazyFrame":
+    """Build the LazyFrame for one read_parquet path, choosing the reader by mode.
+
+    - CPU: lazy `scan_parquet` — streaming with projection/predicate pushdown.
+    - GPU: cudf-polars cannot read a remote `s3://` scan itself (its GPU/KvikIO
+      reader rejects the scheme, failing the whole collect), so read the parquet
+      into host memory on CPU via object_store, then let GPUEngine compute on it.
+      This is the reference fork's pattern, confirmed necessary on RAPIDS 25.10.
+    - use_cudf_io (gpu-cudf): the kvikio GPU-direct reader (pread → BytesIO →
+      read_parquet, with h0 DPP) is a later step; until it lands, gpu-cudf uses
+      the same host read as gpu, so it is correct (just not yet I/O-accelerated).
+    """
+    kwargs = {"hive_partitioning": _hive(path)}
+    storage_options = resolve_storage_options(path, s3)
+    if storage_options is not None:
+        kwargs["storage_options"] = storage_options
+
+    if want_gpu:
+        # Eager host read, then .lazy() so GPUEngine runs the compute on GPU
+        # without attempting a remote read it can't do.
+        return pl.read_parquet(path, **kwargs).lazy()
+    return pl.scan_parquet(path, **kwargs)
+
+
 def build_context(
     sql: str,
     s3: S3Request,
+    want_gpu: bool = False,
     use_cudf_io: bool = False,
 ) -> tuple[str, "pl.SQLContext"]:
     """Translate DuckDB SQL into (rewritten_sql, SQLContext) for Polars execution.
 
-    Registers each read_parquet path as a LazyFrame (with resolved
-    storage_options), rewrites the SQL to reference aliases, and applies the
+    Registers each read_parquet path as a LazyFrame (reader chosen by mode via
+    _lazyframe_for), rewrites the SQL to reference aliases, and applies the
     function rewrites. Raises UnsupportedSQL for out-of-subset constructs.
-
-    `use_cudf_io` is accepted for forward-compatibility with the gpu-cudf reader
-    (PR 2); the CPU/GPU-compute paths both use Polars scan here.
     """
     guard_unsupported(sql)
 
     path_aliases = extract_parquet_sources(sql)
     ctx = pl.SQLContext()
     for path, alias in path_aliases.items():
-        storage_options = resolve_storage_options(path, s3)
-        scan_kwargs = {"hive_partitioning": _hive(path)}
-        if storage_options is not None:
-            scan_kwargs["storage_options"] = storage_options
-        ctx.register(alias, pl.scan_parquet(path, **scan_kwargs))
+        ctx.register(alias, _lazyframe_for(path, s3, want_gpu, use_cudf_io))
 
     rewritten = substitute_aliases(sql, path_aliases)
     rewritten = rewrite_functions(rewritten)
