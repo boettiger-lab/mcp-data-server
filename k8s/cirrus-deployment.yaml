@@ -1,0 +1,82 @@
+# CPU (DuckDB) MCP data server on the local k3s cluster (cirrus).
+#
+# Derived from the NRP dev recipe (dev-deployment.yaml) but retargeted at the
+# self-hosted cluster: it runs in the `mcp` namespace alongside gpu-mcp, is
+# pinned to the cirrus node, and reads from the in-cluster MinIO mirror instead
+# of NRP Ceph so all data traffic stays on-node. Ingress/TLS/DNS are handled by
+# Traefik + cert-manager + external-dns (see cirrus-ingress.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: duckdb-mcp
+  namespace: mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: duckdb-mcp
+  template:
+    metadata:
+      labels:
+        app: duckdb-mcp
+    spec:
+      # Pin to cirrus: MinIO and Traefik both live on cirrus, so co-locating the
+      # server keeps S3 reads on-node rather than crossing the 1Gb VXLAN wire.
+      nodeSelector:
+        kubernetes.io/hostname: cirrus
+      containers:
+      - name: server
+        image: ghcr.io/boettiger-lab/mcp-data-server:main
+        imagePullPolicy: Always
+        env:
+        # In-cluster MinIO mirror (matches gpu-mcp). STAC metadata + S3 data both
+        # resolve to the on-node MinIO S3 endpoint (plain http, path-style).
+        - name: STAC_CATALOG_URL
+          value: "http://minio-svc.minio.svc.cluster.local:9000/public-data/stac/catalog.json"
+        # Reroute nrp_ceph STAC metadata fetches to in-cluster MinIO.
+        - name: S3_ENDPOINT_URL
+          value: "http://minio-svc.minio.svc.cluster.local:9000"
+        # DuckDB default `s3` secret: bare host, http, path-style for MinIO.
+        - name: S3_DEFAULT_ENDPOINT
+          value: "minio-svc.minio.svc.cluster.local:9000"
+        - name: S3_DEFAULT_USE_SSL
+          value: "false"
+        - name: MCP_PUBLIC_BASE_URL
+          value: "https://duckdb-mcp.carlboettiger.info"
+        # Boot even if the STAC catalog is briefly unreachable at startup, so a
+        # MinIO blip doesn't wedge the whole deployment. Discovery fills in once
+        # MinIO answers; known/inline datasets still work meanwhile (#260).
+        - name: STAC_ALLOW_DEGRADED_START
+          value: "true"
+        resources:
+          # Small requests so the pod schedules easily on the shared cirrus node;
+          # limits stay generous so large DuckDB queries can still burst. cirrus
+          # has 128 CPU / ~251Gi, shared with gpu-mcp and JupyterHub — hence the
+          # 96Gi ceiling (vs 160Gi on the much larger NRP nodes).
+          requests:
+            memory: 2Gi
+            cpu: 250m
+          limits:
+            memory: 96Gi
+            cpu: 64
+        ports:
+        - containerPort: 8000
+        # HTTP probes (GET /healthz), not a bare TCP accept: a pod whose event
+        # loop is starved by a runaway query still accepts TCP but can't answer
+        # HTTP, so a TCP-only probe would keep routing to a wedged backend (#157).
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 6
