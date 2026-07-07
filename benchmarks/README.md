@@ -21,6 +21,30 @@ BENCH_GPU_URL=https://gpu-mcp.carlboettiger.info \
 uv run --with requests benchmarks/cpu-vs-gpu-bench.py
 ```
 
+#### Standing results (2026-07, cirrus)
+
+CPU = `duckdb-mcp`; GPU = `gpu-mcp-test` (polars-gpu-cudf, RTX 8000, 4 slices),
+both reading the same in-cluster MinIO. Median of 3 warm runs; GPU execution
+confirmed on-GPU (fallback off; DPP + kvikio engaged). Speedup = CPU ÷ GPU
+(>1 means GPU faster).
+
+| Query | CPU (DuckDB) | GPU (cudf-polars) | Speedup |
+|---|---|---|---|
+| carbon-sum-1part (~54MB) | 0.18s | 0.49s | 0.36× |
+| carbon-sum-4part (~216MB) | 0.33s | 1.89s | 0.18× |
+| carbon-multiagg-4part | 0.34s | 2.45s | 0.14× |
+| carbon-groupby-h7 (high-card) | 0.36s | 1.90s | 0.19× |
+| gbif-count-4part | 0.16s | 0.27s | 0.61× |
+
+**DuckDB is 3–6× faster on every query** — consistent with #42's expectation that
+S3-I/O-bound queries favour CPU. At this scale the GPU path's read → CPU parse →
+host→VRAM transfer → per-query GPU setup dominates the (light) hash-aggregation
+compute, which DuckDB does in a single streamed, pruned pass. **This does not yet
+establish a GPU win.** A GPU advantage, if it exists, would need compute-bound
+workloads (large multi-way joins, window functions, repeated ops on
+already-resident data) or datasets large enough to amortise the transfer — not
+tested here (host-RAM bounded, and the busy co-tenant card limits headroom).
+
 ### `benchmark-public.py`
 
 Runs against the public NRP S3 endpoint (`s3-west.nrp-nautilus.io`). Tests two issues:

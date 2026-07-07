@@ -35,20 +35,34 @@ GPU_URL = os.environ.get("BENCH_GPU_URL", "https://gpu-mcp.carlboettiger.info").
 REPS = int(os.environ.get("BENCH_REPS", "3"))
 TIMEOUT = float(os.environ.get("BENCH_TIMEOUT", "600"))
 
-# Query suite. Keep within the GPU dialect subset; use datasets present on the
-# target backend. Defaults are small + DPP-pruned so a run is RAM-safe; extend
-# with the #42 carbon/IUCN/WDPA queries once those datasets are staged and the
-# GPU node is sized for them.
-MI = "s3://public-mappinginequality"
+# Query suite over datasets present on the cirrus MinIO. Within the GPU dialect
+# subset (pre-computed h0..h11, no h3_* functions) and DPP-pruned via h0 filters
+# so host RAM stays bounded (carbon partitions are ~54 MB each). Scales data size
+# (1→4 partitions) and compute (sum → multi-agg → higher-cardinality group) to
+# map where GPU wins vs where S3 I/O dominates (issue #42).
+CARBON = "s3://public-carbon/irrecoverable-carbon-2024/hex/h0=*/data_0.parquet"
+GBIF = "s3://public-gbif/2025-06/hex/h0=*/data_*.parquet"
+# RAM-safe h0 partitions (each carbon partition ~54 MB).
+H0_1 = "579029211465908223"
+H0_4 = "579029211465908223, 580612508209905663, 580260664489017343, 578712552117108735"
+
 QUERIES = [
-    ("count-single-file",
-     f"SELECT COUNT(*) AS n FROM read_parquet('{MI}/mappinginequality.parquet')"),
-    ("groupby-single-file",
-     f"SELECT grade, COUNT(*) AS n FROM read_parquet('{MI}/mappinginequality.parquet') "
-     "GROUP BY grade ORDER BY n DESC"),
-    ("hex-dpp-2-partitions",
-     f"SELECT h0, COUNT(*) AS n FROM read_parquet('{MI}/hex/h0=*/data_0.parquet') "
-     "WHERE h0 IN (577164439745200127, 577199624117288959) GROUP BY h0 ORDER BY h0"),
+    ("carbon-sum-1part (~54MB)",
+     f"SELECT h5, SUM(carbon) AS total FROM read_parquet('{CARBON}') "
+     f"WHERE h0 = {H0_1} GROUP BY h5 ORDER BY total DESC LIMIT 20"),
+    ("carbon-sum-4part (~216MB)",
+     f"SELECT h5, SUM(carbon) AS total FROM read_parquet('{CARBON}') "
+     f"WHERE h0 IN ({H0_4}) GROUP BY h5 ORDER BY total DESC LIMIT 20"),
+    ("carbon-multiagg-4part",
+     f"SELECT h5, COUNT(*) AS n, SUM(carbon) AS s, AVG(carbon) AS a, "
+     f"MIN(carbon) AS lo, MAX(carbon) AS hi FROM read_parquet('{CARBON}') "
+     f"WHERE h0 IN ({H0_4}) GROUP BY h5 ORDER BY s DESC LIMIT 20"),
+    ("carbon-groupby-h7-4part (high-card)",
+     f"SELECT h7, SUM(carbon) AS total FROM read_parquet('{CARBON}') "
+     f"WHERE h0 IN ({H0_4}) GROUP BY h7 ORDER BY total DESC LIMIT 20"),
+    ("gbif-count-4part",
+     f"SELECT h0, COUNT(*) AS n FROM read_parquet('{GBIF}') "
+     f"WHERE h0 IN ({H0_4}) GROUP BY h0 ORDER BY n DESC"),
 ]
 
 _HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
