@@ -231,7 +231,11 @@ GPU (sm_12x) and unified memory — so this means an **arm64** image, not amd64
 - Unified memory changes the VRAM calculus (no separate device memory ceiling),
   which may relax the concurrency/VRAM guards we set for the discrete RTX 8000.
 
-Tracked as a follow-up; out of scope for the initial cirrus (RTX 8000) work.
+The RAPIDS base (`25.10-cuda12.9-py3.12`) is **already multi-arch (amd64 +
+arm64)**, so `Dockerfile.gpu` builds on an arm64 host unchanged. The DGX Spark's
+**unified memory** is the reason to test it: on cirrus the GPU loss is dominated
+by host→VRAM transfer, which unified memory largely removes. Full step-by-step
+runbook (for an agent on the Spark): **[gpu-spark-handoff.md](gpu-spark-handoff.md)**.
 
 ## PR plan
 
