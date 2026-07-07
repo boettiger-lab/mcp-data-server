@@ -4,6 +4,23 @@ DuckDB S3 query performance benchmarks for the mcp-data-server datasets.
 
 ## Files
 
+### `cpu-vs-gpu-bench.py`
+
+CPU (DuckDB) vs GPU (Polars/cudf-polars) comparison over the MCP `query` tool
+(issue #42). Points at two `mcp-data-server` deployments — a `duckdb` one and a
+`polars-gpu*` one sharing a node + S3 backend (e.g. the cirrus CPU and GPU
+deploys) — runs a query suite against each, and reports median wall-clock and
+the CPU/GPU speedup. Queries must stay in the GPU dialect subset (pre-computed
+`h0..h11`, no `h3_*` functions); prefer DPP-friendly `h0` filters to keep host
+RAM bounded. Default queries are small/DPP-pruned (RAM-safe); extend with the
+carbon/IUCN/WDPA suite once those datasets are staged and the GPU node is sized.
+
+```bash
+BENCH_CPU_URL=https://duckdb-mcp.carlboettiger.info \
+BENCH_GPU_URL=https://gpu-mcp.carlboettiger.info \
+uv run --with requests benchmarks/cpu-vs-gpu-bench.py
+```
+
 ### `benchmark-public.py`
 
 Runs against the public NRP S3 endpoint (`s3-west.nrp-nautilus.io`). Tests two issues:
