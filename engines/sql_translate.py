@@ -266,10 +266,14 @@ def _scan_cudf(path: str, storage_options: dict | None,
     try:
         endpoint = storage_options["endpoint_url"].rstrip("/")
         fs = _s3fs_from_options(storage_options)
-        base = path.removeprefix("s3://").rstrip("/").rstrip("*").rstrip("/")
-        raw = fs.glob(base + "/**/*.parquet") or fs.glob(base + "/*.parquet")
-        if not raw and fs.exists(path.removeprefix("s3://")):
-            raw = [path.removeprefix("s3://")]
+        # Glob the pattern directly — s3fs expands wildcards, including the
+        # mid-path globs our STAC paths use (hex/h0=*/data_0.parquet) and single
+        # files. Only if that yields no parquet (e.g. a bare directory) recurse.
+        pattern = path.removeprefix("s3://")
+        raw = [f for f in fs.glob(pattern) if f.endswith(".parquet")]
+        if not raw:
+            base = pattern.rstrip("/").rstrip("*").rstrip("/")
+            raw = fs.glob(base + "/**/*.parquet") or fs.glob(base + "/*.parquet")
         if not raw:
             raise FileNotFoundError(f"no parquet at {path}")
         files = [f"s3://{f}" for f in raw]
