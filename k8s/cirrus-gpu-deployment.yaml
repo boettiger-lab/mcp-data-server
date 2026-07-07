@@ -1,0 +1,95 @@
+# GPU (Polars / cudf-polars) MCP data server on the self-hosted cirrus cluster.
+#
+# The experimental GPU query backend from this codebase (#227): QUERY_ENGINE=
+# polars-gpu-cudf, query-only (ENABLE_HEX_TILES=false — hex tiles need DuckDB's
+# h3 extension, which the GPU engine doesn't provide). Sibling to the CPU deploy
+# (k8s/cirrus-deployment.yaml) in the same `mcp` namespace and MinIO backend, so
+# the two are a fair head-to-head for the benchmark (#42). Image built by
+# .github/workflows/docker-gpu.yml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-mcp
+  namespace: mcp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gpu-mcp
+  template:
+    metadata:
+      labels:
+        app: gpu-mcp
+    spec:
+      runtimeClassName: nvidia
+      # Pin to cirrus (the GPUs + MinIO live there; keeps the S3 read on-node).
+      nodeSelector:
+        kubernetes.io/hostname: cirrus
+      containers:
+      - name: server
+        # Published on main by docker-gpu.yml (:gpu-dev tracks the dev branch,
+        # :gpu-<sha> is immutable). Pin to a digest for a real production deploy.
+        image: ghcr.io/boettiger-lab/mcp-data-server:gpu
+        imagePullPolicy: Always
+        env:
+        - name: QUERY_ENGINE
+          value: "polars-gpu-cudf"
+        # Query-only: no DuckDB hex-tile tools on the GPU node (default for a
+        # Polars engine anyway; explicit for clarity).
+        - name: ENABLE_HEX_TILES
+          value: "false"
+        # A GPU-runtime failure (VRAM OOM, unsupported plan node) falls back to a
+        # CPU-Polars collect so the server stays usable. Set "false" to force
+        # GPU-only when benchmarking.
+        - name: ALLOW_CPU_FALLBACK
+          value: "true"
+        # cirrus time-slices BOTH physical RTX 8000s into the pool; without a pin
+        # cudf can land on a card busy with vllm/JupyterHub and a CUDA/RMM init
+        # there can SIGKILL the worker (uncatchable by the fallback). Pin to one
+        # card. Revisit if card 0 is not the idle one.
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        # In-cluster MinIO mirror (plain http, path-style) — same backend as the
+        # CPU deploy, so benchmarks compare like-for-like.
+        - name: STAC_CATALOG_URL
+          value: "http://minio-svc.minio.svc.cluster.local:9000/public-data/stac/catalog.json"
+        - name: S3_ENDPOINT_URL
+          value: "http://minio-svc.minio.svc.cluster.local:9000"
+        - name: S3_DEFAULT_ENDPOINT
+          value: "minio-svc.minio.svc.cluster.local:9000"
+        - name: S3_DEFAULT_USE_SSL
+          value: "false"
+        - name: STAC_ALLOW_DEGRADED_START
+          value: "true"
+        ports:
+        - containerPort: 8000
+        resources:
+          # Bounded HOST RAM: the GPU/kvikio readers pull whole files into host
+          # memory, and cirrus (263Gi) is shared with vllm/JupyterHub/MinIO. Cap
+          # the blast radius so a large scan OOM-kills only this pod, not the
+          # node. Large queries must rely on DPP (h0 pruning) to stay bounded.
+          requests:
+            memory: 4Gi
+            cpu: "1"
+          limits:
+            memory: 32Gi
+            cpu: "8"
+            nvidia.com/gpu: 4
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 40
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 6

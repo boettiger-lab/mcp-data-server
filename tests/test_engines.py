@@ -222,3 +222,38 @@ class TestSelectEngine:
         monkeypatch.setenv("QUERY_ENGINE", "sqlite")
         with pytest.raises(ValueError):
             select_engine()
+
+
+# ---------------------------------------------------------------------------
+# ENABLE_HEX_TILES gating (query-only GPU deploys)
+# ---------------------------------------------------------------------------
+class TestHexTileGating:
+    def test_duckdb_registers_hex_tools(self):
+        """Default DuckDB engine: hex tools present (unchanged behaviour)."""
+        import asyncio
+        import server
+        tools = {t.name for t in asyncio.run(server.mcp.list_tools())}
+        assert server.ENABLE_HEX_TILES is True
+        assert {"register_hex_tiles", "get_hex_tile_status", "query"} <= tools
+
+    def test_polars_engine_is_query_only(self):
+        """A Polars/GPU engine hides the DuckDB-only hex tools by default."""
+        import json
+        import subprocess
+        import sys
+        repo = os.path.dirname(os.path.dirname(__file__))
+        code = (
+            "import server, asyncio, json;"
+            "tools=sorted(t.name for t in asyncio.run(server.mcp.list_tools()));"
+            "print('RESULT ' + json.dumps({'enabled': server.ENABLE_HEX_TILES, 'tools': tools}))"
+        )
+        env = {**os.environ, "QUERY_ENGINE": "polars-cpu",
+               "STAC_ALLOW_DEGRADED_START": "true"}
+        out = subprocess.run([sys.executable, "-c", code], env=env, cwd=repo,
+                             capture_output=True, text=True, timeout=120)
+        line = [l for l in out.stdout.splitlines() if l.startswith("RESULT ")][-1]
+        data = json.loads(line[len("RESULT "):])
+        assert data["enabled"] is False
+        assert "query" in data["tools"]
+        assert "register_hex_tiles" not in data["tools"]
+        assert "get_hex_tile_status" not in data["tools"]

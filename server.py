@@ -270,6 +270,18 @@ def analyst_persona() -> str:
 # the DuckDB engine, whose run() reproduces the historical query() exactly.
 _ENGINE = select_engine()
 
+# Hex-tile tools (register_hex_tiles / get_hex_tile_status / the MVT endpoint)
+# run on a SEPARATE DuckDB connection and need DuckDB's h3 extension + MVT
+# generation, which the Polars/GPU query engine can't provide. They're
+# independent of the `query` tool, so ENABLE_HEX_TILES gates them: default on for
+# the DuckDB engine (unchanged), off for a Polars/GPU deploy (query-only — the
+# GPU node's purpose is heavy queries, not tile serving). Explicit env wins, so a
+# GPU deploy can still opt back into DuckDB-backed tiles. See #227.
+ENABLE_HEX_TILES = (
+    os.environ.get("ENABLE_HEX_TILES", "true" if _ENGINE.name == "duckdb" else "false")
+    .strip().lower() == "true"
+)
+
 
 def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None) -> str:
     """Placeholder (docstring set below). Delegates to the selected engine."""
@@ -652,9 +664,11 @@ async def _register_hex_tiles_tool(
 
 # Register the async wrapper under the tool name, reusing the sync function's
 # docstring as the LLM-facing description (the wrapper mirrors its signature).
-mcp.tool(name="register_hex_tiles", description=register_hex_tiles.__doc__)(
-    _register_hex_tiles_tool
-)
+# Gated by ENABLE_HEX_TILES so a query-only (GPU) deploy doesn't advertise it.
+if ENABLE_HEX_TILES:
+    mcp.tool(name="register_hex_tiles", description=register_hex_tiles.__doc__)(
+        _register_hex_tiles_tool
+    )
 
 
 _STATUS_POLL_MAX_WAIT_SECONDS = 60
@@ -805,9 +819,10 @@ async def _get_hex_tile_status_tool(
         await anyio.sleep(min(2.0, max(0.1, deadline - time.time())))
 
 
-mcp.tool(name="get_hex_tile_status", description=get_hex_tile_status.__doc__)(
-    _get_hex_tile_status_tool
-)
+if ENABLE_HEX_TILES:
+    mcp.tool(name="get_hex_tile_status", description=get_hex_tile_status.__doc__)(
+        _get_hex_tile_status_tool
+    )
 
 
 def mount_tiles(app):
@@ -900,7 +915,8 @@ if __name__ == "__main__":
 
     app = mcp.streamable_http_app()
     app.router.redirect_slashes = False
-    mount_tiles(app)
+    if ENABLE_HEX_TILES:
+        mount_tiles(app)
     app.add_route("/healthz", _healthz, methods=["GET"])
     app.add_route("/version", _version, methods=["GET"])
 
@@ -911,6 +927,7 @@ if __name__ == "__main__":
         print("🔓 Auth disabled (MCP_AUTH_TOKEN not set)", file=sys.stderr)
 
     print("🚀 Starting DuckDB MCP Server...", file=sys.stderr)
+    print(f"🧩 Hex-tile tools: {'enabled' if ENABLE_HEX_TILES else 'disabled (query-only)'}", file=sys.stderr)
     print(f"📂 STAC catalog: {STAC_CATALOG_URL}", file=sys.stderr)
     print(f"📊 Datasets loaded: {len(STAC_DATASETS)}", file=sys.stderr)
     uvicorn.run(

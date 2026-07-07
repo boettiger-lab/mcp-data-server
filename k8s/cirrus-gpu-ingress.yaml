@@ -1,0 +1,30 @@
+# NOTE: reuses the mcp-cors Middleware and mcp-long-timeout ServersTransport
+# defined in k8s/cirrus-middleware.yaml (same `mcp` namespace, shared with the
+# CPU deploy). Assumes cert-manager + external-dns are configured on cirrus.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-server-gpu-ingress
+  namespace: mcp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+    traefik.ingress.kubernetes.io/router.middlewares: mcp-mcp-cors@kubernetescrd
+    traefik.ingress.kubernetes.io/service.servertransport: mcp-mcp-long-timeout@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: gpu-mcp.carlboettiger.info
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-server-gpu
+                port:
+                  number: 8000
+  tls:
+    - hosts:
+        - gpu-mcp.carlboettiger.info
+      secretName: mcp-server-gpu-tls
