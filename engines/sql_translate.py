@@ -18,6 +18,7 @@ Ideas (regexes, DPP, function rewrites) are adapted from the reference fork
 `boettiger-lab/mcp-gpu-data-server` (sql_rewriter.py); the S3 resolution and the
 loud-subset contract are new here. GPU-only I/O (kvikio) lands in PR 2.
 """
+import os
 import re
 
 import polars as pl
@@ -101,26 +102,35 @@ def substitute_aliases(sql: str, path_aliases: dict[str, str]) -> str:
     return rewritten
 
 
-def _endpoint_url(endpoint: str) -> str:
-    """A bare host → a scheme-qualified endpoint_url for Polars/object_store."""
-    if endpoint.startswith(("http://", "https://")):
-        return endpoint
-    scheme = "https" if s3config.infer_use_ssl(endpoint) == "true" else "http"
-    return f"{scheme}://{endpoint}"
+def _truthy_ssl(value) -> bool:
+    return str(value).strip().lower() == "true"
+
+
+def _default_use_ssl(endpoint: str) -> bool:
+    """use_ssl for the deployment default endpoint — S3_DEFAULT_USE_SSL override
+    else inferred, mirroring s3config.default_s3_secret_sql exactly (so the Polars
+    default backend and the DuckDB default `s3` secret agree). This is what a
+    plain-HTTP MinIO/Ceph deployment relies on."""
+    return _truthy_ssl(os.environ.get("S3_DEFAULT_USE_SSL")
+                       or s3config.infer_use_ssl(endpoint))
 
 
 def _options(endpoint: str, key: str | None, secret: str | None,
-             region: str | None) -> dict:
+             region: str | None, use_ssl: bool) -> dict:
     """Build a Polars storage_options dict, anonymous unless creds are given.
 
-    Key names mirror the reference fork's working NRP config (endpoint_url /
+    Key names mirror the reference fork's working config (endpoint_url /
     aws_region / allow_http / skip_signature), which Polars' object_store accepts.
+    Always path-style (aws_virtual_hosted_style_request=false) to match DuckDB's
+    URL_STYLE 'path' — required by Ceph/MinIO.
     """
-    use_ssl = s3config.infer_use_ssl(endpoint) == "true"
+    scheme = "https" if use_ssl else "http"
+    url = endpoint if endpoint.startswith(("http://", "https://")) else f"{scheme}://{endpoint}"
     opts = {
-        "endpoint_url": _endpoint_url(endpoint),
+        "endpoint_url": url,
         "aws_region": region or "us-east-1",
         "allow_http": "false" if use_ssl else "true",
+        "aws_virtual_hosted_style_request": "false",
     }
     if key and secret:
         opts["aws_access_key_id"] = key
@@ -147,15 +157,18 @@ def resolve_storage_options(path: str, s3: S3Request) -> dict | None:
     if not path.startswith("s3://"):
         return None
 
-    # (2) per-request bring-your-own endpoint / credentials
+    # (2) per-request bring-your-own endpoint / credentials. use_ssl inferred
+    # from the endpoint, matching the DuckDB client_s3 secret.
     has_client = bool(s3.s3_endpoint) or bool(s3.s3_key and s3.s3_secret)
     if has_client:
         in_scope = (not s3.s3_scope) or path.startswith(s3.s3_scope)
         if in_scope:
             endpoint = s3.s3_endpoint or s3config.default_endpoint()
-            return _options(endpoint, s3.s3_key, s3.s3_secret, None)
+            return _options(endpoint, s3.s3_key, s3.s3_secret, None,
+                            use_ssl=_truthy_ssl(s3config.infer_use_ssl(endpoint)))
 
-    # (3) source-registry scoped secret (longest matching scope wins)
+    # (3) source-registry scoped secret (longest matching scope wins). use_ssl
+    # from the secret's own field else inferred, matching source_secret_sql.
     best = None
     for src in s3config.get_sources():
         sec = src.get("secret") or {}
@@ -165,11 +178,15 @@ def resolve_storage_options(path: str, s3: S3Request) -> dict | None:
                 best = (scope, sec)
     if best:
         sec = best[1]
-        return _options(sec["endpoint"], sec.get("key_id"), sec.get("secret"),
-                        sec.get("region"))
+        return _options(
+            sec["endpoint"], sec.get("key_id"), sec.get("secret"), sec.get("region"),
+            use_ssl=_truthy_ssl(sec.get("use_ssl", s3config.infer_use_ssl(sec["endpoint"]))),
+        )
 
-    # (4) deployment default
-    return _options(s3config.default_endpoint(), None, None, None)
+    # (4) deployment default — honours S3_DEFAULT_USE_SSL (the plain-HTTP MinIO
+    # case). This was the bug: inferring SSL sent https:// at a plaintext port.
+    endpoint = s3config.default_endpoint()
+    return _options(endpoint, None, None, None, use_ssl=_default_use_ssl(endpoint))
 
 
 def _hive(path: str) -> bool:

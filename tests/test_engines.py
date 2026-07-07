@@ -92,6 +92,18 @@ class TestResolveStorageOptions:
         assert opts["endpoint_url"] == "http://rook-ceph-rgw-nautiluss3.rook"
         assert opts["allow_http"] == "true"
 
+    def test_default_use_ssl_false_forces_http(self, monkeypatch):
+        # Regression: an SSL-inferring endpoint (e.g. in-cluster MinIO) with
+        # S3_DEFAULT_USE_SSL=false must resolve to http:// — the DuckDB default
+        # secret honours this and the Polars path must too, else object_store
+        # sends https to a plaintext port. (Caught on the cirrus GPU deploy.)
+        monkeypatch.setenv("S3_DEFAULT_ENDPOINT", "minio-svc.minio.svc.cluster.local:9000")
+        monkeypatch.setenv("S3_DEFAULT_USE_SSL", "false")
+        opts = sql_translate.resolve_storage_options("s3://public-data/x.parquet", S3Request())
+        assert opts["endpoint_url"] == "http://minio-svc.minio.svc.cluster.local:9000"
+        assert opts["allow_http"] == "true"
+        assert opts["aws_virtual_hosted_style_request"] == "false"
+
     def test_client_endpoint_unscoped_owns_all(self, monkeypatch):
         monkeypatch.setenv("S3_DEFAULT_ENDPOINT", "default.example")
         req = S3Request(s3_endpoint="byo.example.org")
