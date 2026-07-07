@@ -1,0 +1,33 @@
+# GPU image for the optional Polars / cudf-polars query backend (#227).
+#
+# Built ONLY for GPU deployments (QUERY_ENGINE=polars-gpu / polars-gpu-cudf); the
+# default Dockerfile stays a lean CPU/DuckDB image with no GPU deps. The RAPIDS
+# base already ships polars + cudf-polars (+ cudf), which is everything the
+# polars-gpu compute path needs — so we only add the app's non-GPU deps on top.
+#
+# kvikio (GPU-direct S3 I/O for polars-gpu-cudf) is intentionally NOT installed
+# yet: the cudf-io reader that would import it is a later step, so adding it now
+# would be dead weight. It arrives with that reader.
+FROM nvcr.io/nvidia/rapidsai/base:25.02-cuda12.8-py3.12
+
+WORKDIR /app
+
+# App deps, MINUS polars: the base image's polars is version-paired with its
+# cudf-polars build, so reinstalling/upgrading polars could break GPU execution.
+# Everything else (duckdb, mcp, pystac, …) installs on top of the conda base.
+COPY requirements.txt .
+RUN grep -v -i '^polars' requirements.txt > /tmp/reqs.txt \
+    && pip install --no-cache-dir -r /tmp/reqs.txt
+
+# Pre-install DuckDB extensions so the server starts offline-capable — DuckDB is
+# still used for the STAC/tile paths and get_isolated_db even when the query tool
+# runs on the GPU (mirrors the default image).
+RUN python -c "import duckdb; c = duckdb.connect(); c.sql('INSTALL httpfs; INSTALL spatial; INSTALL h3 FROM community')"
+
+COPY . /app
+
+ARG APP_VERSION=dev
+ARG GIT_SHA=unknown
+ENV APP_VERSION=$APP_VERSION GIT_SHA=$GIT_SHA
+
+CMD ["python", "server.py"]

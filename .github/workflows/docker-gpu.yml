@@ -1,0 +1,112 @@
+name: Build GPU Docker image
+
+# Builds the optional GPU image (Dockerfile.gpu, QUERY_ENGINE=polars-gpu*) and
+# publishes it to the same GHCR package under gpu-* tags, kept entirely separate
+# from the default CPU image pipeline (docker.yml) so that build is untouched
+# (#227). A GPU is NOT needed to build — it's deps + code on the RAPIDS base —
+# so a normal runner suffices; the smoke test only checks the GPU deps are
+# present (importing cudf needs a driver, which the runner lacks).
+on:
+  push:
+    branches: [main, gpu-query-engine]
+    paths:
+      - 'Dockerfile.gpu'
+      - 'engines/**'
+      - 'server.py'
+      - 'stac.py'
+      - 's3config.py'
+      - 'tiles/**'
+      - 'requirements.txt'
+      - 'requirements-gpu.txt'
+      - '*.md'
+      - '.github/workflows/docker-gpu.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      # The RAPIDS base (~7.4 GB) + our layers exceed the default free space on
+      # ubuntu-latest. Reclaim the pre-installed toolchains we don't use.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup || true
+          df -h /
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          repo=ghcr.io/boettiger-lab/mcp-data-server
+          case "${{ github.event_name }}" in
+            push)
+              if [ "${{ github.ref_type }}" = "tag" ]; then
+                # Release tag: immutable gpu-vX.Y.Z + immutable gpu-<sha>.
+                tags="$repo:gpu-${{ github.ref_name }}"$'\n'"$repo:gpu-${{ github.sha }}"
+                app_version="${{ github.ref_name }}-gpu"
+              elif [ "${{ github.ref_name }}" = "main" ]; then
+                # main: moving :gpu + immutable gpu-<sha>.
+                tags="$repo:gpu"$'\n'"$repo:gpu-${{ github.sha }}"
+                app_version="main-gpu"
+              else
+                # dev branch: moving :gpu-dev + immutable gpu-<sha>.
+                tags="$repo:gpu-dev"$'\n'"$repo:gpu-${{ github.sha }}"
+                app_version="${{ github.ref_name }}-gpu"
+              fi
+              ;;
+            *)
+              # workflow_dispatch: move only the dev tag.
+              tags="$repo:gpu-dev"
+              app_version="${{ github.ref_name }}-gpu"
+              ;;
+          esac
+          {
+            echo "tags<<EOF"; echo "$tags"; echo "EOF"
+            echo "app_version=$app_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile.gpu
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            APP_VERSION=${{ steps.tags.outputs.app_version }}
+            GIT_SHA=${{ github.sha }}
+
+      - name: Smoke-test image (deps present; no GPU on the runner)
+        run: |
+          image="ghcr.io/boettiger-lab/mcp-data-server@${{ steps.build.outputs.digest }}"
+          docker pull "$image"
+          # find_spec avoids importing cudf/cudf_polars, which need an NVIDIA
+          # driver the runner doesn't have. This checks the GPU deps are baked in
+          # and our engine modules import cleanly.
+          docker run --rm "$image" python -c "import importlib.util as u, polars; assert u.find_spec('cudf_polars'), 'cudf_polars missing from image'; from engines.polars_engine import PolarsEngine; from engines import sql_translate; print('GPU image OK — polars', polars.__version__, '+ cudf_polars present')"
+
+      - name: Report image digest
+        run: |
+          {
+            echo "### GPU image digest"
+            echo '```'
+            echo "${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo "Tags: ${{ steps.tags.outputs.tags }}"
+          } >> "$GITHUB_STEP_SUMMARY"
