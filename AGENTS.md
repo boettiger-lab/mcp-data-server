@@ -5,6 +5,21 @@
 > and prompts. Editing them changes what the agent is instructed to do.
 > `README.md` is the only human-facing documentation.
 
+## Development & test environment — READ FIRST
+
+**The dev server is for development: deploy your branch there and test against it.**
+`dev-duckdb-mcp.nrp-nautilus.io` exists precisely so changes are exercised on real
+infrastructure before prod. All MCP/guidance testing runs against **dev**, never a
+local process.
+
+**Never run `server.py` (the MCP server) locally in this JupyterLab environment.**
+It loads DuckDB plus the full STAC catalog in-process; running it here OOM'd the shared
+pod and took down the instance (2026-07-07). There is no "local MCP" testing path —
+if you catch yourself starting `server.py`, `uvicorn`, or a wrapper that imports the
+server on this machine, stop. The workflow is: land the change on dev (dev tracks
+`:main` — see Rollout below), then validate on dev with the headless matrix
+(see *Validating guidance changes*).
+
 ## Contributing
 
 This repo uses **GitHub Flow**: all changes go through a branch + PR, never committed directly to `main`. `main` has branch protection enforced — direct pushes are rejected.
@@ -253,6 +268,15 @@ forking the app, `run-matrix-k8s.sh` takes `SYSTEM_PROMPT_APPEND_FILE`.
 ---
 
 ## Failure modes to avoid
+
+### Running the MCP server locally OOM'd the shared pod (July 2026)
+
+To validate a guidance change without merging, an agent started `server.py` locally in
+the JupyterLab environment and pointed the headless runner at it. The server loads
+DuckDB + the full STAC catalog in-process; the memory pressure OOM'd the shared pod and
+crashed the instance. There is no local-MCP testing path — dev is the development
+server. Land the change on dev and test there. See *Development & test environment* at
+the top of this file.
 
 ### Misdiagnosing a rule-violation as an infrastructure bug (March 2026)
 
