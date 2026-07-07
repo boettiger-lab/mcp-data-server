@@ -53,7 +53,14 @@ GROUP BY state;
 
 When the scope is a name or feature id on a global `h0=*` dataset, restrict `h0` first — see *Scoping by name or feature id* in query-optimization.md.
 
-`h3_cell_area()` takes any resolution column (`h3_cell_area(h6, 'km^2')`) and unit (`'km^2'`, `'m^2'`).
+`h3_cell_area()` takes a resolution column (`h3_cell_area(h6, 'km^2')`) and exactly one of three units: `'km^2'`, `'m^2'`, `'rads^2'`. It has no acre unit; any other unit string returns `NaN`, not an error. For acres, compute in `km^2` and multiply by 247.105 (or `m^2` by 0.000247105):
+
+```sql
+SELECT SUM(h3_cell_area(h8, 'km^2')) * 247.105 AS area_acres
+FROM (SELECT DISTINCT h8, h0 FROM read_parquet('<hex>') WHERE <scope>);
+```
+
+The `acres/cell (rough)` column in the table below already includes this factor, so a count × constant path needs no conversion.
 
 For unscoped global aggregates over millions of cells, multiplying an approximate count by the rough per-cell constant is faster (within ~1–2%). Exact area would force materializing every distinct cell, defeating the approximate path:
 
