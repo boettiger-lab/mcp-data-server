@@ -283,6 +283,41 @@ ENABLE_HEX_TILES = (
 )
 
 
+def _engine_dialect_note(engine) -> str:
+    """SQL dialect caveats for the active engine, injected into the `query`
+    tool docstring so the model writes engine-compatible SQL up front, rather
+    than discovering the gap via a trial-and-error SQL Error (#227). Empty for
+    the default `duckdb` engine, which has no dialect subset."""
+    if engine.name == "duckdb":
+        return ""
+    lines = [
+        "",
+        f"### ⚙️ ACTIVE ENGINE: {engine.name} (not DuckDB) — a narrower SQL dialect applies",
+        "- NO `h3_*` functions (`h3_cell_to_parent`, `h3_h3_to_string`, ...) — use "
+        "the pre-computed `h0`..`h11` index columns directly; for a "
+        "cross-resolution join, pick the coarser shared column (e.g. join on "
+        "`h8` AND `h0`).",
+        "- NO ranking/analytic functions (`RANK`, `ROW_NUMBER`, `DENSE_RANK`, "
+        "`LAG`, `LEAD`) — return the rows and rank/shift them client-side.",
+        "- NO `GEOMETRY`/spatial operations.",
+    ]
+    if getattr(engine, "want_gpu", False):
+        lines.append(
+            "- NO aggregate window functions (`SUM(...) OVER (...)`, "
+            "`AVG(...) OVER (...)`, ...) — this GPU compute engine rejects "
+            "them (they work on polars-cpu); compute the aggregate without a "
+            "window, or do the running total client-side."
+        )
+    lines.append(
+        'Unsupported constructs return an actionable "SQL Error: ..." — '
+        "rewrite per that message rather than retrying the same SQL."
+    )
+    return "\n".join(lines)
+
+
+_ENGINE_DIALECT_NOTE = _engine_dialect_note(_ENGINE)
+
+
 def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None) -> str:
     """Placeholder (docstring set below). Delegates to the selected engine."""
     return _ENGINE.run(
@@ -304,7 +339,7 @@ Use s3_scope (e.g. 's3://private-wyoming' or 's3://public-') so DuckDB routes th
 WITHOUT s3_scope, your endpoint/credentials apply to EVERY s3:// path in the query and the server-default endpoint is disabled for this request — fine for a query touching only your bucket, wrong for a query mixing your bucket with catalog data. When mixing, always pass s3_scope.
 Credentials, when given, are scoped to this request only and never persisted.
 
-{TOOL_INJECTED_CONTEXT}
+{TOOL_INJECTED_CONTEXT}{_ENGINE_DIALECT_NOTE}
 """
 
 # query runs a DuckDB scan up to 300s. FastMCP runs a *sync* tool inline on the

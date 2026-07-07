@@ -24,7 +24,18 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-latest
+          # Native arm64 runner (GA 2025, free for public repos) — no QEMU.
+          # Required for the DGX Spark (GB10 Grace Blackwell, aarch64); see
+          # docs/architecture/gpu-spark-handoff.md.
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
     permissions:
       contents: read
       packages: write
@@ -32,7 +43,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       # The RAPIDS base (~7.4 GB) + our layers exceed the default free space on
-      # ubuntu-latest. Reclaim the pre-installed toolchains we don't use.
+      # the runner. Reclaim the pre-installed toolchains we don't use.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
@@ -53,25 +64,34 @@ jobs:
         id: tags
         run: |
           repo=ghcr.io/boettiger-lab/mcp-data-server
+          # arm64 gets its own tag family (gpu-arm64*) rather than a multi-arch
+          # manifest under the plain :gpu tags — keeps the two architectures'
+          # tags distinct until a manifest is deliberately published (see
+          # gpu-spark-handoff.md gotcha 2). amd64 tags are untouched by this.
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            prefix="gpu-arm64"
+          else
+            prefix="gpu"
+          fi
           case "${{ github.event_name }}" in
             push)
               if [ "${{ github.ref_type }}" = "tag" ]; then
-                # Release tag: immutable gpu-vX.Y.Z + immutable gpu-<sha>.
-                tags="$repo:gpu-${{ github.ref_name }}"$'\n'"$repo:gpu-${{ github.sha }}"
+                # Release tag: immutable <prefix>-vX.Y.Z + immutable <prefix>-<sha>.
+                tags="$repo:$prefix-${{ github.ref_name }}"$'\n'"$repo:$prefix-${{ github.sha }}"
                 app_version="${{ github.ref_name }}-gpu"
               elif [ "${{ github.ref_name }}" = "main" ]; then
-                # main: moving :gpu + immutable gpu-<sha>.
-                tags="$repo:gpu"$'\n'"$repo:gpu-${{ github.sha }}"
+                # main: moving :<prefix> + immutable <prefix>-<sha>.
+                tags="$repo:$prefix"$'\n'"$repo:$prefix-${{ github.sha }}"
                 app_version="main-gpu"
               else
-                # dev branch: moving :gpu-dev + immutable gpu-<sha>.
-                tags="$repo:gpu-dev"$'\n'"$repo:gpu-${{ github.sha }}"
+                # dev branch: moving :<prefix>-dev + immutable <prefix>-<sha>.
+                tags="$repo:$prefix-dev"$'\n'"$repo:$prefix-${{ github.sha }}"
                 app_version="${{ github.ref_name }}-gpu"
               fi
               ;;
             *)
               # workflow_dispatch: move only the dev tag.
-              tags="$repo:gpu-dev"
+              tags="$repo:$prefix-dev"
               app_version="${{ github.ref_name }}-gpu"
               ;;
           esac
@@ -86,6 +106,7 @@ jobs:
         with:
           context: .
           file: Dockerfile.gpu
+          platforms: linux/${{ matrix.arch }}
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
@@ -104,7 +125,7 @@ jobs:
       - name: Report image digest
         run: |
           {
-            echo "### GPU image digest"
+            echo "### GPU image digest (${{ matrix.arch }})"
             echo '```'
             echo "${{ steps.build.outputs.digest }}"
             echo '```'

@@ -38,9 +38,14 @@ workload. Run **networked first, then direct read** (below).
 - `Dockerfile.gpu` — `FROM nvcr.io/nvidia/rapidsai/base:25.10-cuda12.9-py3.12`
   (**verified multi-arch: amd64 + arm64** — builds on the Spark unchanged),
   conda-installs `kvikio=25.10.*`, pip-installs app deps (minus polars) + s3fs.
-- `.github/workflows/docker-gpu.yml` — builds the amd64 GPU image (`:gpu-dev`,
-  `:gpu-<sha>`). arm64 is **not** wired yet — see "If you want CI to build the
-  arm64 image" below; the deployed image was built locally and pushed by hand.
+- `.github/workflows/docker-gpu.yml` — matrix build on native `ubuntu-latest`
+  (amd64) and `ubuntu-24.04-arm` (arm64) runners, no QEMU. amd64 keeps its
+  original tags (`:gpu`, `:gpu-dev`, `:gpu-<sha>`); arm64 publishes the
+  parallel `:gpu-arm64`, `:gpu-arm64-dev`, `:gpu-arm64-<sha>` family (kept
+  separate from a single multi-arch manifest — see gotcha 2 below). The image
+  currently live at `gpu-mcp-nimbus.carlboettiger.info` was still built locally
+  and pushed by hand (CI wiring landed after that deploy); a push to this
+  branch will now produce `:gpu-arm64-dev` via CI going forward.
 - `benchmarks/cpu-vs-gpu-bench.py` — the CPU-vs-GPU harness (carbon/gbif suite).
 - `k8s/cirrus-gpu-*.yaml` — the cirrus (amd64) GPU deploy manifests.
 
@@ -73,10 +78,13 @@ workload. Run **networked first, then direct read** (below).
    Deployment/Service instead — see `k8s/nimbus-gpu-deployment.yaml`, following
    the existing `nimbus-carbon-api` / `vllm-nimbus` pattern (namespace
    `default`, `runtimeClassName: nvidia`, `<app>-nimbus.carlboettiger.info`
-   ingress). Since `docker-gpu.yml` doesn't build arm64 yet (gotcha above),
-   push the locally-built image to ghcr yourself — this box is already
-   `docker login`'d to `ghcr.io`:
-   `docker tag mcp-data-server:gpu-arm64 ghcr.io/boettiger-lab/mcp-data-server:gpu-arm64 && docker push ...`.
+   ingress). `docker-gpu.yml` now builds `:gpu-arm64*` natively on every push
+   to this branch, so a fresh deploy can just `kubectl rollout restart` after
+   CI finishes; the first deploy predated that CI wiring and pushed a
+   locally-built image by hand instead (still useful if you need an
+   uncommitted local change tested before CI runs):
+   `docker tag mcp-data-server:gpu-arm64 ghcr.io/boettiger-lab/mcp-data-server:gpu-arm64 && docker push ...`
+   (this box is already `docker login`'d to `ghcr.io`).
 7. **`h0` is a partition key, not a row-level unique key.** Every row in a
    given `h0=<id>/data_0.parquet` file shares the same `h0`. A join like
    `... JOIN ... ON c.h0 = g.h0` **before aggregating** is a near-Cartesian
@@ -163,9 +171,12 @@ c.execute(\"INSTALL httpfs; LOAD httpfs; SET s3_endpoint='minio.carlboettiger.in
 partitions, plus a join-of-aggregates) — see `benchmarks/README.md` "DGX
 Spark" direct-read table. This confirms the hypothesis: unified memory removes
 the host→VRAM transfer that dominated the loss on cirrus's discrete Turing
-card. Also surfaced a real dialect gap along the way: window functions
-(`RANK()`, `SUM() OVER`) are unsupported by `GPUEngine` and fail loudly — see
-gotcha 7 above for the `h0`-join pitfall hit while building that test case.
+card. Also surfaced two dialect gaps along the way, now enforced in
+`sql_translate.guard_unsupported`: `RANK()`/`ROW_NUMBER()`/etc. have no Polars
+equivalent at all (CPU or GPU), while `SUM(...) OVER (...)` works fine on
+`polars-cpu` and only fails on `GPUEngine`'s collect — see
+gpu-query-engine.md's dialect-subset section. Also see gotcha 7 above for the
+`h0`-join pitfall hit while building the join test case.
 
 ## Step 5 — record results — done
 
@@ -173,15 +184,20 @@ Results are recorded in `benchmarks/README.md` ("DGX Spark, node `nimbus`")
 and summarized at the top of this file. **GPU wins on the Spark** — this
 reframes the effort: a Blackwell/unified-memory deploy target is a genuine win
 for this workload, not just a discrete-GPU dead end. The standing deployment
-(`gpu-mcp-nimbus.carlboettiger.info`) stays up for further testing; the
-window-function dialect gap should be added to gpu-query-engine.md's
-documented GPU-mode SQL subset.
+(`gpu-mcp-nimbus.carlboettiger.info`) stays up for further testing. The two
+dialect gaps found (ranking functions unconditionally, aggregate window
+functions on GPU only) are now enforced in `sql_translate.guard_unsupported`,
+documented in gpu-query-engine.md's SQL subset section, tested in
+`tests/test_engines.py`, and surfaced to the model via the engine-aware
+`query` tool docstring (`server._engine_dialect_note`).
 
-## If you want CI to build the arm64 image
+## CI now builds the arm64 image
 
-Add a job to `.github/workflows/docker-gpu.yml` on a native arm64 runner
-(`runs-on: ubuntu-24.04-arm` — GA 2025, free for public repos), building
-`Dockerfile.gpu` and pushing `:gpu-arm64` / `:gpu-arm64-<sha>`. Or use buildx
-`--platform linux/amd64,linux/arm64` to publish a single multi-arch `:gpu`
-manifest. Left undone here because it can't be runtime-verified without Blackwell
-hardware — build it once the Spark confirms the image runs.
+`.github/workflows/docker-gpu.yml` runs a matrix over `ubuntu-latest` (amd64)
+and `ubuntu-24.04-arm` (arm64, GA 2025, free for public repos, no QEMU),
+building `Dockerfile.gpu` on each and pushing `:gpu-arm64` / `:gpu-arm64-dev` /
+`:gpu-arm64-<sha>` alongside the untouched amd64 `:gpu*` tags — kept as a
+separate tag family rather than a single multi-arch manifest (gotcha 2). This
+was left undone during the initial design because it couldn't be
+runtime-verified without Blackwell hardware; it's now verified end-to-end
+against the real Spark deploy in `k8s/nimbus-gpu-deployment.yaml`.

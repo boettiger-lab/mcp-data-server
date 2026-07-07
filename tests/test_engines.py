@@ -60,6 +60,27 @@ class TestSqlTranslate:
         # h0..h11 are columns, not h3_* functions — must pass.
         sql_translate.guard_unsupported("SELECT h8, h0 FROM t WHERE h0 = 42")
 
+    def test_guard_rejects_ranking_functions_on_any_engine(self):
+        # RANK/ROW_NUMBER/etc. have no Polars SQLContext equivalent at all
+        # (polars==1.32.3) — rejected regardless of want_gpu.
+        for fn_sql in [
+            "SELECT RANK() OVER (ORDER BY val DESC) FROM t",
+            "SELECT ROW_NUMBER() OVER (ORDER BY val DESC) FROM t",
+            "SELECT LAG(val) OVER (ORDER BY val DESC) FROM t",
+        ]:
+            with pytest.raises(UnsupportedSQL):
+                sql_translate.guard_unsupported(fn_sql, want_gpu=False)
+            with pytest.raises(UnsupportedSQL):
+                sql_translate.guard_unsupported(fn_sql, want_gpu=True)
+
+    def test_guard_rejects_aggregate_window_functions_only_on_gpu(self):
+        sql = "SELECT h5, SUM(val) OVER (ORDER BY val DESC) FROM t"
+        # CPU Polars runs aggregate window functions fine — must pass with
+        # want_gpu=False, and only reject once GPU compute is requested.
+        sql_translate.guard_unsupported(sql, want_gpu=False)
+        with pytest.raises(UnsupportedSQL):
+            sql_translate.guard_unsupported(sql, want_gpu=True)
+
     @pytest.mark.parametrize("sql,expected", [
         ("SELECT * FROM t WHERE h0 IN (1, 2, 3)", frozenset({1, 2, 3})),
         ("SELECT * FROM t WHERE h0 = 7", frozenset({7})),
@@ -197,6 +218,26 @@ def test_polars_unsupported_returns_sql_error(fixture_parquet):
     out = PolarsEngine("polars-cpu").run(sql, S3Request())
     assert out.startswith("SQL Error:")
     assert "h3" in out.lower()
+
+
+def test_polars_ranking_function_returns_sql_error_even_on_cpu(fixture_parquet):
+    # Unlike aggregate window functions, RANK() has no Polars equivalent at
+    # all — polars-cpu rejects it too, not just the GPU compute path.
+    sql = f"SELECT RANK() OVER (ORDER BY val DESC) FROM read_parquet('{fixture_parquet}')"
+    out = PolarsEngine("polars-cpu").run(sql, S3Request())
+    assert out.startswith("SQL Error:")
+    assert "rank" in out.lower()
+
+
+def test_polars_aggregate_window_function_runs_on_cpu(fixture_parquet):
+    # Not a parity test: DuckDB and Polars compute ORDER BY ... DESC window
+    # frames differently (a separate, unrelated quirk — not investigated
+    # here). This only confirms the GPU-only guard doesn't overreach and
+    # block aggregate window functions on polars-cpu.
+    sql = (f"SELECT grp, val, SUM(val) OVER (ORDER BY val) AS running "
+           f"FROM read_parquet('{fixture_parquet}')")
+    out = PolarsEngine("polars-cpu").run(sql, S3Request())
+    assert not out.startswith("SQL Error:")
 
 
 # ---------------------------------------------------------------------------

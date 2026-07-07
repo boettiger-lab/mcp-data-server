@@ -83,11 +83,15 @@ discrete Turing card the loss was dominated by host→VRAM transfer, and the
 Spark's unified memory (CPU+GPU share LPDDR5X) removes that cost. This is the
 first hardware point where the GPU engine wins on this workload.
 
-**Dialect gap found:** window functions are unsupported by `cudf-polars`'s
-`GPUEngine` — both `RANK() OVER (...)` and `SUM(...) OVER (...)` fail loudly
-(`SQLInterfaceError` / `NotImplementedError`, no silent fallback), consistent
-with the documented "dialect miss → fail loud" policy. Add to the GPU dialect
-subset gaps in gpu-query-engine.md alongside `h3_*` functions and spatial ops.
+**Dialect gaps found** (now enforced by `sql_translate.guard_unsupported`, with
+tests in `tests/test_engines.py`): `RANK() OVER (...)` (and `ROW_NUMBER`,
+`DENSE_RANK`, `LAG`, `LEAD`) have no Polars SQLContext equivalent at all — CPU
+*or* GPU — same class of gap as `h3_*` functions. `SUM(...) OVER (...)` (and
+`AVG`/`COUNT`) parse and run fine on `polars-cpu`, but fail loudly on
+`GPUEngine`'s collect (`NotImplementedError: ... UnaryFunction in
+groupby/rolling`) — a GPU-compute-only gap. Both fail loudly, no silent
+fallback, consistent with the documented "dialect miss → fail loud" policy.
+See gpu-query-engine.md's GPU dialect subset section.
 
 Caveats: recompression during staging inflated file sizes (DuckDB's parquet
 writer used different compression than the source), so "~732MB"/"~4.75GB" are

@@ -45,6 +45,22 @@ _APPROX_COUNT_DISTINCT_RE = re.compile(r"APPROX_COUNT_DISTINCT\s*\(", re.IGNOREC
 # unavailable under Polars. Pre-computed h0..h11 columns are the supported path.
 _H3_FUNC_RE = re.compile(r"\bh3_[a-z0-9_]+\s*\(", re.IGNORECASE)
 
+# Ranking/analytic functions: unsupported by Polars' own SQLContext parser at
+# polars==1.32.3 (the version pinned to match the GPU image's RAPIDS base) —
+# raises SQLInterfaceError regardless of CPU or GPU. A Polars dialect gap, not
+# a GPU-compute one; applies to every mode, like the h3_* check above.
+_RANKING_FUNC_RE = re.compile(
+    r"\b(RANK|ROW_NUMBER|DENSE_RANK|LAG|LEAD|NTILE|PERCENT_RANK|CUME_DIST)\s*\(",
+    re.IGNORECASE,
+)
+
+# Aggregate window functions (SUM(...) OVER (...), AVG(...) OVER (...), ...):
+# unlike the ranking functions above, these DO parse and run correctly on plain
+# CPU Polars — but cudf-polars' GPUEngine collect rejects them (confirmed on
+# the DGX Spark, RAPIDS 25.10 — see docs/architecture/gpu-spark-handoff.md).
+# GPU-compute-only gap, so this only applies when want_gpu is set.
+_WINDOW_FUNC_RE = re.compile(r"\bOVER\s*\(", re.IGNORECASE)
+
 # h0 partition predicates, for explicit DPP in the gpu-cudf reader (PR 2).
 _H0_IN_RE = re.compile(r"\bh0\s+IN\s*\(([^)]+)\)", re.IGNORECASE)
 _H0_EQ_RE = re.compile(r"\bh0\s*=\s*(-?\d+)", re.IGNORECASE)
@@ -78,8 +94,14 @@ def extract_h0_predicates(sql: str) -> frozenset[int] | None:
     return frozenset(values) if values else None
 
 
-def guard_unsupported(sql: str) -> None:
-    """Raise UnsupportedSQL for constructs outside the Polars dialect subset."""
+def guard_unsupported(sql: str, want_gpu: bool = False) -> None:
+    """Raise UnsupportedSQL for constructs outside the Polars dialect subset.
+
+    The h3_* and ranking-function checks apply to every Polars mode (neither
+    has a Polars equivalent, on CPU or GPU). The aggregate-window-function
+    check only applies when want_gpu is set — it's a GPU-compute-engine
+    limitation; polars-cpu runs SUM(...) OVER (...) etc. fine.
+    """
     m = _H3_FUNC_RE.search(sql)
     if m:
         raise UnsupportedSQL(
@@ -87,6 +109,22 @@ def guard_unsupported(sql: str) -> None:
             "available in the Polars/GPU engine. Use the pre-computed H3 index "
             "columns (h0..h11) directly; for a cross-resolution join, pick the "
             "coarser shared column (e.g. join on h8 + h0)."
+        )
+    m = _RANKING_FUNC_RE.search(sql)
+    if m:
+        raise UnsupportedSQL(
+            f"{m.group(1).upper()}() and other ranking/analytic functions "
+            "(ROW_NUMBER, DENSE_RANK, LAG, LEAD, NTILE, ...) are not available "
+            "in the Polars SQL engine, on CPU or GPU. Return the rows and "
+            "rank/shift them client-side, or restructure as a self-join."
+        )
+    if want_gpu and _WINDOW_FUNC_RE.search(sql):
+        raise UnsupportedSQL(
+            "Aggregate window functions (e.g. SUM(...) OVER (...), "
+            "AVG(...) OVER (...)) are not supported by the GPU engine's "
+            "compute step, though they work on polars-cpu. Compute the "
+            "aggregate without a window function, or do the running total "
+            "client-side on the returned rows."
         )
 
 
@@ -356,7 +394,7 @@ def build_context(
     _lazyframe_for), rewrites the SQL to reference aliases, and applies the
     function rewrites. Raises UnsupportedSQL for out-of-subset constructs.
     """
-    guard_unsupported(sql)
+    guard_unsupported(sql, want_gpu)
 
     # Explicit partition pruning only matters for the cudf-io reader (the lazy
     # Polars path prunes for free); extract h0 predicates once for it.

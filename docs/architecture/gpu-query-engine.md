@@ -124,17 +124,28 @@ by the fork): the community `h3` extension functions (`h3_cell_to_parent`,
 `h3_h3_to_string`, …) are unavailable; `APPROX_COUNT_DISTINCT` rewrites to
 `COUNT(DISTINCT …)`; no `GEOMETRY`/spatial ops. Confirmed on the DGX Spark
 (RAPIDS 25.10 / cudf-polars 25.10 / polars 1.32.3, see
-[gpu-spark-handoff.md](gpu-spark-handoff.md)): **window functions are also
-unsupported** by `GPUEngine` — `RANK() OVER (...)` fails with
-`SQLInterfaceError: unsupported function 'rank'`, and even a plain
-`SUM(...) OVER (...)` fails with `NotImplementedError: No support for ...
-UnaryFunction in groupby/rolling`. Both fail loudly (no silent CPU fallback
-inside the GPU engine itself), consistent with the failure policy below.
+[gpu-spark-handoff.md](gpu-spark-handoff.md)), two more gaps — of two different
+kinds:
+
+- **Ranking/analytic functions have no Polars SQLContext equivalent at all**,
+  on CPU *or* GPU: `RANK() OVER (...)` fails with `SQLInterfaceError:
+  unsupported function 'rank'` (same for `ROW_NUMBER`, `DENSE_RANK`, `LAG`,
+  `LEAD`) — a Polars dialect gap, like `h3_*`, not a GPU-compute one.
+- **Aggregate window functions are GPU-compute-only gaps**: `SUM(...) OVER
+  (...)` (and `AVG`/`COUNT` similarly) parse and run correctly on plain CPU
+  Polars, but `GPUEngine`'s collect rejects them with `NotImplementedError:
+  No support for ... UnaryFunction in groupby/rolling`. `polars-cpu` is
+  unaffected; only `polars-gpu`/`polars-gpu-cudf` reject these.
+
+Both fail loudly (`engines/sql_translate.py`'s `guard_unsupported`, no silent
+fallback), consistent with the failure policy below.
 
 **Contract:** GPU mode supports a documented subset — pre-computed `h0…h11`
-columns only, no `h3_*` functions, no window functions, no spatial. Surfaced to
-the model through the engine-aware `query` docstring so the LLM writes
-GPU-compatible SQL up front.
+columns only, no `h3_*` functions, no ranking functions, no aggregate window
+functions, no spatial. `polars-cpu` supports aggregate window functions (just
+not ranking functions — no Polars mode does). Surfaced to the model through
+the engine-aware `query` docstring so the LLM writes GPU-compatible SQL up
+front.
 
 ### 3. Failure policy — two distinct classes *(proposed; open for discussion)*
 
@@ -252,9 +263,10 @@ point where the GPU engine wins outright on this workload. Deployed at
 results in `benchmarks/README.md`, full runbook and gotchas (including a k3s
 node/`docker run -p` networking trap and an `h0`-join Cartesian-product
 footgun) in **[gpu-spark-handoff.md](gpu-spark-handoff.md)**. `docker-gpu.yml`
-still doesn't build arm64 natively — the deployed image was built locally on
-`nimbus` and pushed to `ghcr.io/boettiger-lab/mcp-data-server:gpu-arm64` by
-hand; wiring CI (native arm64 runner or buildx multi-arch) is still open.
+now builds arm64 natively (a matrix job on `ubuntu-24.04-arm`, publishing
+`:gpu-arm64*` alongside the untouched amd64 `:gpu*` tags) — the first deploy
+predated that CI wiring and pushed a locally-built image by hand instead, but
+new pushes to this branch now produce `:gpu-arm64-dev` automatically.
 
 ## PR plan
 
