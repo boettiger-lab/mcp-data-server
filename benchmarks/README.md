@@ -45,6 +45,58 @@ workloads (large multi-way joins, window functions, repeated ops on
 already-resident data) or datasets large enough to amortise the transfer — not
 tested here (host-RAM bounded, and the busy co-tenant card limits headroom).
 
+#### Standing results (2026-07, NVIDIA DGX Spark, node `nimbus`)
+
+Full runbook: [`docs/architecture/gpu-spark-handoff.md`](../docs/architecture/gpu-spark-handoff.md).
+GPU = `mcp-gpu-nimbus` (polars-gpu-cudf, GB10 Blackwell, unified memory, arm64),
+deployed via `k8s/nimbus-gpu-deployment.yaml`. Two very different results
+depending on whether the network is in the loop:
+
+**Networked** (GPU reads the remote cirrus MinIO over the internet; CPU =
+`duckdb-mcp` on cirrus reading it loopback — same fairness caveat as above,
+now compounded by an extra network hop for the GPU side):
+
+| Query | CPU (DuckDB, cirrus) | GPU (cudf-polars, Spark) | Speedup |
+|---|---|---|---|
+| carbon-sum-1part (~54MB) | 0.17s | 0.98s | 0.17× |
+| carbon-sum-4part (~216MB) | 0.32s | 9.40s | 0.03× |
+| carbon-multiagg-4part | 0.34s | 5.90s | 0.06× |
+| carbon-groupby-h7-4part (high-card) | 0.36s | 7.85s | 0.05× |
+| gbif-count-4part | 0.15s | 0.49s | 0.30× |
+
+GPU is *worse* than even cirrus's discrete-VRAM GPU here — the extra network
+hop (Spark → cirrus MinIO) more than offsets Blackwell + unified memory.
+Confirms the fairness caveat: this is not the test that isolates compute.
+
+**Direct-read** (both engines reading the same partitions staged onto the
+pod's local disk — no network, unified memory in play): the result **flips**.
+
+| Test | Data | DuckDB (local) | GPU (local) | Speedup |
+|---|---|---|---|---|
+| carbon-sum, 4 partitions | ~732MB (recompressed) | 0.40s | 0.13s | **3.1×** |
+| carbon-sum, 20 partitions | ~4.75GB (recompressed) | 2.51s | 1.10s | **2.3×** |
+| carbon×gbif join-of-aggregates (4 h0) | ~732MB + ~34MB | 0.39s | 0.09s | **4.2×** |
+
+GPU wins outright once the network is removed — confirming the hypothesis in
+[gpu-query-engine.md](../docs/architecture/gpu-query-engine.md): on cirrus's
+discrete Turing card the loss was dominated by host→VRAM transfer, and the
+Spark's unified memory (CPU+GPU share LPDDR5X) removes that cost. This is the
+first hardware point where the GPU engine wins on this workload.
+
+**Dialect gap found:** window functions are unsupported by `cudf-polars`'s
+`GPUEngine` — both `RANK() OVER (...)` and `SUM(...) OVER (...)` fail loudly
+(`SQLInterfaceError` / `NotImplementedError`, no silent fallback), consistent
+with the documented "dialect miss → fail loud" policy. Add to the GPU dialect
+subset gaps in gpu-query-engine.md alongside `h3_*` functions and spatial ops.
+
+Caveats: recompression during staging inflated file sizes (DuckDB's parquet
+writer used different compression than the source), so "~732MB"/"~4.75GB" are
+on-disk sizes at rest, not the original object sizes; row-level joins on `h0`
+alone are **not** safe to benchmark (h0 is a partition key shared by every row
+in a file, not a unique key — a naive `JOIN ... ON c.h0 = g.h0` before
+aggregating is a near-Cartesian product and will run away; aggregate each side
+by `h0` first, then join the aggregates, as done here).
+
 ### `benchmark-public.py`
 
 Runs against the public NRP S3 endpoint (`s3-west.nrp-nautilus.io`). Tests two issues:

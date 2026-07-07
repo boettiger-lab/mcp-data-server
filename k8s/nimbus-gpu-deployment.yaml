@@ -1,0 +1,114 @@
+# GPU (Polars / cudf-polars) MCP data server on the NVIDIA DGX Spark (node
+# `nimbus`, GB10 Grace Blackwell, unified memory, arm64). Sibling to the cirrus
+# GPU deploy (k8s/cirrus-gpu-*.yaml) but in the `default` namespace to match
+# this cluster's convention for nimbus-hosted services (nimbus-carbon-api,
+# vllm-nimbus-service, ...). Image is the arm64 build pushed manually to
+# ghcr.io/boettiger-lab/mcp-data-server:gpu-arm64 (docker-gpu.yml only builds
+# amd64 today; see docs/architecture/gpu-spark-handoff.md "If you want CI to
+# build the arm64 image").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-gpu-nimbus
+  namespace: default
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mcp-gpu-nimbus
+  template:
+    metadata:
+      labels:
+        app: mcp-gpu-nimbus
+    spec:
+      runtimeClassName: nvidia
+      containers:
+      - name: server
+        image: ghcr.io/boettiger-lab/mcp-data-server:gpu-arm64
+        imagePullPolicy: Always
+        env:
+        - name: QUERY_ENGINE
+          value: "polars-gpu-cudf"
+        - name: ENABLE_HEX_TILES
+          value: "false"
+        - name: ALLOW_CPU_FALLBACK
+          value: "true"
+        - name: STAC_CATALOG_URL
+          value: "https://minio.carlboettiger.info/public-data/stac/catalog.json"
+        - name: S3_ENDPOINT_URL
+          value: "https://minio.carlboettiger.info"
+        - name: S3_DEFAULT_ENDPOINT
+          value: "minio.carlboettiger.info"
+        - name: STAC_ALLOW_DEGRADED_START
+          value: "true"
+        ports:
+        - containerPort: 8000
+        resources:
+          # Unified memory node (127Gi total, GB10) — no separate host-RAM vs
+          # VRAM ceiling like cirrus's discrete RTX 8000s. 2 of 8 time-sliced
+          # GPU slots free at deploy time (qwen holds 6); take 1, leave 1.
+          requests:
+            memory: 2Gi
+            cpu: "500m"
+          limits:
+            memory: 16Gi
+            cpu: "2"
+            nvidia.com/gpu: 1
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 40
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-gpu-nimbus
+  namespace: default
+spec:
+  selector:
+    app: mcp-gpu-nimbus
+  ports:
+  - port: 80
+    targetPort: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-gpu-nimbus
+  namespace: default
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+  labels:
+    app: mcp-gpu-nimbus
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: gpu-mcp-nimbus.carlboettiger.info
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mcp-gpu-nimbus
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - gpu-mcp-nimbus.carlboettiger.info
+    secretName: mcp-gpu-nimbus-tls

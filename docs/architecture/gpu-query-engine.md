@@ -122,11 +122,19 @@ tests will live.
 Polars SQL is a narrower surface than DuckDB. Known gaps (some already handled
 by the fork): the community `h3` extension functions (`h3_cell_to_parent`,
 `h3_h3_to_string`, …) are unavailable; `APPROX_COUNT_DISTINCT` rewrites to
-`COUNT(DISTINCT …)`; no `GEOMETRY`/spatial ops.
+`COUNT(DISTINCT …)`; no `GEOMETRY`/spatial ops. Confirmed on the DGX Spark
+(RAPIDS 25.10 / cudf-polars 25.10 / polars 1.32.3, see
+[gpu-spark-handoff.md](gpu-spark-handoff.md)): **window functions are also
+unsupported** by `GPUEngine` — `RANK() OVER (...)` fails with
+`SQLInterfaceError: unsupported function 'rank'`, and even a plain
+`SUM(...) OVER (...)` fails with `NotImplementedError: No support for ...
+UnaryFunction in groupby/rolling`. Both fail loudly (no silent CPU fallback
+inside the GPU engine itself), consistent with the failure policy below.
 
 **Contract:** GPU mode supports a documented subset — pre-computed `h0…h11`
-columns only, no `h3_*` functions, no spatial. Surfaced to the model through the
-engine-aware `query` docstring so the LLM writes GPU-compatible SQL up front.
+columns only, no `h3_*` functions, no window functions, no spatial. Surfaced to
+the model through the engine-aware `query` docstring so the LLM writes
+GPU-compatible SQL up front.
 
 ### 3. Failure policy — two distinct classes *(proposed; open for discussion)*
 
@@ -214,12 +222,13 @@ node the collision probability is low and not a concern; we do not design around
 contention. (If that changes, MPS or a different sharing config would be the
 lever — out of scope here.)
 
-## Future: multi-arch / NVIDIA DGX Spark
+## Multi-arch / NVIDIA DGX Spark — done, GPU wins here
 
-A later goal is a GPU image that runs on an **NVIDIA DGX Spark** (GB10 Grace
-Blackwell). Note the DGX Spark is **aarch64** (Grace ARM CPU) with a Blackwell
-GPU (sm_12x) and unified memory — so this means an **arm64** image, not amd64
-(an x86 image will not run on it). Implications when we get there:
+A GPU image that runs on an **NVIDIA DGX Spark** (GB10 Grace Blackwell,
+node `nimbus`) was the later goal; it's now built, deployed, and benchmarked.
+Note the DGX Spark is **aarch64** (Grace ARM CPU) with a Blackwell GPU (sm_12x)
+and unified memory — so this means an **arm64** image, not amd64 (an x86 image
+will not run on it). Implications encountered:
 
 - The RAPIDS base must have an **arm64** tag *and* support Blackwell — i.e. a
   CUDA-13-class / recent RAPIDS release. Verify both before picking a tag.
@@ -233,9 +242,19 @@ GPU (sm_12x) and unified memory — so this means an **arm64** image, not amd64
 
 The RAPIDS base (`25.10-cuda12.9-py3.12`) is **already multi-arch (amd64 +
 arm64)**, so `Dockerfile.gpu` builds on an arm64 host unchanged. The DGX Spark's
-**unified memory** is the reason to test it: on cirrus the GPU loss is dominated
-by host→VRAM transfer, which unified memory largely removes. Full step-by-step
-runbook (for an agent on the Spark): **[gpu-spark-handoff.md](gpu-spark-handoff.md)**.
+**unified memory** is the reason it was worth testing: on cirrus the GPU loss
+is dominated by host→VRAM transfer, which unified memory removes. **Result:
+confirmed** — networked (reading remote MinIO over the internet) the Spark GPU
+is worse than ever, but with the network removed (data staged to local disk),
+GPU wins 2–4× over DuckDB at every scale tested. This is the first hardware
+point where the GPU engine wins outright on this workload. Deployed at
+`gpu-mcp-nimbus.carlboettiger.info` via `k8s/nimbus-gpu-deployment.yaml`; full
+results in `benchmarks/README.md`, full runbook and gotchas (including a k3s
+node/`docker run -p` networking trap and an `h0`-join Cartesian-product
+footgun) in **[gpu-spark-handoff.md](gpu-spark-handoff.md)**. `docker-gpu.yml`
+still doesn't build arm64 natively — the deployed image was built locally on
+`nimbus` and pushed to `ghcr.io/boettiger-lab/mcp-data-server:gpu-arm64` by
+hand; wiring CI (native arm64 runner or buildx multi-arch) is still open.
 
 ## PR plan
 

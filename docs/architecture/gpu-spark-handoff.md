@@ -5,6 +5,16 @@ Runbook for continuing the GPU query-engine test on an **NVIDIA DGX Spark**
 `git pull` on branch **`gpu-query-engine`**. Background/design:
 [gpu-query-engine.md](gpu-query-engine.md); prior results: `benchmarks/README.md`.
 
+**Status: run to completion (2026-07) on node `nimbus`.** Result: the
+hypothesis holds — networked, the Spark GPU is worse than ever (extra network
+hop on top of the transfer cost); but with the network removed (data staged to
+local disk), **GPU wins 2–4× over DuckDB**, the first hardware point where
+this workload favours the GPU engine. Full numbers in
+`benchmarks/README.md` ("DGX Spark, node `nimbus`"). A standing deployment
+(`k8s/nimbus-gpu-deployment.yaml`) is live at `gpu-mcp-nimbus.carlboettiger.info`.
+The step-by-step below is kept for reproducing or extending the test; each
+step notes what actually happened.
+
 ## Why we're doing this (the hypothesis)
 
 On cirrus (Quadro RTX 8000, Turing, discrete VRAM) the GPU engine
@@ -29,7 +39,8 @@ workload. Run **networked first, then direct read** (below).
   (**verified multi-arch: amd64 + arm64** — builds on the Spark unchanged),
   conda-installs `kvikio=25.10.*`, pip-installs app deps (minus polars) + s3fs.
 - `.github/workflows/docker-gpu.yml` — builds the amd64 GPU image (`:gpu-dev`,
-  `:gpu-<sha>`). arm64 is **not** wired yet — see "Building on the Spark".
+  `:gpu-<sha>`). arm64 is **not** wired yet — see "If you want CI to build the
+  arm64 image" below; the deployed image was built locally and pushed by hand.
 - `benchmarks/cpu-vs-gpu-bench.py` — the CPU-vs-GPU harness (carbon/gbif suite).
 - `k8s/cirrus-gpu-*.yaml` — the cirrus (amd64) GPU deploy manifests.
 
@@ -52,6 +63,31 @@ workload. Run **networked first, then direct read** (below).
 5. Unified memory changes the RAM story: the 32Gi host-RAM cap and
    `CUDA_VISIBLE_DEVICES` pin from the cirrus manifest are **not** needed on the
    single-GPU Spark.
+6. **The Spark (`nimbus`) is itself a k3s node — don't `docker run -p` on it.**
+   A raw `docker run -d -p 8000:8000 ...` binds the container to *both*
+   `0.0.0.0:8000` and `[::1]:8000`, but k3s/kube-proxy's own iptables rules
+   intercept new IPv4 connections to that port first, silently routing them to
+   a different (or no) backend — you'll get a generic FastAPI-shaped 404 from
+   something else entirely, while IPv6 to the same port reaches your container
+   fine (`curl -4` vs `curl -6` will disagree). Deploy as a real Kubernetes
+   Deployment/Service instead — see `k8s/nimbus-gpu-deployment.yaml`, following
+   the existing `nimbus-carbon-api` / `vllm-nimbus` pattern (namespace
+   `default`, `runtimeClassName: nvidia`, `<app>-nimbus.carlboettiger.info`
+   ingress). Since `docker-gpu.yml` doesn't build arm64 yet (gotcha above),
+   push the locally-built image to ghcr yourself — this box is already
+   `docker login`'d to `ghcr.io`:
+   `docker tag mcp-data-server:gpu-arm64 ghcr.io/boettiger-lab/mcp-data-server:gpu-arm64 && docker push ...`.
+7. **`h0` is a partition key, not a row-level unique key.** Every row in a
+   given `h0=<id>/data_0.parquet` file shares the same `h0`. A join like
+   `... JOIN ... ON c.h0 = g.h0` **before aggregating** is a near-Cartesian
+   product (every carbon row × every gbif row sharing that `h0`) and will run
+   away — DuckDB's own progress bar climbing past 20+ minutes with no sign of
+   finishing is the tell. Aggregate each side down to one row per `h0` first
+   (`WITH cc AS (SELECT h0, SUM(...) FROM ... GROUP BY h0), gg AS (...) SELECT
+   ... FROM cc JOIN gg ON cc.h0 = gg.h0`), *then* join. If you do launch a
+   runaway query via `kubectl exec`, killing the local `kubectl exec` process
+   does **not** kill the remote process in the pod — `kubectl exec ... ps aux`
+   and `kill -9` the PID directly, or the pod will keep burning CPU/GPU memory.
 
 ## Step 1 — build on the Spark
 
@@ -78,58 +114,68 @@ If `GPUEngine(raise_on_fail=True)` succeeds, Blackwell is good. Also confirm a
 bare `SELECT COUNT(*)` via SQLContext returns 1 row (polars 1.32 fixed the 1.21
 bug, but re-verify the shipped version).
 
-## Step 3 — networked case (data stays on cirrus MinIO)
+## Step 3 — networked case (data stays on cirrus MinIO) — done
 
-Run the server pointed at the **public** MinIO, GPU mode, fallback OFF:
+Deployed via `k8s/nimbus-gpu-deployment.yaml` (Deployment + Service + Ingress,
+namespace `default`, per gotcha 6 above — **not** a raw `docker run -p`):
 
 ```bash
-docker run -d --gpus all -p 8000:8000 --name gpu-spark \
-  -e QUERY_ENGINE=polars-gpu-cudf \
-  -e ENABLE_HEX_TILES=false \
-  -e ALLOW_CPU_FALLBACK=false \
-  -e STAC_ALLOW_DEGRADED_START=true \
-  -e STAC_CATALOG_URL=https://minio.carlboettiger.info/public-data/stac/catalog.json \
-  -e S3_ENDPOINT_URL=https://minio.carlboettiger.info \
-  -e S3_DEFAULT_ENDPOINT=minio.carlboettiger.info \
-  mcp-data-server:gpu-arm64
-# check: curl -s localhost:8000/healthz ; docker logs gpu-spark | grep -i engine
+docker tag mcp-data-server:gpu-arm64 ghcr.io/boettiger-lab/mcp-data-server:gpu-arm64
+docker push ghcr.io/boettiger-lab/mcp-data-server:gpu-arm64   # this box is already `docker login`'d to ghcr.io
+kubectl apply -f k8s/nimbus-gpu-deployment.yaml
+kubectl wait --for=condition=Ready pod -n default -l app=mcp-gpu-nimbus --timeout=270s
+curl -s https://gpu-mcp-nimbus.carlboettiger.info/healthz
 ```
 
-Then run the harness (CPU = cirrus's public DuckDB server; GPU = this Spark):
+Then the harness (CPU = cirrus's public DuckDB server; GPU = this Spark):
 
 ```bash
 BENCH_CPU_URL=https://duckdb-mcp.carlboettiger.info \
-BENCH_GPU_URL=http://localhost:8000 \
+BENCH_GPU_URL=https://gpu-mcp-nimbus.carlboettiger.info \
 BENCH_REPS=3 uv run --with requests benchmarks/cpu-vs-gpu-bench.py
 ```
 
-**Fairness caveat:** the Spark reads MinIO over the network while cirrus's CPU
-server reads it loopback — so the Spark GPU is *handicapped on read* here. If it
-still wins (or ties), that's a strong signal; if it loses, the direct-read case
-isolates compute.
+**Result: GPU lost badly** — worse than cirrus's own discrete-VRAM GPU (see
+`benchmarks/README.md` "DGX Spark" networked table: 0.03–0.30× speedup, i.e.
+3–33× *slower* than CPU). **Fairness caveat confirmed as decisive, not
+marginal:** the Spark reads MinIO over the public internet while cirrus's CPU
+server reads it loopback — the extra network hop dominates everything else.
+This is not the test that isolates compute; proceed to Step 4.
 
-## Step 4 — direct-read case (remove the network)
+## Step 4 — direct-read case (remove the network) — done
 
-Stage the carbon partitions onto the Spark's local disk, then benchmark local
-file reads (this is where unified memory + no-network should most favour the GPU):
+Staged carbon (and gbif, for the join case) partitions onto the pod's local
+disk via `kubectl exec`, then timed DuckDB vs `GPUEngine` reading the same
+local files — no network, unified memory in play:
 
 ```bash
-# inside a container or a python env with s3fs+polars+duckdb+cudf-polars:
-#   download s3://public-carbon/irrecoverable-carbon-2024/hex/h0=<id>/data_0.parquet
-#   (a few partitions, ~54MB each) to /tmp/carbon/, then time the same
-#   GROUP BY h5, SUM(carbon) with DuckDB vs pl.read_parquet(local)+GPUEngine.
+kubectl exec -n default deploy/mcp-gpu-nimbus -- python3 -c "
+import duckdb, os
+c = duckdb.connect()
+c.execute(\"INSTALL httpfs; LOAD httpfs; SET s3_endpoint='minio.carlboettiger.info'; SET s3_use_ssl=true; SET s3_url_style='path';\")
+# COPY (SELECT * FROM read_parquet('s3://public-carbon/irrecoverable-carbon-2024/hex/h0=<id>/data_0.parquet')) TO '/tmp/carbon/<id>.parquet' (FORMAT PARQUET)
+"
+# then, per engine, GROUP BY h5, SUM(carbon) over read_parquet('/tmp/carbon/*.parquet')
+# (DuckDB) vs pl.scan_parquet(...).collect(engine=GPUEngine(raise_on_fail=True)) (GPU).
 ```
-Compare against the cirrus local-read numbers in `benchmarks/README.md`
-(DuckDB 0.17s vs GPU 1.27s for 216MB). The question: does unified memory close
-or flip that gap?
 
-## Step 5 — record results
+**Result: flips completely.** GPU wins 2–4× at every scale tested (4 and 20
+partitions, plus a join-of-aggregates) — see `benchmarks/README.md` "DGX
+Spark" direct-read table. This confirms the hypothesis: unified memory removes
+the host→VRAM transfer that dominated the loss on cirrus's discrete Turing
+card. Also surfaced a real dialect gap along the way: window functions
+(`RANK()`, `SUM() OVER`) are unsupported by `GPUEngine` and fail loudly — see
+gotcha 7 above for the `h0`-join pitfall hit while building that test case.
 
-Append a "DGX Spark" results block to `benchmarks/README.md` (same table shape),
-note the RAPIDS/polars/cudf versions and whether it was networked or direct, and
-commit on `gpu-query-engine`. If GPU wins on the Spark, that reframes the whole
-effort (a Blackwell/unified-memory deploy target); if it still loses, the
-"DuckDB wins for this workload" conclusion is robust across three hardware points.
+## Step 5 — record results — done
+
+Results are recorded in `benchmarks/README.md` ("DGX Spark, node `nimbus`")
+and summarized at the top of this file. **GPU wins on the Spark** — this
+reframes the effort: a Blackwell/unified-memory deploy target is a genuine win
+for this workload, not just a discrete-GPU dead end. The standing deployment
+(`gpu-mcp-nimbus.carlboettiger.info`) stays up for further testing; the
+window-function dialect gap should be added to gpu-query-engine.md's
+documented GPU-mode SQL subset.
 
 ## If you want CI to build the arm64 image
 
