@@ -17,12 +17,19 @@ FROM nvcr.io/nvidia/rapidsai/base:25.10-cuda12.9-py3.12
 
 WORKDIR /app
 
+# GPU-direct S3 I/O for polars-gpu-cudf: kvikio (conda, matched to the base's
+# CUDA/cudf 25.10 build — pip kvikio can mismatch). The polars-gpu path doesn't
+# need it; the cudf reader falls back to the host read if it's ever absent.
+RUN conda install -n base -c rapidsai -c conda-forge -y "kvikio=25.10.*" \
+    && conda clean -afy
+
 # App deps, MINUS polars: the base image's polars is version-paired with its
 # cudf-polars build, so reinstalling/upgrading polars could break GPU execution.
-# Everything else (duckdb, mcp, pystac, …) installs on top of the conda base.
-COPY requirements.txt .
+# Everything else (duckdb, mcp, pystac, …) plus the GPU extras (s3fs) install on
+# top of the conda base.
+COPY requirements.txt requirements-gpu.txt ./
 RUN grep -v -i '^polars' requirements.txt > /tmp/reqs.txt \
-    && pip install --no-cache-dir -r /tmp/reqs.txt
+    && pip install --no-cache-dir -r /tmp/reqs.txt -r requirements-gpu.txt
 
 # Pre-install DuckDB extensions so the server starts offline-capable — DuckDB is
 # still used for the STAC/tile paths and get_isolated_db even when the query tool
@@ -30,6 +37,11 @@ RUN grep -v -i '^polars' requirements.txt > /tmp/reqs.txt \
 RUN python -c "import duckdb; c = duckdb.connect(); c.sql('INSTALL httpfs; INSTALL spatial; INSTALL h3 FROM community')"
 
 COPY . /app
+
+# kvikio tuning for the cudf reader — set_num_threads()/set_task_size() are
+# no-ops in some kvikio builds, so the env vars are authoritative and must be
+# set before library init. Deployments may override.
+ENV KVIKIO_NTHREADS=64 KVIKIO_TASK_SIZE=16777216
 
 ARG APP_VERSION=dev
 ARG GIT_SHA=unknown

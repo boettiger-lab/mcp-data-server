@@ -1,0 +1,8 @@
+# GPU-only extras for QUERY_ENGINE=polars-gpu-cudf, installed ONLY by
+# Dockerfile.gpu on top of the RAPIDS base (which already ships polars,
+# cudf-polars, cudf, rmm). Never installed in the base/CPU image.
+#
+# kvikio (GPU-direct S3 I/O) is installed via conda in Dockerfile.gpu so it is
+# matched to the base image's exact CUDA build — pip kvikio can mismatch. s3fs
+# is used by the cudf reader only for glob/listing + file sizes (pip is fine).
+s3fs

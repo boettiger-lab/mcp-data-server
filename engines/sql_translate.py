@@ -20,6 +20,7 @@ loud-subset contract are new here. GPU-only I/O (kvikio) lands in PR 2.
 """
 import os
 import re
+import sys
 
 import polars as pl
 
@@ -194,27 +195,147 @@ def _hive(path: str) -> bool:
     return "*" in path or "h0=" in path
 
 
-def _lazyframe_for(path: str, s3: S3Request, want_gpu: bool,
-                   use_cudf_io: bool) -> "pl.LazyFrame":
+# ---------------------------------------------------------------------------
+# gpu-cudf reader: kvikio GPU-direct S3 I/O (adapted from the reference fork)
+# ---------------------------------------------------------------------------
+# Threshold below which kvikio's per-connection overhead loses to Polars' Rust
+# object_store; small files read via Polars instead.
+_KVIKIO_MIN_AVG_BYTES = 5 * 1024 * 1024
+_H0_PATH_RE = re.compile(r"/h0=(\d+)/")
+
+
+def _filter_files_by_h0(files: list[str], h0_values: frozenset[int]) -> list[str]:
+    """Keep files whose /h0=N/ path component is in h0_values (DPP); files with
+    no h0= component are always kept (non-partitioned)."""
+    out = []
+    for f in files:
+        m = _H0_PATH_RE.search(f)
+        if m:
+            if int(m.group(1)) in h0_values:
+                out.append(f)
+        else:
+            out.append(f)
+    return out
+
+
+def _s3fs_from_options(storage_options: dict):
+    import s3fs
+    endpoint = storage_options["endpoint_url"]
+    if storage_options.get("skip_signature") == "true":
+        return s3fs.S3FileSystem(anon=True, endpoint_url=endpoint)
+    return s3fs.S3FileSystem(
+        key=storage_options.get("aws_access_key_id"),
+        secret=storage_options.get("aws_secret_access_key"),
+        endpoint_url=endpoint,
+    )
+
+
+def _kvikio_download_one(args: tuple) -> tuple[bytes, int]:
+    """Download one parquet file via kvikio pread (parallel chunked HTTP)."""
+    import kvikio
+    url, h0 = args
+    f = kvikio.RemoteFile.open_http(url)
+    n = f.nbytes()
+    buf = bytearray(n)
+    f.pread(buf, size=n, file_offset=0).get()
+    return bytes(buf), h0
+
+
+def _read_with_h0(df: "pl.DataFrame", source: str) -> "pl.DataFrame":
+    """Inject the h0 hive-partition column from the file path if not present."""
+    m = _H0_PATH_RE.search(source)
+    if m and "h0" not in df.columns:
+        return df.with_columns(pl.lit(int(m.group(1))).alias("h0"))
+    return df
+
+
+def _scan_cudf(path: str, storage_options: dict | None,
+               h0_filter: frozenset[int] | None) -> "pl.LazyFrame":
+    """GPU-direct read for gpu-cudf mode: glob → DPP → kvikio pread (large files)
+    or Polars (small) → concat → lazy, for GPUEngine compute.
+
+    kvikio downloads bytes on the host (parallel chunked HTTP), then Polars parses
+    into CPU RAM (NOT cudf.read_parquet, which would materialise the whole table
+    in VRAM and OOM). GPU compute runs on the collected LazyFrame. Any failure —
+    kvikio/s3fs missing, a private (signed) bucket kvikio's open_http can't read,
+    a glob miss — falls back to the plain host read so gpu-cudf degrades to gpu.
+    """
+    if storage_options is None:
+        # Local file: nothing to accelerate.
+        return pl.read_parquet(path, hive_partitioning=_hive(path)).lazy()
+    try:
+        endpoint = storage_options["endpoint_url"].rstrip("/")
+        fs = _s3fs_from_options(storage_options)
+        base = path.removeprefix("s3://").rstrip("/").rstrip("*").rstrip("/")
+        raw = fs.glob(base + "/**/*.parquet") or fs.glob(base + "/*.parquet")
+        if not raw and fs.exists(path.removeprefix("s3://")):
+            raw = [path.removeprefix("s3://")]
+        if not raw:
+            raise FileNotFoundError(f"no parquet at {path}")
+        files = [f"s3://{f}" for f in raw]
+
+        if h0_filter:
+            before = len(files)
+            files = _filter_files_by_h0(files, h0_filter)
+            print(f"  [cudf DPP] {path}: {before} → {len(files)} files", file=sys.stderr)
+            if not files:
+                return pl.LazyFrame()
+
+        sizes = [fs.info(f.removeprefix("s3://"))["size"] for f in files]
+        avg = (sum(sizes) / len(sizes)) if sizes else 0
+
+        if avg < _KVIKIO_MIN_AVG_BYTES:
+            # Small files: kvikio overhead dominates — read via Polars per file.
+            dfs = [_read_with_h0(pl.read_parquet(f, storage_options=storage_options), f)
+                   for f in files]
+            return pl.concat(dfs, how="diagonal_relaxed").lazy()
+
+        # Large files: kvikio parallel pread → BytesIO → Polars parse (CPU RAM).
+        import concurrent.futures
+        import io
+        h0s = [int(m.group(1)) if (m := _H0_PATH_RE.search(f)) else 0 for f in files]
+        urls = [f"{endpoint}/{f.removeprefix('s3://')}" for f in files]
+        workers = min(len(urls), int(os.environ.get("KVIKIO_DOWNLOAD_WORKERS", "64")))
+        print(f"  [kvikio] {path}: {len(urls)} files, avg {avg/1e6:.0f}MB, {workers} workers",
+              file=sys.stderr)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_kvikio_download_one, zip(urls, h0s)))
+        dfs = []
+        for raw_bytes, h0 in results:
+            d = pl.read_parquet(io.BytesIO(raw_bytes))
+            if "h0" not in d.columns:
+                d = d.with_columns(pl.lit(h0).alias("h0"))
+            dfs.append(d)
+        return pl.concat(dfs, how="diagonal_relaxed").lazy()
+
+    except Exception as e:
+        print(f"cuDF I/O failed for {path} ({e}); falling back to host read",
+              file=sys.stderr)
+        return pl.read_parquet(path, hive_partitioning=_hive(path),
+                               storage_options=storage_options).lazy()
+
+
+def _lazyframe_for(path: str, s3: S3Request, want_gpu: bool, use_cudf_io: bool,
+                   h0_filter: frozenset[int] | None) -> "pl.LazyFrame":
     """Build the LazyFrame for one read_parquet path, choosing the reader by mode.
 
     - CPU: lazy `scan_parquet` — streaming with projection/predicate pushdown.
     - GPU: cudf-polars cannot read a remote `s3://` scan itself (its GPU/KvikIO
-      reader rejects the scheme, failing the whole collect), so read the parquet
-      into host memory on CPU via object_store, then let GPUEngine compute on it.
-      This is the reference fork's pattern, confirmed necessary on RAPIDS 25.10.
-    - use_cudf_io (gpu-cudf): the kvikio GPU-direct reader (pread → BytesIO →
-      read_parquet, with h0 DPP) is a later step; until it lands, gpu-cudf uses
-      the same host read as gpu, so it is correct (just not yet I/O-accelerated).
+      reader rejects the scheme, failing the collect), so read the parquet into
+      host memory on CPU, then let GPUEngine compute on it. Confirmed necessary
+      on RAPIDS 25.10.
+    - gpu-cudf: kvikio GPU-direct read with explicit h0 partition pruning
+      (_scan_cudf), which falls back to the host read on any failure.
     """
-    kwargs = {"hive_partitioning": _hive(path)}
     storage_options = resolve_storage_options(path, s3)
+
+    if want_gpu and use_cudf_io:
+        return _scan_cudf(path, storage_options, h0_filter)
+
+    kwargs = {"hive_partitioning": _hive(path)}
     if storage_options is not None:
         kwargs["storage_options"] = storage_options
-
     if want_gpu:
-        # Eager host read, then .lazy() so GPUEngine runs the compute on GPU
-        # without attempting a remote read it can't do.
         return pl.read_parquet(path, **kwargs).lazy()
     return pl.scan_parquet(path, **kwargs)
 
@@ -233,10 +354,14 @@ def build_context(
     """
     guard_unsupported(sql)
 
+    # Explicit partition pruning only matters for the cudf-io reader (the lazy
+    # Polars path prunes for free); extract h0 predicates once for it.
+    h0_filter = extract_h0_predicates(sql) if (want_gpu and use_cudf_io) else None
+
     path_aliases = extract_parquet_sources(sql)
     ctx = pl.SQLContext()
     for path, alias in path_aliases.items():
-        ctx.register(alias, _lazyframe_for(path, s3, want_gpu, use_cudf_io))
+        ctx.register(alias, _lazyframe_for(path, s3, want_gpu, use_cudf_io, h0_filter))
 
     rewritten = substitute_aliases(sql, path_aliases)
     rewritten = rewrite_functions(rewritten)

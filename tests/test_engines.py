@@ -69,6 +69,20 @@ class TestSqlTranslate:
     def test_extract_h0_predicates(self, sql, expected):
         assert sql_translate.extract_h0_predicates(sql) == expected
 
+    def test_filter_files_by_h0_dpp(self):
+        files = [
+            "s3://b/hex/h0=1/data_0.parquet",
+            "s3://b/hex/h0=2/data_0.parquet",
+            "s3://b/hex/h0=3/data_0.parquet",
+            "s3://b/lookup.parquet",  # no h0= component → always kept
+        ]
+        kept = sql_translate._filter_files_by_h0(files, frozenset({1, 3}))
+        assert kept == [
+            "s3://b/hex/h0=1/data_0.parquet",
+            "s3://b/hex/h0=3/data_0.parquet",
+            "s3://b/lookup.parquet",
+        ]
+
 
 # ---------------------------------------------------------------------------
 # resolve_storage_options: per-path S3 routing
