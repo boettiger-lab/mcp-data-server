@@ -127,6 +127,18 @@ from s3config import (
 
 @contextmanager
 def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None):
+    # An S3 key without its secret (or vice versa) can't authenticate. Rather
+    # than silently downgrade to anonymous — which yields a confusing 403 on a
+    # private bucket, or ignores the key entirely with no endpoint — fail fast
+    # with the actual cause (#285). Both present = credentialed; neither present
+    # = anonymous (optionally with s3_endpoint for a public mirror).
+    if bool(s3_key) != bool(s3_secret):
+        missing = "s3_secret" if s3_key else "s3_key"
+        raise ValueError(
+            f"{missing} is required: pass both s3_key and s3_secret together for "
+            f"a private bucket, or neither (optionally with s3_endpoint) for an "
+            f"anonymous source."
+        )
     conn = duckdb.connect(database=":memory:")
     try:
         for stmt in (s.strip() for s in SETUP_SQL.split(";") if s.strip()):
