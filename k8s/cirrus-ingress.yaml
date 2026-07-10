@@ -1,0 +1,33 @@
+# NOTE: assumes cert-manager (letsencrypt-production ClusterIssuer) and
+# external-dns (Cloudflare, carlboettiger.info zone) are configured on cirrus.
+# external-dns provisions the A record from spec.rules.host; cert-manager mints
+# the TLS cert into mcp-server-duckdb-tls. See ../../k8s (traefik/, cert-manager/,
+# external-dns/) in the boettiger-lab/k8s repo.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-server-duckdb-ingress
+  namespace: mcp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+    # <namespace>-<name>@kubernetescrd — see cirrus-middleware.yaml.
+    traefik.ingress.kubernetes.io/router.middlewares: mcp-mcp-cors@kubernetescrd
+    traefik.ingress.kubernetes.io/service.servertransport: mcp-mcp-long-timeout@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: duckdb-mcp.carlboettiger.info
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-server-duckdb
+                port:
+                  number: 8000
+  tls:
+    - hosts:
+        - duckdb-mcp.carlboettiger.info
+      secretName: mcp-server-duckdb-tls

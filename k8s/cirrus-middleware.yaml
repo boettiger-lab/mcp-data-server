@@ -1,0 +1,51 @@
+# Traefik CRDs backing the cirrus ingress.
+#
+# On NRP the CORS policy and long timeouts are HAProxy ingress annotations;
+# Traefik expresses the same behaviour as first-class CRDs referenced from the
+# ingress via `router.middlewares` / `service.servertransport`.
+---
+# CORS — mirrors the HAProxy cors-* annotations from ingress.yaml so browser MCP
+# clients (and the mcp-session-id header) keep working through Traefik.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mcp-cors
+  namespace: mcp
+spec:
+  headers:
+    accessControlAllowMethods:
+      - GET
+      - POST
+      - OPTIONS
+    accessControlAllowHeaders:
+      - DNT
+      - X-CustomHeader
+      - Keep-Alive
+      - User-Agent
+      - X-Requested-With
+      - If-Modified-Since
+      - Cache-Control
+      - Content-Type
+      - Authorization
+      - mcp-session-id
+    accessControlAllowOriginList:
+      - "*"
+    accessControlAllowCredentials: true
+    accessControlMaxAge: 86400
+    addVaryHeader: true
+---
+# Long backend timeouts for slow DuckDB queries and long-lived SSE streams — the
+# Traefik equivalent of the timeout-server/timeout-tunnel annotations. This is
+# the same ServersTransport gpu-mcp already uses in this namespace; declared here
+# so the recipe is self-contained and re-applies idempotently.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: mcp-long-timeout
+  namespace: mcp
+spec:
+  forwardingTimeouts:
+    dialTimeout: 30s
+    idleConnTimeout: 600s
+    readIdleTimeout: 600s
+    responseHeaderTimeout: 600s
