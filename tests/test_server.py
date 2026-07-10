@@ -232,14 +232,15 @@ class TestS3Credentials:
             names = [r[0] for r in secrets]
             assert "client_s3" not in names
 
-    def test_partial_credentials_no_secret(self):
-        """Supplying only key or only secret does not create a secret (both required)."""
-        with get_isolated_db(s3_key="AKID") as conn:
-            names = [r[0] for r in conn.sql("SELECT name FROM duckdb_secrets()").fetchall()]
-            assert "client_s3" not in names
-        with get_isolated_db(s3_secret="SECRET") as conn:
-            names = [r[0] for r in conn.sql("SELECT name FROM duckdb_secrets()").fetchall()]
-            assert "client_s3" not in names
+    def test_partial_credentials_raise(self):
+        """Supplying only key or only secret is a clear error, not a silent
+        anonymous downgrade (#285) — both are required together."""
+        with pytest.raises(ValueError, match="s3_secret is required"):
+            with get_isolated_db(s3_key="AKID"):
+                pass
+        with pytest.raises(ValueError, match="s3_key is required"):
+            with get_isolated_db(s3_secret="SECRET"):
+                pass
 
     def test_ssl_disabled_for_rook_endpoint(self):
         """Rook/Ceph internal endpoints get USE_SSL false."""
@@ -296,12 +297,13 @@ class TestAnonymousBYOBucket:
         result = query("SELECT 7 as n", s3_endpoint="minio.example.org", s3_scope="s3://public-")
         assert "7" in result
 
-    def test_endpoint_with_partial_creds_is_anonymous(self):
-        """s3_endpoint + only a key (no secret) still creates a secret (treated anonymous),
-        rather than injecting a half-credential or erroring."""
-        with get_isolated_db(s3_endpoint="minio.example.org", s3_key="ONLY_KEY") as conn:
-            names = [r[0] for r in conn.sql("SELECT name FROM duckdb_secrets()").fetchall()]
-            assert "client_s3" in names
+    def test_endpoint_with_partial_creds_raises(self):
+        """s3_endpoint + only a key (no secret) is an error, not a silent
+        anonymous downgrade (#285). A half-credential can't authenticate, so a
+        private read would otherwise fail with a confusing 403 instead."""
+        with pytest.raises(ValueError, match="s3_secret is required"):
+            with get_isolated_db(s3_endpoint="minio.example.org", s3_key="ONLY_KEY"):
+                pass
 
     def test_no_endpoint_no_creds_still_no_secret(self):
         """The anonymous path must not fire without an endpoint (no accidental secret)."""
