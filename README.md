@@ -222,7 +222,7 @@ If every pod's imageID matches the pinned digest, prod is current and consistent
 ## Query Optimization Tips
 
 1. **Always include h0 in joins** - Enables partition pruning for 5-20x speedup
-2. **Use APPROX_COUNT_DISTINCT(h8)** - Fast area calculations with H3 hexagons
+2. **Compute areas with `SUM(h3_cell_area(h8, 'km^2'))`** - Exact per-cell area over distinct cells (H3 cells are not equal-area)
 3. **Filter small tables first** - Create CTEs to reduce join cardinality
 4. **Set THREADS=100** - Parallel S3 reads are I/O bound, not CPU bound
 5. **Enable object cache** - Reduces redundant S3 requests
@@ -233,10 +233,10 @@ See [query-optimization.md](query-optimization.md) for detailed guidance.
 
 All datasets use Uber's [H3 hexagonal grid system](https://h3geo.org) for spatial indexing:
 
-- Resolution 8 (h8): ~0.737 km² per hex
+- Resolution 8 (h8): ~0.74 km² per hex (nominal; true cell area varies ~0.55–0.82 km²)
 - Resolution 0-4 (h0-h4): Coarser resolutions for global analysis
 - Use `h3_cell_to_parent()` to join datasets at different resolutions
-- Use `APPROX_COUNT_DISTINCT(h8) * 0.737327598` to calculate areas in km²
+- Compute areas with `SUM(h3_cell_area(h8, 'km^2'))` over distinct cells — exact at any resolution. Multiplying a hex count by a nominal per-cell constant is a global-average approximation only, suitable for unscoped global aggregates. See [h3-guide.md](h3-guide.md).
 
 ## Testing
 

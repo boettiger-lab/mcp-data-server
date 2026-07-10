@@ -34,12 +34,24 @@ All datasets are indexed using [Uber's H3 hexagonal grid system](https://h3geo.o
 
 ### Area calculations
 
+H3 cells are **not** equal-area — true cell area varies with latitude and
+icosahedral distortion (res-8 cells range ~0.55–0.82 km²), so a nominal
+per-resolution constant introduces a systematic error (~6% for California).
+For a region, feature, or per-group area, sum the **exact** per-cell area over
+**distinct** cells:
+
 ```sql
--- Area in km² using H3 hex counts
-SELECT APPROX_COUNT_DISTINCT(h8) * 0.737327598 AS area_km2
-FROM read_parquet('s3://...')
-WHERE ...
+-- Exact area in km² (the proper method)
+SELECT SUM(h3_cell_area(h8, 'km^2')) AS area_km2
+FROM (SELECT DISTINCT h8, h0 FROM read_parquet('s3://...') WHERE ...);
 ```
+
+Only for unscoped global aggregates over millions of cells — where
+materializing every distinct cell would defeat the fast approximate path — fall
+back to multiplying an approximate count by the nominal constant
+(`APPROX_COUNT_DISTINCT(h8) * 0.737327598`, accurate to ~1–2% globally).
+
+See [h3-guide.md](../../h3-guide.md) for the full area guidance.
 
 ### Cross-dataset joins
 
