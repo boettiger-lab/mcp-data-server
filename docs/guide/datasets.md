@@ -51,7 +51,7 @@ materializing every distinct cell would defeat the fast approximate path — fal
 back to multiplying an approximate count by the nominal constant
 (`APPROX_COUNT_DISTINCT(h8) * 0.737327598`, accurate to ~1–2% globally).
 
-See [h3-guide.md](../../h3-guide.md) for the full area guidance.
+See [`h3-guide.md`](https://github.com/boettiger-lab/mcp-data-server/blob/main/h3-guide.md) for the full area guidance.
 
 ### Cross-dataset joins
 
