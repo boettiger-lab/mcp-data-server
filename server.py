@@ -123,6 +123,14 @@ from s3config import (
     source_secret_sql,
     sql_quote as _sql_quote,
 )
+from dbconfig import duckdb_memory_limit, memory_limit_sql
+
+# Cap DuckDB's memory at ~80% of the pod's limit so an oversized query spills
+# instead of OOM-killing the pod (#270); no-op unless POD_MEMORY_LIMIT /
+# DUCKDB_MEMORY_LIMIT is set. Logged once at boot for ops visibility.
+_MEMORY_LIMIT = duckdb_memory_limit()
+if _MEMORY_LIMIT:
+    print(f"DuckDB memory_limit = {_MEMORY_LIMIT} (spill before cgroup OOM)", file=sys.stderr)
 
 
 @contextmanager
@@ -146,6 +154,15 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
                 conn.sql(stmt)
             except Exception as e:
                 print(f"⚠️ Setup statement skipped: {stmt!r}: {e}", file=sys.stderr)
+        # Bound memory to the pod so a big aggregate spills instead of OOM-killing
+        # the replica (#270). Not part of SETUP_SQL: the value is deployment-derived
+        # (dbconfig reads POD_MEMORY_LIMIT/DUCKDB_MEMORY_LIMIT), not model guidance.
+        mem_sql = memory_limit_sql()
+        if mem_sql:
+            try:
+                conn.sql(mem_sql)
+            except Exception as e:
+                print(f"⚠️ memory_limit setup skipped: {mem_sql!r}: {e}", file=sys.stderr)
         # Prefix-scoped secrets for every registry source (#264) — e.g. the
         # anonymous source.coop mirror. Scoped, so they coexist deterministically
         # with both the default `s3` secret and any client_s3 below (longest-

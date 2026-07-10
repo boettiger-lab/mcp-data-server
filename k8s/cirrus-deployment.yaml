@@ -48,6 +48,14 @@ spec:
         # MinIO answers; known/inline datasets still work meanwhile (#260).
         - name: STAC_ALLOW_DEGRADED_START
           value: "true"
+        # Pod's cgroup memory limit → DuckDB memory_limit (~80%), so an oversized
+        # query spills to /tmp instead of OOM-killing the replica and every
+        # co-tenant query on it (#270).
+        - name: POD_MEMORY_LIMIT
+          valueFrom:
+            resourceFieldRef:
+              containerName: server
+              resource: limits.memory
         resources:
           # Small requests so the pod schedules easily on the shared cirrus node;
           # limits stay generous so large DuckDB queries can still burst. cirrus

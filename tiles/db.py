@@ -5,10 +5,12 @@ tile requests never take user credentials, so the connection can be long-lived
 and shared across requests via con.cursor() for per-request isolation.
 """
 import os
+import sys
 
 import duckdb
 
 from s3config import default_s3_secret_sql, source_secret_sql
+from dbconfig import memory_limit_sql
 
 
 def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnection:
@@ -39,6 +41,17 @@ def build_tile_connection(threads: int | None = None) -> duckdb.DuckDBPyConnecti
     con.sql("SET preserve_insertion_order=false")
     con.sql("SET enable_object_cache=true")
     con.sql("SET temp_directory='/tmp'")
+
+    # Bound memory to the pod so a heavy pyramid build spills instead of OOM-killing
+    # the replica (#270); no-op unless POD_MEMORY_LIMIT/DUCKDB_MEMORY_LIMIT is set.
+    # Guarded because the value can come from an operator override (DUCKDB_MEMORY_LIMIT)
+    # — a malformed one shouldn't take down tile serving, just fall back to the default.
+    mem_sql = memory_limit_sql()
+    if mem_sql:
+        try:
+            con.sql(mem_sql)
+        except Exception as e:
+            print(f"⚠️ tile memory_limit setup skipped: {mem_sql!r}: {e}", file=sys.stderr)
 
     # httpfs read tuning. NOTE: the "~126 files per h0 / ~923 files" figure behind
     # the original #190 characterization was a since-fixed GBIF over-sharding bug,
