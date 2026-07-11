@@ -36,6 +36,14 @@ spec:
         # Dev-only for now; prod keeps the default fail-fast until proven out.
         - name: STAC_ALLOW_DEGRADED_START
           value: "true"
+        # Pod's cgroup memory limit → DuckDB memory_limit (~80%), so an oversized
+        # query spills to /tmp instead of OOM-killing the replica and every
+        # co-tenant query on it (#270).
+        - name: POD_MEMORY_LIMIT
+          valueFrom:
+            resourceFieldRef:
+              containerName: server
+              resource: limits.memory
         resources:
           # Requests intentionally kept small (≤2 GiB memory, ≤1 CPU) to land in
           # NRP's "Ignored" bucket for utilization violations. Limits stay high so

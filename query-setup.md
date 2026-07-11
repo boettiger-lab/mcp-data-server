@@ -35,6 +35,14 @@ fallback for the public source.coop mirror: DuckDB routes
 tools as `s3://us-west-2.opendata.source.coop/cboettig/<dataset>/...`) when the
 primary Ceph endpoint is unavailable.
 
+**Server-applied memory limit.** Beyond the settings above, the server issues
+`SET memory_limit` per connection, sized to ~80% of the pod's memory limit
+(`POD_MEMORY_LIMIT`, wired from the container's cgroup limit via the k8s Downward
+API; override with `DUCKDB_MEMORY_LIMIT`, e.g. `120GB` / `160GiB` / `-1`). An
+oversized query then **spills to `temp_directory` instead of getting OOM-killed**,
+which would otherwise take out every co-tenant query on the replica. It is applied
+by the server, not written into query SQL — do not emit it yourself. (#270)
+
 **Note:** On the default NRP deployment, the server's `s3` secret points at the internal endpoint `rook-ceph-rgw-nautiluss3.rook` (only reachable from inside the k8s cluster; the public external endpoint is `s3-west.nrp-nautilus.io`, which needs `USE_SSL true` and `SET THREADS=2`). A deployment can repoint this default at another backend (e.g. a MinIO mirror) via `S3_DEFAULT_ENDPOINT` without any query changes.
 
 You must read parquet datasets with from S3 using read_parquet().  There are no local tables.
