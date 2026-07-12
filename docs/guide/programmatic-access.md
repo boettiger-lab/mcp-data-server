@@ -48,7 +48,7 @@ asyncio.run(main())
 
 ### R
 
-There is no R MCP client library yet. The server runs in stateless mode, so you can hit the JSON-RPC endpoint directly with `httr2`. Responses arrive as server-sent events (SSE).
+No R MCP client speaks HTTP directly ([`mcptools`](https://posit-dev.github.io/mcptools/) is stdio-only — see the [ellmer + mcptools](#r-ellmer-mcptools) section below). The server runs in stateless mode, so you can hit the JSON-RPC endpoint directly with `httr2`. Responses arrive as server-sent events (SSE).
 
 ```r
 library(httr2)
@@ -104,6 +104,98 @@ for (block in resp$result$content) {
 }
 ```
 
+### R — dplyr / dbplyr
+
+If you'd rather write queries in `dplyr` than SQL, you don't need the MCP server at all: point a **local** DuckDB at the public [source.coop](https://source.coop) mirror of the same data and let `dbplyr` compile your `dplyr` verbs to DuckDB SQL. The mirror lives on AWS `us-west-2` (anonymous reads, reader doesn't pay egress), so it works from anywhere. Use the STAC catalog to *discover* paths and columns; read the Parquet directly here.
+
+```r
+library(DBI)
+library(duckdb)
+library(dplyr)
+library(dbplyr)
+
+con <- dbConnect(duckdb::duckdb())
+dbExecute(con, "INSTALL httpfs; LOAD httpfs;")
+
+# Anonymous reads from the source.coop mirror (AWS us-west-2). The bucket name
+# has dots, so URL_STYLE 'path' is required for the TLS certificate to match.
+dbExecute(con, "
+  CREATE SECRET source_coop (
+    TYPE S3, KEY_ID '', SECRET '',
+    ENDPOINT 's3.us-west-2.amazonaws.com', REGION 'us-west-2',
+    URL_STYLE 'path', USE_SSL 'true',
+    SCOPE 's3://us-west-2.opendata.source.coop'
+  )")
+
+# Register the Parquet dataset as a view, then treat it as a dplyr table.
+path <- "s3://us-west-2.opendata.source.coop/cboettig/overturemaps/2026-02-18.0/countries.parquet"
+dbExecute(con, sprintf("CREATE VIEW countries AS SELECT * FROM read_parquet('%s')", path))
+
+countries <- tbl(con, "countries")
+
+q <- countries |>
+  filter(subtype == "country", is_land) |>
+  select(country, name_en, subtype) |>
+  arrange(name_en) |>
+  head(10)
+
+q |> show_query()   # inspect the DuckDB SQL dbplyr generated
+q |> collect()      # pull the result into a tibble
+
+dbDisconnect(con, shutdown = TRUE)
+```
+
+`dbplyr` pushes `filter`/`select`/`arrange`/`summarise`/joins down into DuckDB, so column and row pruning happen in the engine — only the final `collect()` pulls data into R.
+
+::: tip
+The STAC catalog publishes NRP paths (`s3://public-<name>/…`); the source.coop mirror maps them to `s3://us-west-2.opendata.source.coop/cboettig/<name>/…`. Discover paths and columns via `get_stac_details` (see the [`httr2` example above](#r)) or the [web catalog](https://beta.source.coop), then translate the prefix. The usual DuckDB read rule still applies: always `read_parquet('s3://…')`, never a bare table name.
+:::
+
+### Python — ibis
+
+The Python parallel to `dbplyr`: [ibis](https://ibis-project.org) drives the same local DuckDB against the same source.coop mirror, and its deferred expressions compile to DuckDB SQL — nothing runs until `.execute()`.
+
+```bash
+pip install 'ibis-framework[duckdb]'
+```
+
+```python
+import ibis
+
+con = ibis.duckdb.connect()
+con.raw_sql("INSTALL httpfs; LOAD httpfs;")
+
+# Anonymous reads from the source.coop mirror (AWS us-west-2). The bucket name
+# has dots, so URL_STYLE 'path' is required for the TLS certificate to match.
+con.raw_sql("""
+  CREATE SECRET source_coop (
+    TYPE S3, KEY_ID '', SECRET '',
+    ENDPOINT 's3.us-west-2.amazonaws.com', REGION 'us-west-2',
+    URL_STYLE 'path', USE_SSL 'true',
+    SCOPE 's3://us-west-2.opendata.source.coop'
+  )""")
+
+path = "s3://us-west-2.opendata.source.coop/cboettig/overturemaps/2026-02-18.0/countries.parquet"
+# EXCLUDE the GEOMETRY column: ibis's type mapper can't represent DuckDB's
+# GEOMETRY type during schema inference. (The attribute columns are all we need.)
+con.raw_sql(f"CREATE VIEW countries AS SELECT * EXCLUDE (geometry) FROM read_parquet('{path}')")
+
+countries = con.table("countries")
+
+expr = (
+    countries
+    .filter((countries.subtype == "country") & countries.is_land)
+    .select("country", "name_en", "subtype")
+    .order_by("name_en")
+    .limit(10)
+)
+
+print(ibis.to_sql(expr))   # inspect the DuckDB SQL ibis generated
+print(expr.execute())      # run it, returns a pandas DataFrame
+```
+
+Like `dbplyr`, ibis pushes `filter`/`select`/`order_by`/aggregations/joins down into DuckDB, so only the final `.execute()` pulls rows into Python. The same path mapping and `read_parquet` rules from the R tip above apply.
+
 ## LLM tool use
 
 Let the model discover datasets, write SQL, and interpret results autonomously. The MCP tools (`browse_stac_catalog`, `get_stac_details`, `query`) are registered as callable tools so the model decides when and how to use them.
@@ -151,7 +243,7 @@ asyncio.run(main())
 
 ### R — ellmer + mcptools
 
-[`mcptools`](https://github.com/tidyverse/mcptools) is an MCP client for R that plugs MCP tools into `ellmer` chats. It speaks stdio, so we bridge to the remote HTTP server with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) (requires Node.js on PATH).
+[`mcptools`](https://posit-dev.github.io/mcptools/) is an MCP client for R that plugs MCP tools into `ellmer` chats. Its client (`mcp_tools()`) speaks **stdio only** — direct HTTP-transport support was proposed in [posit-dev/mcptools#88](https://github.com/posit-dev/mcptools/issues/88) but deliberately deferred (the maintainers still [recommend `mcp-remote`](https://posit-dev.github.io/mcptools/reference/client.html#connecting-to-remote-http-servers)). So we bridge to the remote HTTP server with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) (requires Node.js on PATH).
 
 ```r
 library(mcptools)
