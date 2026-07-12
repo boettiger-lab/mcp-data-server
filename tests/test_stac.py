@@ -1368,6 +1368,102 @@ class TestFormatColumnsFullRender:
             assert v in rendered, f"value {v!r} missing from rendered output"
 
 
+class TestFlatHexColumnDedup:
+    """Per-asset column descriptions are rendered once, not once-per-asset (#303).
+
+    The common flat-GeoParquet + hex dataset shares most attribute descriptions
+    across both assets; reprinting them per asset inflated the largest schemas
+    past geo-agent's 16k tool-result cap and truncated them. Descriptions now
+    live in a single shared block; each asset line carries only its column set.
+    """
+
+    def _make_flat_plus_hex(self):
+        col = MagicMock()
+        col.id, col.title, col.description = "nci-frontiers", "NCI Frontiers", "d"
+        col.extra_fields = {}
+        col.get_self_href.return_value = None
+
+        shared = [
+            {"name": "id", "type": "varchar", "description": "Unique feature identifier"},
+            {"name": "area_km2", "type": "double", "description": "Feature area in square kilometres"},
+            {"name": "category", "type": "varchar", "description": "Conservation category",
+             "values": ["core", "buffer"]},
+        ]
+
+        flat = MagicMock()
+        flat.href = "https://s3-west.nrp-nautilus.io/public-nci/frontiers/data.parquet"
+        flat.media_type = "application/x-parquet"
+        flat.title, flat.description = "GeoParquet", None
+        flat.extra_fields = {"table:columns": shared + [
+            {"name": "geometry", "type": "geometry", "description": "Feature geometry"},
+        ]}
+
+        hex_a = MagicMock()
+        hex_a.href = "https://s3-west.nrp-nautilus.io/public-nci/frontiers/hex/"
+        hex_a.media_type = "application/x-parquet"
+        hex_a.title = "hex"
+        hex_a.description = "One row per (feature, hex cell); dedup by `id` before aggregating."
+        hex_a.extra_fields = {
+            "h3:native_resolution": 10,
+            "table:columns": shared + [
+                {"name": "h0", "type": "ubigint", "description": "H3 parent cell at resolution 0 (partition key)"},
+                {"name": "h8", "type": "ubigint", "description": "H3 cell at resolution 8"},
+                {"name": "h10", "type": "ubigint", "description": "H3 cell at native resolution 10"},
+            ],
+        }
+        col.assets = {"data": flat, "hex": hex_a}
+        return col
+
+    def test_shared_description_rendered_once(self):
+        col = self._make_flat_plus_hex()
+        md = _format_collection(col, sub_children=[])
+        assert md.count("Feature area in square kilometres") == 1
+        assert md.count("Conservation category") == 1
+
+    def test_per_asset_column_set_is_unambiguous(self):
+        """Each asset line lists its own columns; the hex's h0/h8/h10 delta and the
+        flat asset's geometry are both visible without repeating descriptions."""
+        col = self._make_flat_plus_hex()
+        md = _format_collection(col, sub_children=[])
+        assert "read_parquet('s3://public-nci/frontiers/data.parquet')" in md
+        assert "read_parquet('s3://public-nci/frontiers/hex/**')" in md
+        # The hex partition keys appear on the hex asset's column line
+        for h in ("`h0`", "`h8`", "`h10`"):
+            assert h in md
+        assert "`geometry`" in md  # flat asset keeps geometry in its column set
+        # The hex's per-feature dedup note still reaches the prompt
+        assert "dedup by `id`" in md
+
+    def test_h3_partition_key_description_present_once(self):
+        col = self._make_flat_plus_hex()
+        md = _format_collection(col, sub_children=[])
+        assert md.count("H3 parent cell at resolution 0 (partition key)") == 1
+
+    def test_no_key_columns_trailer_when_assets_self_describe(self):
+        """Collection-level `Key columns` trailer is dropped once per-asset columns
+        cover everything — it was the redundant 3rd copy."""
+        col = self._make_flat_plus_hex()
+        # Even if the collection also carries table:columns, the trailer is suppressed.
+        col.extra_fields = {"table:columns": [
+            {"name": "id", "type": "varchar", "description": "Unique feature identifier"},
+        ]}
+        md = _format_collection(col, sub_children=[])
+        assert "Key columns:" not in md
+
+    def test_collection_level_columns_kept_when_assets_have_none(self):
+        """Fallback: a collection whose queryable asset carries no table:columns
+        (e.g. census sub-datasets) still surfaces its collection-level schema."""
+        col = self._make_flat_plus_hex()
+        col.assets["data"].extra_fields = {}
+        col.assets["hex"].extra_fields = {"h3:native_resolution": 10}
+        col.extra_fields = {"table:columns": [
+            {"name": "SLDUST", "type": "varchar", "description": "Senate district ID"},
+        ]}
+        md = _format_collection(col, sub_children=[])
+        assert "Key columns:" in md
+        assert "SLDUST" in md
+
+
 class TestInlineCollectionContent:
     """Inline `collection=` / `catalog=` parameters bypass the HTTP fetch — caller
     hands the already-loaded JSON over instead of letting the server re-fetch via
