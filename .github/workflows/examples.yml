@@ -26,7 +26,7 @@ jobs:
         with:
           use-public-rspm: true   # binary packages — no source compiles
       - name: Install R packages
-        run: Rscript -e 'install.packages(c("DBI", "duckdb", "dplyr", "dbplyr"))'
+        run: Rscript -e 'install.packages(c("duckdbfs", "dplyr"))'
       - name: Run example
         run: Rscript examples/query_dbplyr.R
 
