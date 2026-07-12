@@ -1,7 +1,9 @@
 # Minimal R example: call the duckdb-geo MCP `query` tool directly.
 #
 # No LLM involved -- this just speaks MCP over streamable HTTP and runs SQL.
-# There is no R MCP client library, so we hit the JSON-RPC endpoint via httr2.
+# No R MCP client speaks HTTP directly (mcptools is stdio-only), so we hit the
+# JSON-RPC endpoint via httr2. If you only want to *read* the data with dplyr and
+# don't need the MCP tools, see query_dbplyr.R instead.
 # The server runs in stateless mode, so no session handshake is required.
 #
 # Install:
