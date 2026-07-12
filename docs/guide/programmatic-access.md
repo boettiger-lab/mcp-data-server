@@ -106,32 +106,27 @@ for (block in resp$result$content) {
 
 ### R — dplyr / dbplyr
 
-If you'd rather write queries in `dplyr` than SQL, you don't need the MCP server at all: point a **local** DuckDB at the public [source.coop](https://source.coop) mirror of the same data and let `dbplyr` compile your `dplyr` verbs to DuckDB SQL. The mirror lives on AWS `us-west-2` (anonymous reads, reader doesn't pay egress), so it works from anywhere. Use the STAC catalog to *discover* paths and columns; read the Parquet directly here.
+If you'd rather write queries in `dplyr` than SQL, you don't need the MCP server at all: point a **local** DuckDB at the public [source.coop](https://source.coop) mirror of the same data and let `dbplyr` compile your `dplyr` verbs to DuckDB SQL. [`duckdbfs`](https://cboettig.github.io/duckdbfs/) handles the connection mechanics — `open_dataset()` returns a lazy `dplyr` table straight from an `s3://` path, no `DBI` connection, secret, or view to manage. The mirror lives on AWS `us-west-2` (anonymous reads, reader doesn't pay egress), so it works from anywhere. Use the STAC catalog to *discover* paths and columns; read the Parquet directly here.
 
 ```r
-library(DBI)
-library(duckdb)
+library(duckdbfs)
 library(dplyr)
-library(dbplyr)
-
-con <- dbConnect(duckdb::duckdb())
-dbExecute(con, "INSTALL httpfs; LOAD httpfs;")
 
 # Anonymous reads from the source.coop mirror (AWS us-west-2). The bucket name
-# has dots, so URL_STYLE 'path' is required for the TLS certificate to match.
-dbExecute(con, "
-  CREATE SECRET source_coop (
-    TYPE S3, KEY_ID '', SECRET '',
-    ENDPOINT 's3.us-west-2.amazonaws.com', REGION 'us-west-2',
-    URL_STYLE 'path', USE_SSL 'true',
-    SCOPE 's3://us-west-2.opendata.source.coop'
-  )")
+# has dots, so path-style addressing is required for the TLS certificate to match.
+duckdb_s3_config(
+  s3_endpoint  = "s3.us-west-2.amazonaws.com",
+  s3_region    = "us-west-2",
+  s3_url_style = "path",
+  s3_use_ssl   = TRUE,
+  anonymous    = TRUE
+)
 
-# Register the Parquet dataset as a view, then treat it as a dplyr table.
+# open_dataset() returns a lazy dplyr table backed by DuckDB. recursive = FALSE
+# because this is a single file; drop it (the default globs a directory prefix,
+# e.g. the per-h0 files of a hex dataset) to read many Parquet as one table.
 path <- "s3://us-west-2.opendata.source.coop/cboettig/overturemaps/2026-02-18.0/countries.parquet"
-dbExecute(con, sprintf("CREATE VIEW countries AS SELECT * FROM read_parquet('%s')", path))
-
-countries <- tbl(con, "countries")
+countries <- open_dataset(path, recursive = FALSE)
 
 q <- countries |>
   filter(subtype == "country", is_land) |>
@@ -141,8 +136,6 @@ q <- countries |>
 
 q |> show_query()   # inspect the DuckDB SQL dbplyr generated
 q |> collect()      # pull the result into a tibble
-
-dbDisconnect(con, shutdown = TRUE)
 ```
 
 `dbplyr` pushes `filter`/`select`/`arrange`/`summarise`/joins down into DuckDB, so column and row pruning happen in the engine — only the final `collect()` pulls data into R.

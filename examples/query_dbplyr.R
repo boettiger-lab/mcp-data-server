@@ -2,41 +2,37 @@
 #
 # R users who prefer dplyr over raw SQL don't need the MCP server to *read* the
 # data: point a local DuckDB at the public source.coop mirror (AWS us-west-2,
-# anonymous) and dbplyr compiles your dplyr verbs to DuckDB SQL. Use the MCP
+# anonymous) and dbplyr compiles your dplyr verbs to DuckDB SQL. duckdbfs handles
+# the connection mechanics -- open_dataset() returns a lazy dplyr table straight
+# from an s3:// path, no DBI connection, secret, or view to manage. Use the MCP
 # server's STAC tools (see query.R -> get_stac_details) to discover paths and
 # columns; read the data here. filter/select/arrange/summarise/joins push down
 # into DuckDB -- only the final collect() pulls rows into R.
 #
 # Install:
-#   install.packages(c("DBI", "duckdb", "dplyr", "dbplyr"))
+#   install.packages(c("duckdbfs", "dplyr"))
 #
 # Run (self-checking -- exits non-zero if the query route breaks):
 #   Rscript query_dbplyr.R
 
-library(DBI)
-library(duckdb)
+library(duckdbfs)
 library(dplyr)
-library(dbplyr)
-
-con <- dbConnect(duckdb::duckdb())
-dbExecute(con, "INSTALL httpfs; LOAD httpfs;")
 
 # Anonymous reads from the source.coop mirror (AWS us-west-2). The bucket name
-# has dots, so URL_STYLE 'path' is required for the TLS certificate to match.
-dbExecute(con, "
-  CREATE SECRET source_coop (
-    TYPE S3, KEY_ID '', SECRET '',
-    ENDPOINT 's3.us-west-2.amazonaws.com', REGION 'us-west-2',
-    URL_STYLE 'path', USE_SSL 'true',
-    SCOPE 's3://us-west-2.opendata.source.coop'
-  )")
+# has dots, so path-style addressing is required for the TLS certificate to match.
+duckdb_s3_config(
+  s3_endpoint  = "s3.us-west-2.amazonaws.com",
+  s3_region    = "us-west-2",
+  s3_url_style = "path",
+  s3_use_ssl   = TRUE,
+  anonymous    = TRUE
+)
 
-# Register the Parquet dataset as a view, then treat it as a dplyr table.
+# open_dataset() returns a lazy dplyr table backed by DuckDB. recursive = FALSE
+# because this is a single file; drop it (the default globs a directory prefix,
+# e.g. the per-h0 files of a hex dataset) to read many Parquet as one table.
 path <- "s3://us-west-2.opendata.source.coop/cboettig/overturemaps/2026-02-18.0/countries.parquet"
-dbExecute(con, sprintf(
-  "CREATE VIEW countries AS SELECT * FROM read_parquet('%s')", path))
-
-countries <- tbl(con, "countries")
+countries <- open_dataset(path, recursive = FALSE)
 
 q <- countries |>
   filter(subtype == "country", is_land) |>
@@ -50,8 +46,6 @@ cat(dbplyr::sql_render(q), "\n\n")
 result <- collect(q)
 cat("--- result ---\n")
 print(as.data.frame(result))
-
-dbDisconnect(con, shutdown = TRUE)
 
 # Smoke test: the pushdown query returns exactly the 10 rows we asked for,
 # with the expected columns. Fails loudly (non-zero exit) if the route breaks.
