@@ -159,9 +159,54 @@ def _is_queryable_asset(href: str, atype: str) -> bool:
     )
 
 
+def _asset_column_summary(table_cols: list) -> str:
+    """One-line `` `name` (type) `` list of an asset's columns (geometry included).
+
+    The per-asset delta view (#303): it makes each queryable asset's column set
+    unambiguous — which asset carries the hex's `h0/h8/h10`, which one keeps
+    `geometry` — without repeating every column's prose. The full descriptions
+    and categorical `values` live once in the shared block appended by
+    `_extract_parquet_assets`.
+    """
+    parts = []
+    for c in table_cols:
+        name = c.get("name")
+        if not name:
+            continue
+        t = c.get("type")
+        parts.append(f"`{name}` ({t})" if t else f"`{name}`")
+    return ", ".join(parts)
+
+
+def _any_queryable_asset_has_columns(col) -> bool:
+    """True if any queryable asset carries its own `table:columns`.
+
+    Gates the collection-level `Key columns` trailer (#303): when assets are
+    self-describing, the shared per-asset block already covers every column, so
+    the trailer would be a redundant copy. It stays only as the sole source for
+    collections that describe columns solely at the collection level (e.g.
+    census sub-datasets whose hex assets carry no `table:columns`).
+    """
+    for asset in (col.assets or {}).values():
+        if not _is_queryable_asset(asset.href, asset.media_type or ""):
+            continue
+        if asset.extra_fields.get("table:columns"):
+            return True
+    return False
+
+
 def _extract_parquet_assets(col) -> list[str]:
-    """Extract parquet/hex asset lines (with inline column schemas) from a collection's assets."""
+    """Extract parquet/hex asset lines from a collection's assets.
+
+    Column *descriptions* are deduplicated (#303): rather than reprinting every
+    column's prose once per asset — 2-3× on the common flat-GeoParquet + hex
+    dataset, which pushed the largest schemas past geo-agent's 16k tool-result
+    cap and truncated them — each asset line lists only its own column
+    names/types, and every column's description + categorical `values` is
+    rendered exactly once in a shared block appended after the asset lines.
+    """
     assets = []
+    shared_cols: dict = {}  # name -> col dict, in first-seen order (union of all assets)
     for asset_id, asset in (col.assets or {}).items():
         href = asset.href
         atype = asset.media_type or ""
@@ -201,11 +246,30 @@ def _extract_parquet_assets(col) -> list[str]:
                 ext_val = asset.extra_fields.get(ext_key)
                 if ext_val is not None:
                     assets.append(f"    - {ext_key}: {ext_val}")
-            # Inline per-asset column schema if present
+            # Per-asset column *set* only (names/types); descriptions are shared below.
             asset_cols = asset.extra_fields.get("table:columns", [])
-            col_lines = _format_columns(asset_cols)
-            if col_lines:
-                assets.extend(col_lines)
+            summary = _asset_column_summary(asset_cols)
+            if summary:
+                assets.append(f"    - columns: {summary}")
+            # Accumulate the union for the single shared description block. First
+            # asset to define a name wins; later assets backfill any field it was
+            # missing (description/values/type) so the block is maximally complete.
+            for c in asset_cols:
+                name = c.get("name")
+                if not name:
+                    continue
+                if name not in shared_cols:
+                    shared_cols[name] = dict(c)
+                else:
+                    existing = shared_cols[name]
+                    for k in ("description", "values", "type"):
+                        if not existing.get(k) and c.get(k):
+                            existing[k] = c[k]
+
+    block = _format_columns(list(shared_cols.values()))
+    if block:
+        assets.append("\nColumn descriptions (shared across the assets above):")
+        assets.extend(block)
     return assets
 
 
@@ -242,8 +306,12 @@ def _format_collection(col, sub_children: list = None) -> str:
     # Collect parquet assets from this level
     parquet_assets = _extract_parquet_assets(col)
 
-    # Column schema from this level
-    col_lines = _extract_columns(col)
+    # Collection-level "Key columns" trailer, kept ONLY as a fallback (#303):
+    # when queryable assets are self-describing, `_extract_parquet_assets` already
+    # renders every column once, so this would be a redundant 2nd/3rd copy. It
+    # survives solely for collections that describe columns at the collection
+    # level and nowhere else (e.g. census sub-datasets).
+    col_lines = [] if _any_queryable_asset_has_columns(col) else _extract_columns(col)
 
     # Check for sub-children — some collections (wyoming-wildlife-lands,
     # pad-us, census) group sub-datasets as child collections, each with
