@@ -195,7 +195,7 @@ def _any_queryable_asset_has_columns(col) -> bool:
     return False
 
 
-def _extract_parquet_assets(col) -> list[str]:
+def _extract_parquet_assets(col, compact: bool = False) -> list[str]:
     """Extract parquet/hex asset lines from a collection's assets.
 
     Column *descriptions* are deduplicated (#303): rather than reprinting every
@@ -204,6 +204,14 @@ def _extract_parquet_assets(col) -> list[str]:
     cap and truncated them — each asset line lists only its own column
     names/types, and every column's description + categorical `values` is
     rendered exactly once in a shared block appended after the asset lines.
+
+    *compact* (#305): emit only each asset's ``read_parquet(...)`` path, routing
+    hint, description, and extension fields — NO per-asset column names and NO
+    shared description block. Used by the parent/sub-dataset index, where the
+    columns would re-dump every child's schema (20-50k parent payloads over the
+    16k cap) and duplicate what the per-child ``get_stac_details`` call returns.
+    The caller appends an explicit per-child "call get_stac_details(<id>)"
+    pointer instead.
     """
     assets = []
     shared_cols: dict = {}  # name -> col dict, in first-seen order (union of all assets)
@@ -246,6 +254,10 @@ def _extract_parquet_assets(col) -> list[str]:
                 ext_val = asset.extra_fields.get(ext_key)
                 if ext_val is not None:
                     assets.append(f"    - {ext_key}: {ext_val}")
+            # Per-asset columns are omitted in compact mode (parent index, #305):
+            # the caller adds a per-child get_stac_details pointer instead.
+            if compact:
+                continue
             # Per-asset column *set* only (names/types); descriptions are shared below.
             asset_cols = asset.extra_fields.get("table:columns", [])
             summary = _asset_column_summary(asset_cols)
@@ -266,10 +278,11 @@ def _extract_parquet_assets(col) -> list[str]:
                         if not existing.get(k) and c.get(k):
                             existing[k] = c[k]
 
-    block = _format_columns(list(shared_cols.values()))
-    if block:
-        assets.append("\nColumn descriptions (shared across the assets above):")
-        assets.extend(block)
+    if not compact:
+        block = _format_columns(list(shared_cols.values()))
+        if block:
+            assets.append("\nColumn descriptions (shared across the assets above):")
+            assets.extend(block)
     return assets
 
 
@@ -322,10 +335,15 @@ def _format_collection(col, sub_children: list = None) -> str:
         lines.append(f"\n**Sub-datasets ({len(sub_children)}):**\n")
         for sc in sub_children:
             sc_title = sc.title or sc.id
-            sc_parquet = _extract_parquet_assets(sc)
+            # Compact render (#305): paths + extensions only, no columns. The
+            # parent index is a chooser — inlining every child's schema re-dumped
+            # the whole bucket (20-50k payloads over the 16k cap) and duplicated
+            # what the per-child get_stac_details call returns anyway.
+            sc_parquet = _extract_parquet_assets(sc, compact=True)
             if sc_parquet:
                 lines.append(f"*{sc_title}* (`{sc.id}`):")
                 lines.extend(sc_parquet)
+                lines.append(f"  - columns: call get_stac_details('{sc.id}')")
         lines.append(f"\nCall get_stac_details with a sub-dataset ID (e.g. `{sub_children[0].id}`) for column schemas and details.")
     elif parquet_assets:
         lines.append("\nSQL data (use with `query` tool):")

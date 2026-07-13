@@ -230,6 +230,80 @@ class TestChildCollectionIndexing:
             assert "SLDUST" in result
 
 
+class TestCompactParentIndex:
+    """Parent-collection index is a compact chooser (#305): it lists each child's
+    path + a `get_stac_details(<id>)` pointer, and does NOT inline child column
+    schemas — which re-dumped the whole bucket (20-50k parent payloads over
+    geo-agent's 16k cap) and duplicated the per-child call.
+
+    Uses a realistic fixture where children carry *per-asset* `table:columns`
+    (production layout), unlike the census fixture whose columns sit at the
+    collection level — that fixture masked the pre-#305 behavior.
+    """
+
+    def _make_parent_with_column_bearing_children(self):
+        def _child(cid, title, col_desc):
+            c = MagicMock()
+            c.id, c.title, c.description = cid, title, "d"
+            c.extra_fields = {}
+            c.get_self_href.return_value = None
+            asset = MagicMock()
+            asset.href = f"https://s3-west.nrp-nautilus.io/public-x/{cid}/hex/"
+            asset.media_type = "application/x-parquet"
+            asset.title, asset.description = "hex", None
+            asset.extra_fields = {
+                "h3:native_resolution": 8,
+                "table:columns": [
+                    {"name": "VALUE", "type": "double", "description": col_desc},
+                    {"name": "h8", "type": "ubigint", "description": "H3 cell at resolution 8"},
+                    {"name": "h0", "type": "ubigint", "description": "H3 partition key"},
+                ],
+            }
+            c.assets = {"hex": asset}
+            return c
+        parent = MagicMock()
+        parent.id, parent.title, parent.description = "widgets", "Widgets", "grouping"
+        parent.assets, parent.extra_fields, parent.links = {}, {}, []
+        parent.get_self_href.return_value = None
+        c1 = _child("widget-blue", "Blue Widgets", "COUNT_OF_BLUE_WIDGETS_UNIQUE_STRING")
+        c2 = _child("widget-red", "Red Widgets", "COUNT_OF_RED_WIDGETS_UNIQUE_STRING")
+        return parent, [c1, c2]
+
+    def test_parent_omits_child_column_descriptions(self):
+        parent, subs = self._make_parent_with_column_bearing_children()
+        md = _format_collection(parent, sub_children=subs)
+        # child descriptions and the shared block must NOT appear in the parent
+        assert "COUNT_OF_BLUE_WIDGETS_UNIQUE_STRING" not in md
+        assert "COUNT_OF_RED_WIDGETS_UNIQUE_STRING" not in md
+        assert "Column descriptions (shared" not in md
+        # nor the per-asset `- columns:` names line
+        assert "- columns: `VALUE`" not in md
+
+    def test_parent_lists_children_with_paths_and_pointer(self):
+        parent, subs = self._make_parent_with_column_bearing_children()
+        md = _format_collection(parent, sub_children=subs)
+        assert "**Sub-datasets (2):**" in md
+        assert "`widget-blue`" in md and "`widget-red`" in md
+        # child read_parquet path present (chooser can still see where data lives)
+        assert "read_parquet('s3://public-x/widget-blue/hex/**')" in md
+        # explicit per-child pointer to fetch columns
+        assert "columns: call get_stac_details('widget-blue')" in md
+        assert "columns: call get_stac_details('widget-red')" in md
+
+    def test_child_rendered_alone_still_shows_full_columns(self):
+        """The per-child get_stac_details (leaf render) is unchanged — full schema."""
+        parent, subs = self._make_parent_with_column_bearing_children()
+        leaf = _format_collection(subs[0], sub_children=[])
+        assert "COUNT_OF_BLUE_WIDGETS_UNIQUE_STRING" in leaf
+        assert "Column descriptions (shared" in leaf
+
+    def test_parent_index_is_small(self):
+        parent, subs = self._make_parent_with_column_bearing_children()
+        md = _format_collection(parent, sub_children=subs)
+        # compact chooser stays tiny relative to the full inlined render
+        assert len(md) < 1500
+
+
 class TestCollectionToDict:
     """Unit tests for _collection_to_dict."""
 
