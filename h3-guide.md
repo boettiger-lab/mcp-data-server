@@ -230,20 +230,49 @@ Raster datasets are converted to hex by assigning each **pixel** its H3 cell —
 
 **DISTINCT does not help here** — you genuinely need to aggregate the values.
 
-**✅ CORRECT: Always GROUP BY and aggregate raster datasets**
+**Always GROUP BY and aggregate raster datasets.**
 ```sql
--- Continuous values (carbon, biomass, etc.) → SUM or AVG
-SELECT h8, h0, SUM(value) as total
-FROM read_parquet('<STAC_HEX_PATH>')
+-- Continuous values (carbon, biomass, elevation) → SUM or AVG
+SELECT h8, h0, SUM(value) AS total
+FROM read_parquet('<hex>')
 GROUP BY h8, h0
 
--- Categorical values (land cover, etc.) → use MODE (most frequent class)
-SELECT h8, h0, MODE(class) as dominant_class
-FROM read_parquet('<STAC_HEX_PATH>')
+-- Categorical, dominant class per cell (map styling, "what's here") → MODE
+SELECT h8, h0, MODE(class) AS dominant_class
+FROM read_parquet('<mode hex>')
 GROUP BY h8, h0
 ```
 
-Check the dataset's STAC description — it will note when aggregation is required and which method (SUM, AVG, or MODE) to use.
+Check the dataset's STAC description — it notes when aggregation is required and which method (SUM, AVG, or MODE) to use.
+
+For categorical **area or composition** ("how much of class X", "percent of the region that is X"), MODE is the wrong tool: a cell holds several classes and MODE keeps only the winner, biasing per-class areas in both directions. Categorical layers increasingly ship a companion **`*-hex-fractions`** asset — a long schema with one `(class, frac)` row per class present in a cell, where `frac` is that class's fractional coverage of the cell, in (0,1]. When it exists (check `get_schema`), use it and weight area by `frac`:
+
+```sql
+SELECT class, SUM(frac * h3_cell_area(h10, 'km^2')) AS area_km2
+FROM read_parquet('<hex-fractions>')
+WHERE class <> <nodata>          -- exclude the no-data class; get its code from get_schema
+GROUP BY class;
+```
+
+`get_schema` names the fractions asset and the no-data code. Per cell `SUM(frac) <= 1`; the shortfall is outside-raster/quantization, so do not treat the layer as covering 100% of a cell.
+
+**Overlaying two partial-coverage layers — multiply the coverage fractions; never count a cell as all-or-nothing.** *(Skip unless you are intersecting a fractional-coverage layer with another layer that only partly covers its cells — e.g. "what percent of each habitat class is conserved".)* Treating a cell as fully inside the other layer whenever it matches over-counts every partly-covered cell. Weight by the coverage fraction on **both** sides. The other layer's per-cell weight is either its own `frac`, or — for a vector layer tiled from features — a per-feature coverage share its STAC documents (e.g. ca30x30 conserved-areas: a unit's GAP 1+2 share is `Acres / Total_Acre`). Reduce to one weight per cell (`MAX` over the features on it), then multiply:
+
+```sql
+WITH cell_w AS (   -- per cell: covering unit's GAP 1+2 coverage share (STAC-documented overlay weight)
+  SELECT h10, h0, MAX(Acres / NULLIF(Total_Acre, 0)) AS w
+  FROM (SELECT DISTINCT h10, h0, _cng_fid, Acres, Total_Acre
+        FROM read_parquet('<conserved-areas hex>'))
+  GROUP BY h10, h0
+)
+SELECT f.whr13num,
+       100 * SUM(f.frac * COALESCE(c.w, 0)) / SUM(f.frac) AS pct_conserved
+FROM read_parquet('<cwhr13 hex-fractions>') f
+LEFT JOIN cell_w c ON f.h10 = c.h10 AND f.h0 = c.h0
+WHERE f.whr13num <> 0
+GROUP BY f.whr13num
+ORDER BY pct_conserved;
+```
 
 **If you plan to mask this result against another hex dataset:** put the
 `SEMI JOIN` on the raw `read_parquet(...)` *before* `GROUP BY`, not in a
