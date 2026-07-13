@@ -274,6 +274,8 @@ GROUP BY f.whr13num
 ORDER BY pct_conserved;
 ```
 
+Asking about **one** class ("what percent of hardwood woodland is conserved") is the same query with `WHERE f.whr13num = <code>` — keep the `frac × weight` product. Joining to the *distinct conserved cells* instead (a `SEMI JOIN` on `(h10, h0)`) counts every partly-conserved cell as fully conserved and overstates the percentage.
+
 **If you plan to mask this result against another hex dataset:** put the
 `SEMI JOIN` on the raw `read_parquet(...)` *before* `GROUP BY`, not in a
 CTE after it. Aggregation blocks DuckDB's dynamic partition pruning, so a
