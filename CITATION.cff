@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+title: MCP Data Server
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - family-names: Boettiger
+    given-names: Carl
+    orcid: "https://orcid.org/0000-0002-1642-628X"
+    affiliation: University of California, Berkeley
+repository-code: "https://github.com/boettiger-lab/mcp-data-server"
+url: "https://boettiger-lab.github.io/mcp-data-server/"
+abstract: >-
+  An open Model Context Protocol (MCP) server that connects AI agents to
+  cloud-native data. It grounds agents in STAC metadata and confines them to
+  validated cloud-native engines — SQL over Parquet on S3 via DuckDB with H3
+  spatial indexing — so they can query terabyte-scale data without downloading
+  it, misreading it, or silently failing at scale. Runs locally for sensitive
+  data or on autoscaling Kubernetes for scale.
+keywords:
+  - Model Context Protocol
+  - MCP
+  - STAC
+  - DuckDB
+  - cloud-native
+  - geospatial
+  - H3
+  - AI agents
+license: BSD-3-Clause
