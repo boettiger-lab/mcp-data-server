@@ -197,7 +197,12 @@ class TestBuildPyramidStatements:
 import os
 import duckdb
 from pathlib import Path
-from tiles.pyramid import register_hex_tiles, _inspect_user_sql
+from tiles.pyramid import (
+    register_hex_tiles,
+    prepare_hex_tiles,
+    _inspect_user_sql,
+    _strip_h3_columns,
+)
 
 
 @pytest.fixture
@@ -236,6 +241,54 @@ class TestInspectUserSQL:
         )
         assert h3_col == "h5"
         assert value_cols == ["v1", "v2"]
+
+
+class TestStripH3Columns:
+    # #319: carried H3 index/partition columns (h0, h3, …) are not values and
+    # must never reach value_columns — downstream defaults value_column to
+    # value_columns[0] and would color by meaningless H3 integers.
+    def test_drops_h0_partition_key(self):
+        assert _strip_h3_columns(["h0", "hw_frac"]) == ["hw_frac"]
+
+    def test_drops_any_h_res_index(self):
+        assert _strip_h3_columns(["h3", "h8", "val", "h0"]) == ["val"]
+
+    def test_keeps_non_h3_columns(self):
+        assert _strip_h3_columns(["val", "mean_carbon", "frac"]) == [
+            "val", "mean_carbon", "frac"]
+
+    def test_does_not_drop_hprefixed_word_columns(self):
+        # Only bare `h<digits>` are H3 columns; `height`, `hw_frac`, `h_index`
+        # are genuine values and must survive.
+        assert _strip_h3_columns(["height", "hw_frac", "h_index"]) == [
+            "height", "hw_frac", "h_index"]
+
+
+class TestPrepareValueColumns:
+    def test_carried_h0_excluded_from_value_columns(self, local_bucket, h3_conn):
+        # #319: SELECT that carries the h0 partition key through for a join must
+        # not advertise h0 as a value column.
+        user_sql = (
+            "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, "
+            "h3_cell_to_parent(h3_latlng_to_cell(37.8, -122.3, 5), 0) AS h0, "
+            "0.5 AS hw_frac"
+        )
+        plan = prepare_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=5, min_res=2, agg="SUM",
+        )
+        assert plan["value_columns"] == ["hw_frac"]
+
+    def test_only_h3_columns_raises(self, h3_conn):
+        # SELECT h8, h0 with no real value: after stripping h0, nothing is left,
+        # so the existing empty-value guard must still fire (agg != COUNT).
+        user_sql = (
+            "SELECT h3_latlng_to_cell(37.8, -122.3, 8) AS h8, "
+            "h3_cell_to_parent(h3_latlng_to_cell(37.8, -122.3, 8), 0) AS h0"
+        )
+        with pytest.raises(ValueError, match="at least one value column"):
+            prepare_hex_tiles(
+                con=h3_conn, sql=user_sql, finest_res=8, min_res=2, agg="SUM",
+            )
 
 
 class TestRegisterHexTiles:
