@@ -356,15 +356,21 @@ _QUERY_LIMITER = anyio.CapacityLimiter(int(os.environ.get("MCP_QUERY_CONCURRENCY
 
 
 async def _query_tool(
-    sql_query: str,
+    sql_query: str = None,
     s3_key: str = None,
     s3_secret: str = None,
     s3_endpoint: str = None,
     s3_scope: str = None,
     s3_region: str = None,
     s3_url_style: str = None,
+    sql: str = None,
 ) -> str:
-    # Mirrors query()'s signature so FastMCP derives the identical tool schema.
+    # Accept `sql` as an alias for `sql_query`. register_hex_tiles's required param
+    # is `sql`, so in a hex workflow models reuse that name here and eat an
+    # avoidable rejection+retry (#321). Whichever name arrives, run the query.
+    sql_query = sql_query or sql
+    if not sql_query:
+        return "SQL Error: no query provided — pass the SQL as `sql_query` (the alias `sql` is also accepted)."
     return await anyio.to_thread.run_sync(
         query, sql_query, s3_key, s3_secret, s3_endpoint, s3_scope,
         s3_region, s3_url_style,
@@ -686,18 +692,29 @@ def register_hex_tiles(
 
 
 async def _register_hex_tiles_tool(
-    sql: str,
+    sql: str = None,
     agg: str = "COUNT",
     finest_res: int | None = None,
     min_res: int = 2,
     zoom_offset: int = 2,
     color_scale: str = "linear",
     layer_style: str = "fill",
+    sql_query: str = None,
 ) -> dict:
     # Served MCP tool. register_hex_tiles is sync (and the directly-tested core);
     # FastMCP would run a sync tool inline on the uvicorn event loop, where its
     # S3 marker I/O + bounded inline build-wait block /healthz and every other
     # request (#176). Offload it to a worker thread so the loop stays free.
+    #
+    # Accept `sql_query` as an alias for `sql` — the mirror of the alias `query`
+    # accepts (#321) — so the two SQL tools agree on either name and models don't
+    # eat a retry when they carry one name over from the other tool.
+    sql = sql or sql_query
+    if not sql:
+        return {
+            "status": "failed",
+            "error": "no query provided — pass the SQL as `sql` (the alias `sql_query` is also accepted).",
+        }
     return await anyio.to_thread.run_sync(
         register_hex_tiles, sql, agg, finest_res, min_res, zoom_offset, color_scale, layer_style
     )
