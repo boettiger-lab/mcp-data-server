@@ -5,6 +5,7 @@ Tile requests read directly from the pyramid — no coordination needed.
 """
 import json
 import os
+import re
 import sys
 import time
 from decimal import Decimal
@@ -267,6 +268,22 @@ def _json_dumps_escaped(obj) -> str:
     return json.dumps(obj).replace("'", "''")
 
 
+# H3 cell/index/partition columns follow the `h<res>` convention (h0..h15) —
+# `h0` is the hive partition key the pyramid build derives itself, and callers
+# routinely carry an `h<res>` index column through the SELECT for joins. None of
+# these are values, so they must not appear in value_columns (#319): they'd
+# corrupt suggested_scale, waste a value_stats scan, and — since downstream
+# defaults value_column to value_columns[0] — color the map by meaningless H3
+# integers instead of the real metric.
+_H3_COLUMN_RE = re.compile(r"^h\d+$")
+
+
+def _strip_h3_columns(columns: List[str]) -> List[str]:
+    """Drop H3 cell/index/partition columns (names matching `^h\\d+$`) from a
+    list of candidate value columns. See #319."""
+    return [c for c in columns if not _H3_COLUMN_RE.match(c)]
+
+
 def _inspect_user_sql(con: duckdb.DuckDBPyConnection, user_sql: str):
     """Run user SQL with LIMIT 0 to extract column names without materializing data.
 
@@ -453,12 +470,15 @@ def prepare_hex_tiles(
     if agg.upper() == "COUNT":
         value_columns = ["count"]
     else:
-        if not sql_value_columns:
+        # Drop carried H3 index/partition columns (h0, h3, …) so a partition key
+        # is never advertised as a value (#319). Runs before the empty-check so
+        # `SELECT h8, h0` (no real value) still raises below.
+        value_columns = _strip_h3_columns(sql_value_columns)
+        if not value_columns:
             raise ValueError(
                 "user SQL must return at least one value column after the H3 index "
                 "(or use agg='COUNT')"
             )
-        value_columns = sql_value_columns
 
     h = content_hash(sql=sql, finest_res=finest_res, min_res=min_res, agg=agg, zoom_offset=zoom_offset)
     paths = tile_paths_for_hash(h)
@@ -647,7 +667,9 @@ def register_hex_tiles(
       Any extra columns in the user SQL are ignored.
     - Other aggs: user SQL must return at least one value column after the H3
       index. Each is aggregated via `agg` at parent resolutions and passed
-      through raw at the finest level.
+      through raw at the finest level. Carried H3 index/partition columns
+      (names matching `h<res>`, e.g. h0, h3) are dropped from value_columns —
+      they're join/partition keys, not values (#319).
     """
     plan = prepare_hex_tiles(
         con=con, sql=sql, finest_res=finest_res,
