@@ -162,6 +162,26 @@ When one side lacks h0, omit it from that side. Prefer hex-partitioned variants 
 
 Some datasets carry NULL in their finest pre-computed parent column for very large features (e.g. WDPA's largest protected areas have h8 but NULL h9). Joining on that finer column silently drops those features and undercounts coverage. Join at the coarsest resolution both sides share, or fall back to `h3_cell_to_parent()` which is always populated.
 
+## Subsetting a dataset to a region (state, county, district)
+
+**`h0` is the res-0 partition key — a coarse *storage* key, never a spatial or boundary filter.** Each res-0 base cell spans ~4.35 **million** km² (larger than any US state), so `WHERE h0 = …` or `WHERE h0 IN (…)` selects whole base cells, not the region. Florida sits inside a single base cell, so `WHERE h0 = <fl_cell>` renders the entire continental US; California spans two base cells, so `WHERE h0 IN (<ca_cell_1>, <ca_cell_2>)` renders both, far larger than the state. Resolving a region to its base cells (`SELECT DISTINCT h0 … WHERE STUSPS='CA'`) and filtering the value dataset by that `h0` set **alone** is always wrong — it clips to nothing finer than the base cells.
+
+To clip a value dataset (carbon, land cover, biomass — anything under a global `hex/h0=*/`) to a named region, **join it to the region's hex mask on the finest shared resolution and filter by the mask's attribute.** The census state/county hexes are ordinary catalog datasets — find their exact path with `get_stac_details` like any other hex dataset. Build the mask (already filtered to the region) as a CTE, then `SEMI JOIN` it onto the raw `read_parquet(...)` *before* the `GROUP BY` (the MASK BEFORE AGGREGATE rule — this also prunes the value dataset's `h0` partitions):
+
+```sql
+WITH ca AS (
+  SELECT h8, h0
+  FROM read_parquet('<census_state_hex>', hive_partitioning = true)
+  WHERE STUSPS = 'CA'
+)
+SELECT c.h8, SUM(c.carbon) AS carbon
+FROM read_parquet('<value_hex>', hive_partitioning = true) c
+SEMI JOIN ca USING (h8, h0)
+GROUP BY c.h8;
+```
+
+Restricting `h0` is legitimate only as a **partition-pruning prefilter paired with a real boundary filter** — the mask join above, or an attribute filter on the value dataset itself (see *Scoping by name or feature id* in query-optimization.md). On its own, `h0` narrows which files are scanned; it never clips to the region.
+
 ## Multiple Rows per Hex: Four Different Problems
 
 There are **four distinct reasons** a dataset can have multiple rows with the same `h8` value, and they require different fixes:
