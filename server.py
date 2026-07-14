@@ -134,7 +134,7 @@ if _MEMORY_LIMIT:
 
 
 @contextmanager
-def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None):
+def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None, s3_region: str = None, s3_url_style: str = None):
     # An S3 key without its secret (or vice versa) can't authenticate. Rather
     # than silently downgrade to anonymous — which yields a confusing 403 on a
     # private bucket, or ignores the key entirely with no endpoint — fail fast
@@ -187,13 +187,20 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
             key = s3_key if credentialed else ""
             secret = s3_secret if credentialed else ""
             use_ssl = infer_use_ssl(endpoint)
+            # URL_STYLE defaults to 'path' (correct for Ceph/MinIO); REGION is
+            # omitted unless given. A bring-your-own AWS-hosted bucket needs both
+            # knobs — the built-in source_coop registry entry needed exactly
+            # REGION + url_style to work (#286).
+            url_style = s3_url_style or "path"
+            region_clause = f", REGION '{_sql_quote(s3_region)}'" if s3_region else ""
             scope_clause = f", SCOPE '{_sql_quote(s3_scope)}'" if s3_scope else ""
             # Credentials (if any) injected here; intentionally not logged.
             conn.sql(
                 f"CREATE OR REPLACE SECRET client_s3 ("
                 f"TYPE S3, KEY_ID '{_sql_quote(key)}', SECRET '{_sql_quote(secret)}', "
-                f"ENDPOINT '{_sql_quote(endpoint)}', URL_STYLE 'path', USE_SSL '{use_ssl}'"
-                f"{scope_clause})"
+                f"ENDPOINT '{_sql_quote(endpoint)}', URL_STYLE '{_sql_quote(url_style)}', "
+                f"USE_SSL '{use_ssl}'"
+                f"{region_clause}{scope_clause})"
             )
         # Default S3 endpoint — server-owned and per-deployment configurable (#268),
         # built by s3config (shared with the tile subsystem). Lets you deploy this
@@ -289,11 +296,11 @@ def analyst_persona() -> str:
 # -------------------------------------------------------------------------
 # 8. TOOL DEFINITION — SQL Query
 # -------------------------------------------------------------------------
-def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None) -> str:
+def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint: str = None, s3_scope: str = None, s3_region: str = None, s3_url_style: str = None) -> str:
     """Placeholder (overwritten below)."""
     print(f"🔍 Executing: {sql_query}", file=sys.stderr)
     try:
-        with get_isolated_db(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope) as db:
+        with get_isolated_db(s3_key=s3_key, s3_secret=s3_secret, s3_endpoint=s3_endpoint, s3_scope=s3_scope, s3_region=s3_region, s3_url_style=s3_url_style) as db:
             result = db.sql(sql_query)
             if result is None: return "Command executed successfully."
 
@@ -331,6 +338,7 @@ BEFORE writing any SQL:
 For private data, pass s3_key, s3_secret, and optionally s3_endpoint and s3_scope alongside the SQL query.
 For an anonymous public source (e.g. a read-only mirror), pass s3_endpoint alone (no key/secret) with s3_scope — useful to read a mirror like s3://public-* from a backup endpoint when the primary is unavailable.
 Use s3_scope (e.g. 's3://private-wyoming' or 's3://public-') so DuckDB routes those paths to your endpoint rather than the server default; supply it whenever a query mixes sources.
+For a bring-your-own AWS-hosted bucket, also pass s3_region (e.g. 'us-west-2') and, if the bucket needs it, s3_url_style ('path' by default, or 'vhost'); the defaults suit Ceph/MinIO.
 WITHOUT s3_scope, your endpoint/credentials apply to EVERY s3:// path in the query and the server-default endpoint is disabled for this request — fine for a query touching only your bucket, wrong for a query mixing your bucket with catalog data. When mixing, always pass s3_scope.
 Credentials, when given, are scoped to this request only and never persisted.
 
@@ -353,10 +361,13 @@ async def _query_tool(
     s3_secret: str = None,
     s3_endpoint: str = None,
     s3_scope: str = None,
+    s3_region: str = None,
+    s3_url_style: str = None,
 ) -> str:
     # Mirrors query()'s signature so FastMCP derives the identical tool schema.
     return await anyio.to_thread.run_sync(
         query, sql_query, s3_key, s3_secret, s3_endpoint, s3_scope,
+        s3_region, s3_url_style,
         limiter=_QUERY_LIMITER,
     )
 

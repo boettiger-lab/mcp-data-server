@@ -373,6 +373,49 @@ class TestUnscopedClientRouting:
             assert "client_s3" in self._names(conn)
 
 
+class TestClientS3RegionUrlStyle:
+    """A bring-your-own AWS-hosted bucket needs REGION and (optionally) a
+    virtual-hosted URL_STYLE on the per-request client_s3 secret — the defaults
+    ('path', no region) suit Ceph/MinIO but break on AWS (#286)."""
+
+    def _secret_string(self, conn):
+        return conn.sql(
+            "SELECT secret_string FROM duckdb_secrets() WHERE name='client_s3'"
+        ).fetchone()[0]
+
+    def test_region_set_on_secret(self):
+        with get_isolated_db(
+            s3_endpoint="s3.us-west-2.amazonaws.com", s3_region="us-west-2"
+        ) as conn:
+            assert "region=us-west-2" in self._secret_string(conn)
+
+    def test_no_region_by_default(self):
+        """Backward-compat: without s3_region the secret carries no region."""
+        with get_isolated_db(s3_endpoint="minio.example.org") as conn:
+            assert "region=" not in self._secret_string(conn)
+
+    def test_url_style_defaults_to_path(self):
+        with get_isolated_db(s3_endpoint="minio.example.org") as conn:
+            assert "url_style=path" in self._secret_string(conn)
+
+    def test_url_style_vhost(self):
+        with get_isolated_db(
+            s3_endpoint="s3.us-west-2.amazonaws.com", s3_url_style="vhost"
+        ) as conn:
+            assert "url_style=vhost" in self._secret_string(conn)
+
+    def test_query_with_region_and_url_style_succeeds(self):
+        """query accepts the AWS knobs without error."""
+        result = query(
+            "SELECT 9 as n",
+            s3_endpoint="s3.us-west-2.amazonaws.com",
+            s3_scope="s3://mybucket",
+            s3_region="us-west-2",
+            s3_url_style="vhost",
+        )
+        assert "9" in result
+
+
 class TestSourceRegistrySecrets:
     """Registry sources (s3config, #264) get prefix-scoped secrets on every
     query connection — built-ins and S3_SOURCES env additions alike."""
@@ -497,7 +540,8 @@ class TestTileRouteMounted:
         assert "query" in tools
         assert tools["query"].description == query.__doc__
         assert sorted(tools["query"].inputSchema["properties"]) == [
-            "s3_endpoint", "s3_key", "s3_scope", "s3_secret", "sql_query",
+            "s3_endpoint", "s3_key", "s3_region", "s3_scope", "s3_secret",
+            "s3_url_style", "sql_query",
         ]
 
     def test_query_tool_matches_sync_core(self):
