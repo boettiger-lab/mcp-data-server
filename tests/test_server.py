@@ -541,7 +541,7 @@ class TestTileRouteMounted:
         assert tools["query"].description == query.__doc__
         assert sorted(tools["query"].inputSchema["properties"]) == [
             "s3_endpoint", "s3_key", "s3_region", "s3_scope", "s3_secret",
-            "s3_url_style", "sql_query",
+            "s3_url_style", "sql", "sql_query",
         ]
 
     def test_query_tool_matches_sync_core(self):
@@ -551,6 +551,51 @@ class TestTileRouteMounted:
         sync_result = server.query(sql)
         async_result = anyio.run(server._query_tool, sql)
         assert async_result == sync_result
+
+    def test_query_tool_accepts_sql_alias(self):
+        """query accepts `sql` as an alias for `sql_query` — register_hex_tiles's
+        param name — so models don't eat a retry when they carry it over (#321)."""
+        import anyio, server
+        via_alias = anyio.run(
+            lambda: server._query_tool(sql="SELECT 1 AS one")
+        )
+        via_canonical = anyio.run(
+            lambda: server._query_tool(sql_query="SELECT 1 AS one")
+        )
+        assert via_alias == via_canonical
+        assert "SQL Error" not in via_alias
+
+    def test_query_tool_missing_sql_errors_clearly(self):
+        """Neither name supplied → a clear error, not an unhandled TypeError."""
+        import anyio, server
+        result = anyio.run(lambda: server._query_tool())
+        assert "SQL Error" in result and "sql_query" in result
+
+    def test_register_hex_tiles_accepts_sql_query_alias(self):
+        """register_hex_tiles accepts `sql_query` as an alias for `sql` — the
+        mirror of query's alias — so the two SQL tools agree on either name (#321)."""
+        import anyio, server
+        called = {}
+
+        def fake_register(sql, *a, **k):
+            called["sql"] = sql
+            return {"status": "done"}
+
+        orig = server.register_hex_tiles
+        server.register_hex_tiles = fake_register
+        try:
+            anyio.run(
+                lambda: server._register_hex_tiles_tool(sql_query="SELECT h8 FROM t")
+            )
+        finally:
+            server.register_hex_tiles = orig
+        assert called["sql"] == "SELECT h8 FROM t"
+
+    def test_register_hex_tiles_missing_sql_errors_clearly(self):
+        """Neither name supplied → a failed status with a clear message."""
+        import anyio, server
+        result = anyio.run(lambda: server._register_hex_tiles_tool())
+        assert result["status"] == "failed" and "sql" in result["error"]
 
     def test_query_tool_keeps_event_loop_responsive(self):
         """While the wrapped (blocking) query runs in a worker thread, the event
