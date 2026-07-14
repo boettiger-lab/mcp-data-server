@@ -382,7 +382,7 @@ mcp.tool(name="query", description=query.__doc__)(_query_tool)
 import concurrent.futures
 import threading
 import time
-from tiles.endpoint import serve_tile
+from tiles.endpoint import serve_metadata, serve_tile
 from tiles.db import build_tile_connection
 from tiles.pyramid import (
     MVT_LAYER_NAME,
@@ -869,6 +869,9 @@ def mount_tiles(app):
     con = _get_tile_con()
     app.state.tile_con = con
     app.add_route("/tiles/{namespace}/{name}/{z:int}/{x:int}/{y:int}.pbf", serve_tile)
+    # Same-origin metadata sidecar so clients can read value_stats/bounds by
+    # hash instead of routing the large JSON through an LLM's tool-call args.
+    app.add_route("/tiles/{namespace}/{name}/metadata.json", serve_metadata, methods=["GET"])
 
 # -------------------------------------------------------------------------
 # 9. OPTIONAL BEARER TOKEN AUTH

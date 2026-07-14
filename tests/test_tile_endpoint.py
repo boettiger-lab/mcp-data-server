@@ -5,7 +5,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from tiles.endpoint import serve_tile
+from tiles.endpoint import serve_metadata, serve_tile
 from tiles.pyramid import register_hex_tiles
 from tiles.db import build_tile_connection
 
@@ -25,6 +25,7 @@ def app_with_tiles(local_bucket):
     con = build_tile_connection()
     app = Starlette(routes=[
         Route("/tiles/{namespace}/{name}/{z:int}/{x:int}/{y:int}.pbf", serve_tile),
+        Route("/tiles/{namespace}/{name}/metadata.json", serve_metadata, methods=["GET"]),
     ])
     app.state.tile_con = con
     yield app
@@ -310,3 +311,48 @@ class TestMetadataDriven:
         y = int((1 - math.log(math.tan(lat_rad) + 1/math.cos(lat_rad)) / math.pi) / 2 * n)
         r = client.get(f"/tiles/hex/{result['hash']}/{z}/{x}/{y}.pbf")
         assert r.status_code in (200, 204)  # not 404
+
+
+class TestServeMetadata:
+    """The /tiles/hex/<hash>/metadata.json sidecar route. Clients fetch
+    value_stats/bounds by hash here instead of transcribing them through an
+    LLM's tool-call args (weak models corrupt the large JSON → silent
+    no-op layer-add). See the hex-not-showing investigation."""
+
+    def test_returns_metadata_json_with_value_stats_and_bounds(self, app_with_tiles, registered_ca):
+        client = TestClient(app_with_tiles)
+        r = client.get(f"/tiles/hex/{registered_ca}/metadata.json")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/json")
+        meta = r.json()
+        # The exact fields the client needs to build the color scale + fit view.
+        assert "value_stats" in meta
+        assert "bounds" in meta and len(meta["bounds"]) == 4
+        assert meta["finest_res"] == 5
+        assert "layer_name" in meta
+
+    def test_immutable_cache_control(self, app_with_tiles, registered_ca):
+        client = TestClient(app_with_tiles)
+        r = client.get(f"/tiles/hex/{registered_ca}/metadata.json")
+        assert r.status_code == 200
+        cc = r.headers.get("cache-control", "")
+        assert "immutable" in cc and "public" in cc
+
+    def test_unknown_hash_returns_404(self, app_with_tiles):
+        client = TestClient(app_with_tiles)
+        r = client.get("/tiles/hex/deadbeefdeadbeef/metadata.json")
+        assert r.status_code == 404
+
+    def test_non_hex_namespace_returns_404(self, app_with_tiles, registered_ca):
+        client = TestClient(app_with_tiles)
+        r = client.get(f"/tiles/nothex/{registered_ca}/metadata.json")
+        assert r.status_code == 404
+
+    def test_metadata_url_derives_from_tile_url_suffix_swap(self, app_with_tiles, registered_ca):
+        """The contract the client relies on: swapping the tile_url's
+        `/{z}/{x}/{y}.pbf` suffix for `metadata.json` hits this route."""
+        client = TestClient(app_with_tiles)
+        tile_url = f"/tiles/hex/{registered_ca}/5/5/12.pbf"
+        meta_url = tile_url.rsplit("/", 3)[0] + "/metadata.json"
+        assert meta_url == f"/tiles/hex/{registered_ca}/metadata.json"
+        assert client.get(meta_url).status_code == 200
