@@ -166,21 +166,35 @@ Some datasets carry NULL in their finest pre-computed parent column for very lar
 
 **`h0` is the res-0 partition key — a coarse *storage* key, never a spatial or boundary filter.** Each res-0 base cell spans ~4.35 **million** km² (larger than any US state), so `WHERE h0 = …` or `WHERE h0 IN (…)` selects whole base cells, not the region. Florida sits inside a single base cell, so `WHERE h0 = <fl_cell>` renders the entire continental US; California spans two base cells, so `WHERE h0 IN (<ca_cell_1>, <ca_cell_2>)` renders both, far larger than the state. Resolving a region to its base cells (`SELECT DISTINCT h0 … WHERE STUSPS='CA'`) and filtering the value dataset by that `h0` set **alone** is always wrong — it clips to nothing finer than the base cells.
 
-To clip a value dataset (carbon, land cover, biomass — anything under a global `hex/h0=*/`) to a named region, **join it to the region's hex mask on the finest shared resolution and filter by the mask's attribute.** The census state/county hexes are ordinary catalog datasets — find their exact path with `get_stac_details` like any other hex dataset. Build the mask (already filtered to the region) as a CTE, then `SEMI JOIN` it onto the raw `read_parquet(...)` *before* the `GROUP BY` (the MASK BEFORE AGGREGATE rule — this also prunes the value dataset's `h0` partitions):
+To clip a value dataset (carbon, land cover, biomass — anything under a global `hex/h0=*/`) to a named region, **filter it by the region's hex mask at the finest resolution the two share, keyed on the mask's attribute.** The census state/county hexes are ordinary catalog datasets — find their exact path with `get_stac_details` like any other hex dataset.
+
+The most robust form is an `IN` subquery: the attribute filter lives *inside* the subquery, so it can never be misplaced. Pair the `h8 IN (…)` boundary filter with a coarse `h0 IN (…)` prefilter to prune partitions:
+
+```sql
+SELECT c.h8, SUM(c.carbon) AS carbon
+FROM read_parquet('<value_hex>', hive_partitioning = true) c
+WHERE c.h0 IN (SELECT DISTINCT h0 FROM read_parquet('<census_state_hex>', hive_partitioning = true) WHERE STUSPS = 'CA')
+  AND c.h8 IN (SELECT DISTINCT h8 FROM read_parquet('<census_state_hex>', hive_partitioning = true) WHERE STUSPS = 'CA')
+GROUP BY c.h8;
+```
+
+Here `h8 IN (…)` is the real boundary (the finest shared resolution); `h0 IN (…)` only prunes which partition files are scanned — see the closing note.
+
+A `SEMI JOIN` to a **pre-filtered mask CTE** is equivalent and also prunes partitions (the MASK BEFORE AGGREGATE rule). Filter the attribute *inside* the CTE and join with `USING` — **never reference the mask's columns in the outer query.** DuckDB `SEMI JOIN` tests row existence only; it does NOT bring the joined table's columns into the outer `SELECT`/`WHERE` scope, so `SEMI JOIN <mask> s … WHERE s.STUSPS='CA'` fails with `Binder Error: Referenced table "s" not found`:
 
 ```sql
 WITH ca AS (
   SELECT h8, h0
   FROM read_parquet('<census_state_hex>', hive_partitioning = true)
-  WHERE STUSPS = 'CA'
+  WHERE STUSPS = 'CA'          -- attribute filter lives HERE, inside the CTE
 )
 SELECT c.h8, SUM(c.carbon) AS carbon
 FROM read_parquet('<value_hex>', hive_partitioning = true) c
-SEMI JOIN ca USING (h8, h0)
+SEMI JOIN ca USING (h8, h0)    -- do NOT reference ca's columns in SELECT/WHERE
 GROUP BY c.h8;
 ```
 
-Restricting `h0` is legitimate only as a **partition-pruning prefilter paired with a real boundary filter** — the mask join above, or an attribute filter on the value dataset itself (see *Scoping by name or feature id* in query-optimization.md). On its own, `h0` narrows which files are scanned; it never clips to the region.
+Restricting `h0` is legitimate only as a **partition-pruning prefilter paired with a real boundary filter** — the `h8 IN`/mask join above, or an attribute filter on the value dataset itself (see *Scoping by name or feature id* in query-optimization.md). On its own, `h0` narrows which files are scanned; it never clips to the region.
 
 ## Multiple Rows per Hex: Four Different Problems
 
