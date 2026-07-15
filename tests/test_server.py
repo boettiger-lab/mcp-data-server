@@ -544,6 +544,22 @@ class TestTileRouteMounted:
             "s3_url_style", "sql", "sql_query",
         ]
 
+    def test_served_tool_schema_titles_dont_leak_wrapper_name(self):
+        """The async wrappers (_query_tool, _register_hex_tiles_tool, ...) must not
+        leak their internal names into inputSchema.title. FastMCP derives the title
+        as f'{func.__name__}Arguments', so a wrapper named `_query_tool` yields
+        `_query_toolArguments` — which weak models read as if it were the tool name
+        and try to call (getting 'Unknown tool'). Titles must derive from the
+        public tool name instead (#326)."""
+        from server import mcp
+        import anyio
+        tools = {t.name: t for t in anyio.run(mcp.list_tools)}
+        for name in ("query", "register_hex_tiles", "get_hex_tile_status"):
+            title = tools[name].inputSchema.get("title", "")
+            assert not title.startswith("_"), f"{name} title leaks wrapper name: {title!r}"
+            assert "_tool" not in title, f"{name} title leaks wrapper name: {title!r}"
+            assert title == f"{name}Arguments", f"{name} title is {title!r}"
+
     def test_query_tool_matches_sync_core(self):
         """The async wrapper returns the same payload as the sync query()."""
         import anyio, server

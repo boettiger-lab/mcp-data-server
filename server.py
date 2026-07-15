@@ -380,6 +380,12 @@ async def _query_tool(
 
 # Register the async wrapper under the tool name, reusing the sync function's
 # docstring as the LLM-facing description (mirroring the hex-tool pattern, #185).
+# Name the wrapper after the PUBLIC tool so FastMCP derives a clean input-schema
+# title ("queryArguments"), not "_query_toolArguments": func_metadata builds the
+# args model as f"{func.__name__}Arguments", and weak models (qwen) read that
+# leaked internal name off inputSchema.title and call it as if it were the tool,
+# getting "Unknown tool" (#326).
+_query_tool.__name__ = "query"
 mcp.tool(name="query", description=query.__doc__)(_query_tool)
 
 # -------------------------------------------------------------------------
@@ -722,6 +728,9 @@ async def _register_hex_tiles_tool(
 
 # Register the async wrapper under the tool name, reusing the sync function's
 # docstring as the LLM-facing description (the wrapper mirrors its signature).
+# See the query registration above: rename the wrapper so the schema title is
+# "register_hex_tilesArguments", not the leaked "_register_hex_tiles_toolArguments" (#326).
+_register_hex_tiles_tool.__name__ = "register_hex_tiles"
 mcp.tool(name="register_hex_tiles", description=register_hex_tiles.__doc__)(
     _register_hex_tiles_tool
 )
@@ -875,6 +884,8 @@ async def _get_hex_tile_status_tool(
         await anyio.sleep(min(2.0, max(0.1, deadline - time.time())))
 
 
+# Clean schema title ("get_hex_tile_statusArguments") — see query registration (#326).
+_get_hex_tile_status_tool.__name__ = "get_hex_tile_status"
 mcp.tool(name="get_hex_tile_status", description=get_hex_tile_status.__doc__)(
     _get_hex_tile_status_tool
 )
