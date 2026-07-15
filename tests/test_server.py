@@ -193,6 +193,22 @@ class TestToolInjectedContext:
         # Should contain warnings about SQL rules
         assert any(word in context_lower for word in ['rule', 'parquet', 's3', 'catalog'])
 
+    def test_region_subset_guidance_present_and_injected(self):
+        """geo-agent #322/#325: the h3-guide must warn that h0 is a partition key
+        (never a boundary) and lead the region-subset pattern with the paraphrase-
+        robust `hN IN (SELECT hN FROM <mask> WHERE <attr>)` form. This guidance is
+        injected into the query tool description via TOOL_INJECTED_CONTEXT — guard
+        it against silent deletion (the behavioral gold is baseline q
+        `glob-carbon-in-state-h0-not-boundary`)."""
+        from server import H3_RAW, TOOL_INJECTED_CONTEXT
+        # h0-is-not-a-boundary warning
+        assert "never a spatial or boundary filter" in H3_RAW
+        # region-subset section + the robust IN-subquery form lead
+        assert "Subsetting a dataset to a region" in H3_RAW
+        assert "IN (SELECT" in H3_RAW
+        # and it actually reaches the model (injected into the query tool context)
+        assert "never a spatial or boundary filter" in TOOL_INJECTED_CONTEXT
+
 
 class TestPromptFunction:
     """Test MCP prompt functions."""
