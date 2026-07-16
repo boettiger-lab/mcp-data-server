@@ -423,3 +423,19 @@ Example SQL shape for the `sql` parameter:
 The tool handles pyramiding (coarser hexes at lower zooms) and partitioned
 parquet storage automatically. Repeat calls with identical inputs return the
 same URL — natural caching.
+
+**Species richness (distinct count per hex):** for a richness map — distinct
+species per cell, e.g. from GBIF — use `agg="COUNT_DISTINCT"`, NOT `COUNT`.
+Plain `COUNT` measures sampling effort (occurrence density), not richness.
+The SQL returns the H3 index then the key to count distinctly:
+
+    SELECT h5, specieskey
+    FROM read_parquet('s3://public-gbif/.../hex/h0=*/data_0.parquet', hive_partitioning = true)
+    WHERE <coordinate-quality filters>   -- see the gbif STAC data-quality note
+    GROUP BY h5, specieskey
+
+Call `register_hex_tiles(sql=..., agg="COUNT_DISTINCT")`. Distinct-count is not
+pyramid-composable (siblings share species, so a parent's richness can't be
+summed from its children), so it is **exact at the finest resolution** and rolls
+up coarser levels with `MAX` — a lower bound that under-counts at low zoom but
+never over-counts. The result carries a `rollup_note` spelling this out.

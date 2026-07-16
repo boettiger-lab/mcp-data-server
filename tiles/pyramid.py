@@ -64,7 +64,7 @@ def build_pyramid_statements(
     so parent rollups produce correctly weighted averages instead of an
     unweighted mean-of-means.
     """
-    _VALID_AGG = {"AVG", "SUM", "MIN", "MAX", "COUNT"}
+    _VALID_AGG = {"AVG", "SUM", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"}
     agg_upper = agg.upper()
     if agg_upper not in _VALID_AGG:
         raise ValueError(f"agg must be one of {_VALID_AGG}, got {agg!r}")
@@ -89,6 +89,20 @@ def build_pyramid_statements(
         phase2_values = ", ".join(f'MIN("{c}") AS "{c}"' for c in value_columns)
     elif agg_upper == "MAX":
         phase1_values = ", ".join(f'MAX("{c}") AS "{c}"' for c in value_columns)
+        phase2_values = ", ".join(f'MAX("{c}") AS "{c}"' for c in value_columns)
+    elif agg_upper == "COUNT_DISTINCT":
+        # Distinct-count per hex (e.g. species richness). NOT re-aggregatable:
+        # a parent's distinct count can't be derived from its children's counts
+        # because sibling children share keys (#331). So this is exact only at
+        # the finest level; parents use MAX as a defensible lower bound.
+        # Phase 1: exact distinct count of each key column, grouped by (h, h0).
+        phase1_values = ", ".join(
+            f'COUNT(DISTINCT "{c}") AS "{c}"' for c in value_columns
+        )
+        # Phase 2: MAX up the pyramid. A parent's true richness is >= its
+        # largest child, so MAX never overstates (unlike SUM, which would
+        # double-count keys shared across siblings) — a lower bound at coarse
+        # zoom. See render_recipe / value_stats note and h3-guide.md.
         phase2_values = ", ".join(f'MAX("{c}") AS "{c}"' for c in value_columns)
     else:  # AVG
         # Phase 1: average raw source rows + carry COUNT for weighted parents.
@@ -262,6 +276,25 @@ def render_recipe(
     return {"source": source, "layer": layer}
 
 
+# COUNT_DISTINCT is exact only at the finest resolution; coarser levels roll up
+# with MAX, a lower bound (see build_pyramid_statements, #331). Surface this in
+# the result so a caller styling coarse zooms knows the values under-count.
+_COUNT_DISTINCT_ROLLUP_NOTE = (
+    "COUNT_DISTINCT is exact at the finest resolution (finest_res); coarser "
+    "pyramid levels roll up with MAX, a lower bound on the true distinct count "
+    "(a parent's richness is at least its largest child, but siblings may share "
+    "keys). Values are accurate at high zoom and under-count at low zoom."
+)
+
+
+def _rollup_note(agg: str) -> str | None:
+    """Human-facing caveat about rollup fidelity for aggs whose coarse levels
+    are not exact. None when the agg is exact at every level."""
+    if agg.upper() == "COUNT_DISTINCT":
+        return _COUNT_DISTINCT_ROLLUP_NOTE
+    return None
+
+
 def _json_dumps_escaped(obj) -> str:
     # DuckDB's COPY ... (FORMAT CSV, QUOTE '') writes the raw string. We must
     # escape any single quotes in the JSON so they don't break the SQL literal.
@@ -415,6 +448,9 @@ def cached_result_dict(plan: dict, cached: dict) -> dict:
         "feature_count_finest": cached["feature_count_finest"],
         "cache_hit": True,
     }
+    note = _rollup_note(cached.get("agg", ""))
+    if note:
+        result["rollup_note"] = note
     result.update(render_recipe(cached, plan["tile_url_template"]))
     return result
 
@@ -443,7 +479,9 @@ def prepare_hex_tiles(
       Any extra columns in the user SQL are ignored.
     - Other aggs: user SQL must return at least one value column after the H3
       index. Each is aggregated via `agg` at every resolution including the finest
-      (one row per (h, h0) cell at every level).
+      (one row per (h, h0) cell at every level). For agg="COUNT_DISTINCT" the
+      value column is the KEY to count distinctly (e.g. specieskey); the result
+      is exact at finest_res and a MAX-based lower bound at coarser levels (#331).
 
     Returns a "plan" dict with everything build_hex_tiles needs, plus a
     `cached` field that is the persisted metadata if the tileset already
@@ -637,6 +675,9 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
         "layer_name": MVT_LAYER_NAME,
         "feature_count_finest": feature_count,
     }
+    note = _rollup_note(agg)
+    if note:
+        result["rollup_note"] = note
     result.update(render_recipe(metadata, plan["tile_url_template"]))
     return result
 
@@ -670,6 +711,9 @@ def register_hex_tiles(
       through raw at the finest level. Carried H3 index/partition columns
       (names matching `h<res>`, e.g. h0, h3) are dropped from value_columns —
       they're join/partition keys, not values (#319).
+    - agg="COUNT_DISTINCT": the value column is the key counted distinctly per
+      hex (species richness = distinct specieskey per cell). Exact at finest_res;
+      coarser levels roll up with MAX (a lower bound — see `rollup_note`, #331).
     """
     plan = prepare_hex_tiles(
         con=con, sql=sql, finest_res=finest_res,

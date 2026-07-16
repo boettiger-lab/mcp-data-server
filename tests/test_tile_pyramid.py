@@ -171,6 +171,33 @@ class TestBuildPyramidStatements:
         assert 'SUM("v2" * __pyramid_weight) / SUM(__pyramid_weight) AS "v2"' in stmts[1]
         assert "SUM(__pyramid_weight) AS __pyramid_weight" in stmts[1]
 
+    def test_count_distinct_mode_finest_exact_parents_max(self):
+        # #331: COUNT_DISTINCT is exact at the finest level and rolls up with
+        # MAX (a lower bound) because distinct-count is not pyramid-composable.
+        stmts = build_pyramid_statements(
+            user_sql="SELECT h5, specieskey FROM src",
+            finest_res=5, min_res=2, agg="COUNT_DISTINCT",
+            value_columns=["specieskey"], h3_column="h5",
+            output_uri="s3://public-output/hex/abc/",
+        )
+        # Phase 1: exact distinct count of the key, aliased back to the key name.
+        assert 'COUNT(DISTINCT "specieskey") AS "specieskey"' in stmts[0]
+        # Parents: MAX rollup (never SUM — that would double-count shared keys).
+        for s in stmts[1:]:
+            assert 'MAX("specieskey") AS "specieskey"' in s
+            assert "SUM(" not in s
+
+    def test_count_distinct_requires_value_columns(self):
+        # Like the other value aggs, COUNT_DISTINCT needs a key column — the
+        # thing to count distinctly. Empty value_columns must raise.
+        with pytest.raises(ValueError, match="value column"):
+            build_pyramid_statements(
+                user_sql="SELECT h5 FROM src",
+                finest_res=5, min_res=2, agg="COUNT_DISTINCT",
+                value_columns=[], h3_column="h5",
+                output_uri="s3://public-output/hex/abc/",
+            )
+
     def test_invalid_agg_raises(self):
         import pytest
         with pytest.raises(ValueError, match="agg must be one of"):
@@ -404,6 +431,46 @@ class TestRegisterHexTiles:
         for key in ("hash", "bounds", "finest_res", "min_res", "value_columns",
                     "value_stats", "layer_name", "feature_count_finest"):
             assert second[key] == first[key], f"{key} differs across cache hit"
+
+    def test_count_distinct_exact_at_finest_lower_bound_at_parent(self, local_bucket, h3_conn):
+        # #331: species-richness case. Two res-6 sibling cells sharing a res-5
+        # parent, sharing one species. Finest richness must be EXACT; the parent
+        # must NOT double-count the shared species (SUM would give 4) — MAX
+        # rollup yields a lower bound of 2.
+        kids = h3_conn.sql(
+            "SELECT UNNEST(h3_cell_to_children(h3_latlng_to_cell(37.8, -122.3, 5), 6)) AS h6"
+        ).fetchall()
+        a, b = kids[0][0], kids[1][0]
+        # Cell A species {1,2}; Cell B species {2,3}. True parent distinct = 3.
+        user_sql = f"""
+            SELECT h6, specieskey FROM (VALUES
+              ({a}::UBIGINT, 1), ({a}::UBIGINT, 2),
+              ({b}::UBIGINT, 2), ({b}::UBIGINT, 3)
+            ) t(h6, specieskey)
+        """
+        result = register_hex_tiles(
+            con=h3_conn, sql=user_sql, finest_res=6, min_res=5,
+            agg="COUNT_DISTINCT", zoom_offset=-1,
+        )
+        # The key column is the value column, and the rollup caveat is surfaced.
+        assert result["value_columns"] == ["specieskey"]
+        assert "rollup_note" in result and "lower bound" in result["rollup_note"]
+
+        base = local_bucket / "hex" / result["hash"]
+        finest = dict(h3_conn.sql(
+            f"SELECT h, specieskey FROM "
+            f"read_parquet('{base}/res=6/**/*.parquet', hive_partitioning=true)"
+        ).fetchall())
+        # Exact distinct count per finest cell: 2 species each.
+        assert finest[a] == 2 and finest[b] == 2
+        # Parent (res=5): MAX(2, 2) = 2 — a lower bound, and crucially NOT the
+        # SUM-of-children 4 that would double-count the shared species.
+        parent = h3_conn.sql(
+            f"SELECT specieskey FROM "
+            f"read_parquet('{base}/res=5/**/*.parquet', hive_partitioning=true)"
+        ).fetchall()
+        assert len(parent) == 1
+        assert parent[0][0] == 2
 
     def test_auto_detect_raises_on_empty_sql(self, local_bucket, h3_conn):
         # SQL filters to zero rows — auto-detect can't sample a cell.

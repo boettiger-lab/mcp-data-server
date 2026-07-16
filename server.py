@@ -579,6 +579,13 @@ def register_hex_tiles(
         - "AVG" / "SUM" / "MIN" / "MAX": SQL must return at least one
           numeric value column after the H3 index; each is aggregated by
           `agg` at every coarser level.
+        - "COUNT_DISTINCT": SQL must return a KEY column after the H3 index
+          (the thing counted distinctly, e.g. specieskey for species
+          richness). Output property is that column, holding the distinct
+          count per hex. Exact at the finest resolution; coarser pyramid
+          levels roll up with MAX, a lower bound (see `rollup_note` in the
+          result). Use this for richness maps — NOT plain COUNT, which
+          measures sampling effort, not distinct species.
     - `color_scale`: "linear" (default) or "log". Controls how the viridis
       ramp is spread across the data domain in the returned recipe; the tiles
       themselves are identical either way. Use "log" for right-skewed data
@@ -634,6 +641,17 @@ def register_hex_tiles(
 
        Call agg="AVG" (or the matching op). The SEMI JOIN must sit on the
        raw read_parquet(), upstream of GROUP BY — see h3-guide.md Problem 2.
+
+    3. Distinct-count per hex (e.g. species richness — distinct species
+       per cell, NOT occurrence count):
+
+       SELECT h<H>, specieskey                 -- H3 index, then the key to count
+       FROM read_parquet('<hex_path>', hive_partitioning = true)
+       WHERE <coordinate-quality filters>      -- see the gbif STAC data-quality note
+       GROUP BY h<H>, specieskey               -- pre-dedup optional; the agg does the distinct
+
+       Call agg="COUNT_DISTINCT". Exact at the finest resolution; coarser
+       levels are a MAX-based lower bound (result carries `rollup_note`).
 
     Always pass hive_partitioning = true so the planner can prune h0=* files.
     """
