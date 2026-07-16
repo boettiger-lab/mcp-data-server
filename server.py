@@ -402,6 +402,7 @@ from tiles.pyramid import (
     build_hex_tiles,
     cached_result_dict,
     render_recipe,
+    _rollup_note,
     lock_is_stale,
     read_existing_metadata,
     read_failed,
@@ -778,7 +779,7 @@ def _done_response(base: dict, meta: dict) -> dict:
     a build_hex_tiles return value — both have the same shape. Includes the
     paste-ready render recipe (source + layer) so the agent renders
     the result without further branching."""
-    return {
+    result = {
         **base,
         "status": "done",
         "bounds": meta["bounds"],
@@ -791,6 +792,14 @@ def _done_response(base: dict, meta: dict) -> dict:
         "feature_count_finest": meta["feature_count_finest"],
         **render_recipe(meta, base["tile_url_template"]),
     }
+    # Surface the rollup caveat for non-composable aggs (COUNT_DISTINCT). This
+    # is the async-poll path — the common one for big builds like global GBIF
+    # richness — so the note MUST appear here too, not just in the fast/cache
+    # paths of register_hex_tiles (#331).
+    note = _rollup_note(meta.get("agg", ""))
+    if note:
+        result["rollup_note"] = note
+    return result
 
 
 def _status_check_once(hash: str, con=None):
