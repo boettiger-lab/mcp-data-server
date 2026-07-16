@@ -1015,6 +1015,36 @@ class TestGetHexTileStatus:
         assert "bounds" in status
         assert "value_stats" in status
 
+    def test_count_distinct_status_carries_rollup_note(self, isolated_jobs, monkeypatch):
+        # #331: the rollup caveat must reach the async-poll path too — big
+        # COUNT_DISTINCT builds (e.g. global GBIF richness) return "running"
+        # and the model only ever sees the done result via get_hex_tile_status.
+        import server
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        sub = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 42 AS specieskey",
+            agg="COUNT_DISTINCT",
+        )
+        assert sub["status"] == "done"
+        assert "rollup_note" in sub and "lower bound" in sub["rollup_note"]
+        # The poll path (_done_response) must include it as well.
+        status = server.get_hex_tile_status(hash=sub["hash"])
+        assert status["status"] == "done"
+        assert "rollup_note" in status and "lower bound" in status["rollup_note"]
+
+    def test_non_count_distinct_status_has_no_rollup_note(self, isolated_jobs, monkeypatch):
+        # Exact aggs (AVG here) must NOT carry the caveat — it's specific to
+        # the non-composable COUNT_DISTINCT rollup.
+        import server
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        sub = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        status = server.get_hex_tile_status(hash=sub["hash"])
+        assert status["status"] == "done"
+        assert "rollup_note" not in status
+
     def test_long_poll_returns_done_when_build_finishes_during_wait(self, isolated_jobs, monkeypatch):
         """wait_seconds blocks server-side until the build completes,
         avoiding the rapid-poll antipattern."""
