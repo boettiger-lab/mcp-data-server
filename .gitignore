@@ -191,3 +191,7 @@ cython_debug/
 node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+
+# Editor settings — ignore .vscode noise but keep the shared MCP config
+.vscode/*
+!.vscode/mcp.json
