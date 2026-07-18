@@ -12,7 +12,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.session import BaseSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from stac import STAC_DATASETS, STAC_LOAD_ERRORS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection
+from stac import STAC_DATASETS, STAC_LOAD_ERRORS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection, start_periodic_refresh as _stac_start_periodic_refresh
 
 # Workaround for https://github.com/boettiger-lab/mcp-data-server/issues/5
 # send_notification crashes with ClosedResourceError when the client disconnects
@@ -1021,6 +1021,10 @@ if __name__ == "__main__":
     print("🚀 Starting DuckDB MCP Server...", file=sys.stderr)
     print(f"📂 STAC catalog: {STAC_CATALOG_URL}", file=sys.stderr)
     print(f"📊 Datasets loaded: {len(STAC_DATASETS)}", file=sys.stderr)
+    # Keep every replica's STAC snapshot fresh without a rollout — a publish to S3
+    # (new dataset OR new asset on an existing collection) becomes visible within
+    # one refresh interval instead of the pod's lifetime (#337).
+    _stac_start_periodic_refresh()
     uvicorn.run(
         app,
         host="0.0.0.0",

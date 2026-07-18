@@ -9,6 +9,7 @@ high-speed internal reads via the Ceph S3 endpoint.
 
 import os
 import sys
+import threading
 import pystac
 import requests
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -42,6 +43,22 @@ _STAC_CHILD_RETRY_TIMEOUT = int(os.environ.get("STAC_CHILD_RETRY_TIMEOUT", "8"))
 
 # Legacy alias retained so external callers (if any) that read the old name still work.
 _STAC_TIMEOUT = _STAC_CHILD_TIMEOUT
+
+# Seconds between background re-walks of the default catalog (see #337). The
+# startup snapshot goes stale the moment a new asset/dataset is published to S3;
+# the on-miss re-fetch (#11) only rescues *new* dataset ids, never an updated
+# asset on an already-cached collection (a cache HIT). A per-pod timer keeps
+# every replica converged without an external trigger or a rollout. `0` (or
+# negative) disables the thread — used by tests and one-shot tooling.
+_STAC_REFRESH_INTERVAL = int(os.environ.get("STAC_REFRESH_INTERVAL", "900"))
+
+# Guards the atomic swap of the shared module caches (STAC_DATASETS / _STAC_RAW /
+# STAC_LOAD_ERRORS) against concurrent readers. The clear()+update() swap has a
+# transient-empty window a concurrent request could otherwise observe as a
+# spurious "not found"; the background refresh (#337) makes that race routine.
+# Only the fast in-memory swap and the shared-dict reads take the lock — the slow
+# HTTP walk in fetch_stac_catalog runs lock-free.
+_STAC_LOCK = threading.RLock()
 
 # Navigational STAC link rel types excluded from _collection_to_dict output.
 _NAV_RELS = {"root", "parent", "self", "child", "item"}
@@ -697,13 +714,16 @@ def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> di
         # load produced something. If every child failed, keep the previous snapshot
         # rather than wiping a working cache. Errors are always refreshed so operators
         # and the list_datasets footer see the current failure state.
-        if datasets:
-            STAC_DATASETS.clear()
-            STAC_DATASETS.update(datasets)
-            _STAC_RAW.clear()
-            _STAC_RAW.update(raw)
-        STAC_LOAD_ERRORS.clear()
-        STAC_LOAD_ERRORS.update(errors)
+        # Held under _STAC_LOCK so a concurrent reader never sees a half-swapped
+        # (transiently empty) cache — see #337.
+        with _STAC_LOCK:
+            if datasets:
+                STAC_DATASETS.clear()
+                STAC_DATASETS.update(datasets)
+                _STAC_RAW.clear()
+                _STAC_RAW.update(raw)
+            STAC_LOAD_ERRORS.clear()
+            STAC_LOAD_ERRORS.update(errors)
 
     return datasets
 
@@ -715,6 +735,68 @@ STAC_DATASETS: dict[str, str] = {}
 # Kick off the initial load at import. Populates STAC_DATASETS, _STAC_RAW,
 # STAC_LOAD_ERRORS in place.
 fetch_stac_catalog()
+
+# Set once start_periodic_refresh() spawns the daemon, so repeat calls are no-ops.
+_refresh_thread: threading.Thread | None = None
+
+
+def _refresh_loop(interval: int, stop_event: threading.Event) -> None:
+    """Re-walk the default catalog every *interval* seconds until *stop_event*.
+
+    A publish to S3 (new dataset OR a new asset on an existing collection) is
+    invisible to get_stac_details/get_collection/list_datasets until the in-process
+    snapshot is rebuilt — the on-miss re-fetch (#11) can't help the updated-asset
+    case because it's a cache HIT. This per-pod timer rebuilds the snapshot so every
+    replica converges without an external trigger or a rollout (#337).
+
+    Failures are swallowed: fetch_stac_catalog already keeps the previous snapshot
+    when a walk yields nothing, so a transient S3 blip just means a stale-but-working
+    cache until the next tick — never a crashed thread or a wiped catalog.
+    """
+    while not stop_event.wait(interval):
+        try:
+            fetch_stac_catalog()
+        except Exception as e:  # never let the daemon die on a transient error
+            print(
+                f"⚠️ STAC periodic refresh failed (keeping previous snapshot): "
+                f"{type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+
+
+def start_periodic_refresh(interval: int = None) -> threading.Thread | None:
+    """Spawn the background refresh daemon (idempotent). Returns the thread, or
+    None when disabled (interval <= 0).
+
+    Started explicitly from server.py's __main__ rather than at import, so tests
+    and one-shot tooling that import `stac` don't spawn a background thread.
+    """
+    global _refresh_thread
+    if interval is None:
+        interval = _STAC_REFRESH_INTERVAL
+    if interval <= 0:
+        print(
+            "⏸️ STAC periodic refresh disabled (STAC_REFRESH_INTERVAL <= 0)",
+            file=sys.stderr,
+        )
+        return None
+    if _refresh_thread is not None and _refresh_thread.is_alive():
+        return _refresh_thread
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_refresh_loop,
+        args=(interval, stop_event),
+        name="stac-refresh",
+        daemon=True,
+    )
+    thread._stop_event = stop_event  # handle for tests / future shutdown
+    thread.start()
+    _refresh_thread = thread
+    print(
+        f"🔄 STAC periodic refresh started (every {interval}s)",
+        file=sys.stderr,
+    )
+    return thread
 
 
 def _render_inline_catalog(catalog: dict) -> dict[str, str]:
@@ -766,9 +848,12 @@ def list_datasets(
         # can detect failure via returned dict being empty or partial.
         footer_errors: dict = {}
     else:
-        datasets = STAC_DATASETS
+        # Snapshot the shared caches under the lock so a concurrent background
+        # refresh (#337) can't mutate them mid-iteration below.
+        with _STAC_LOCK:
+            datasets = dict(STAC_DATASETS)
+            footer_errors = dict(STAC_LOAD_ERRORS)
         url = STAC_CATALOG_URL
-        footer_errors = STAC_LOAD_ERRORS
     if not datasets and not footer_errors:
         return f"No datasets loaded. STAC catalog: {url}"
     lines = [f"# Available Datasets ({len(datasets)} collections)\n"]
@@ -805,18 +890,21 @@ def get_dataset(
         return _format_collection(col, sub_children=sub_children)
 
     if catalog_url:
+        # Local (unshared) dict — no lock needed.
         datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
+        result = _fuzzy_lookup(datasets, dataset_id)
     else:
-        datasets = STAC_DATASETS
-
-    result = _fuzzy_lookup(datasets, dataset_id)
+        # Shared cache — read under the lock (guards against a concurrent refresh #337).
+        with _STAC_LOCK:
+            result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
     if result is not None:
         return result
 
     # Cache miss (default catalog only): re-fetch in case datasets were added since startup
     if not catalog_url:
         fetch_stac_catalog()  # populates STAC_DATASETS in place if successful
-        result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
+        with _STAC_LOCK:
+            result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
         if result is not None:
             return result
     return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
@@ -916,15 +1004,18 @@ def get_collection(
             return {"error": f"Failed to fetch catalog: {e}"}
         return {"error": f"Collection '{collection_id}' not found. Use browse_stac_catalog to list available collections."}
 
-    # Default catalog: look up from pre-populated cache.
-    result = _fuzzy_lookup(_STAC_RAW, collection_id)
+    # Default catalog: look up from pre-populated cache (read under the lock so a
+    # concurrent background refresh #337 can't mutate _STAC_RAW mid-lookup).
+    with _STAC_LOCK:
+        result = _fuzzy_lookup(_STAC_RAW, collection_id)
     if result is not None:
         return result
 
     # Cache miss: re-fetch.
     # fetch_stac_catalog() updates _STAC_RAW when catalog_url is None.
     fetch_stac_catalog()
-    result = _fuzzy_lookup(_STAC_RAW, collection_id)
+    with _STAC_LOCK:
+        result = _fuzzy_lookup(_STAC_RAW, collection_id)
     if result is not None:
         return result
 
