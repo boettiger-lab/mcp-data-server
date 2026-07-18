@@ -7,6 +7,7 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import stac
 from stac import list_datasets, get_dataset, fetch_stac_catalog, get_collection, _collection_to_dict, _fuzzy_lookup, _format_collection, _href_to_s3
 
 
@@ -1793,4 +1794,57 @@ class TestExtractParquetAssetsExtensions:
         rendered = "\n".join(_extract_parquet_assets(col))
         assert "h3:native_resolution" not in rendered
         assert "h3:parent_resolutions" not in rendered
+
+
+class TestPeriodicRefresh:
+    """Background per-pod catalog refresh (#337): a publish to S3 becomes visible
+    within one interval instead of only on pod restart."""
+
+    def teardown_method(self):
+        # Never leak a live daemon between tests.
+        t = stac._refresh_thread
+        if t is not None:
+            ev = getattr(t, "_stop_event", None)
+            if ev is not None:
+                ev.set()
+            t.join(timeout=2)
+        stac._refresh_thread = None
+
+    def test_disabled_returns_none(self):
+        """interval <= 0 disables the thread entirely (tests / one-shot tooling)."""
+        assert stac.start_periodic_refresh(0) is None
+        assert stac.start_periodic_refresh(-5) is None
+        assert stac._refresh_thread is None
+
+    def test_loop_refetches_each_tick_until_stopped(self):
+        """_refresh_loop re-walks once per non-stopped tick, then exits on stop."""
+        stop = MagicMock()
+        # wait() -> False twice (proceed), then True (stop): expect 2 refetches.
+        stop.wait.side_effect = [False, False, True]
+        with patch("stac.fetch_stac_catalog") as mock_fetch:
+            stac._refresh_loop(interval=1, stop_event=stop)
+        assert mock_fetch.call_count == 2
+
+    def test_loop_swallows_fetch_errors(self):
+        """A transient S3 failure must not kill the daemon (keeps prev snapshot)."""
+        stop = MagicMock()
+        stop.wait.side_effect = [False, True]
+        with patch("stac.fetch_stac_catalog", side_effect=RuntimeError("boom")):
+            # Must not raise.
+            stac._refresh_loop(interval=1, stop_event=stop)
+
+    def test_start_is_idempotent(self):
+        """Repeat calls return the same live daemon, not a second thread."""
+        stac._refresh_thread = None
+        with patch("stac.fetch_stac_catalog"):
+            # Long interval so the thread blocks in wait() rather than refetching.
+            t1 = stac.start_periodic_refresh(3600)
+            assert t1 is not None and t1.is_alive()
+            t2 = stac.start_periodic_refresh(3600)
+            assert t2 is t1
+
+    def test_default_interval_from_env(self):
+        """start_periodic_refresh() with no arg uses the module default knob."""
+        with patch.object(stac, "_STAC_REFRESH_INTERVAL", 0):
+            assert stac.start_periodic_refresh() is None
 
