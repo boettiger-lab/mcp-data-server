@@ -74,14 +74,24 @@ release tags. The image is the unit of release.
 - `:<git-sha>` — immutable; one per commit.
 - `:vX.Y.Z` — immutable; built on release tags. **prod** pins this (by digest, below).
 
-**Merge to `main` → redeploy dev:**
-```
-kubectl apply -f k8s/dev-deployment.yaml
-kubectl rollout restart deployment/dev-duckdb-mcp -n biodiversity
-```
-dev pins `:main` with `imagePullPolicy: Always`, so the restart pulls the freshest build.
-**Wait for the `docker.yml` run on your merge to go green first** — rolling before the
-image is pushed gives `ImagePullBackOff`.
+**Merge to `main` → redeploy dev (promote by digest — same discipline as prod):**
+Dev pins an immutable `:main@sha256:…` (tag for humans, digest enforced), **not** the
+bare moving `:main` tag. `:main` + `imagePullPolicy: Always` is *non-convergent*: `Always`
+re-resolves the mutable `:main` → digest independently per pod at each (re)start, and
+`:main` moves on every push to `main` plus the weekly cron. So pods brought up seconds
+apart, or any single later liveness/eviction/crash/cron restart, silently drift onto
+different builds — the exact cross-pod skew dev's ≥2 replicas exist to catch (issue #341).
+Pinning a digest makes every dev pod run one reproducible build.
+
+1. **Wait for the `docker.yml` run on your merge to go green first** — rolling before the
+   image is pushed gives `ImagePullBackOff`.
+2. Read the freshly-built `:main` digest from the build run's job summary, or:
+   `docker buildx imagetools inspect ghcr.io/boettiger-lab/mcp-data-server:main --format '{{.Manifest.Digest}}'`
+3. Set `image: ghcr.io/boettiger-lab/mcp-data-server:main@sha256:<digest>` in
+   `k8s/dev-deployment.yaml` (keep `imagePullPolicy: IfNotPresent`).
+4. `kubectl apply -f k8s/dev-deployment.yaml`
+5. `kubectl rollout restart deployment/dev-duckdb-mcp -n biodiversity`
+6. Verify convergence (below) — this is dev's canary job; do not skip it.
 
 **Tag a release → redeploy prod (promote by digest):**
 1. `git tag vX.Y.Z && git push origin vX.Y.Z`, then wait for `docker.yml` to build `:vX.Y.Z`.
@@ -97,11 +107,17 @@ disagree, the digest wins). **Never apply prod while the manifest points at an i
 hasn't built yet** — the rollout stalls on `ImagePullBackOff`. `kubectl apply` must precede
 `rollout restart`; a git push alone does not update the cluster.
 
-Verify all prod replicas converge on a single digest after rollout:
+**Verify all replicas converge on a single digest after rollout** (both dev and prod —
+dev is the multi-replica canary, so its convergence matters as much as prod's). Swap the
+label for the deployment you rolled (`duckdb-mcp` for prod, `dev-duckdb-mcp` for dev):
 ```
 kubectl -n biodiversity get pods -l app=duckdb-mcp \
   -o custom-columns='NAME:.metadata.name,IMAGE:.status.containerStatuses[0].imageID'
 ```
+Every live (non-`Terminating`) pod must report the **same** `imageID` digest, and it must
+match the digest pinned in the manifest. Stuck `Terminating` zombie pods on unreachable
+NRP nodes are out of the Service's endpoints, so ignore them here — **never** force-delete
+them (NRP ops policy).
 
 ---
 
