@@ -1,0 +1,24 @@
+{
+  "title": "MCP Data Server: an open Model Context Protocol server connecting AI agents to cloud-native scientific data",
+  "description": "An open Model Context Protocol (MCP) server that connects AI agents to cloud-native data. It grounds agents in STAC metadata and confines them to validated cloud-native engines — SQL over Parquet on S3 via DuckDB with H3 spatial indexing — so they can query terabyte-scale data without downloading it, misreading it, or silently failing at scale. Runs locally for sensitive data or on autoscaling Kubernetes for scale.",
+  "license": "bsd-3-clause",
+  "upload_type": "software",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Boettiger, Carl",
+      "affiliation": "University of California, Berkeley",
+      "orcid": "0000-0002-1642-628X"
+    }
+  ],
+  "keywords": [
+    "Model Context Protocol",
+    "MCP",
+    "STAC",
+    "DuckDB",
+    "cloud-native",
+    "geospatial",
+    "H3",
+    "AI agents"
+  ]
+}
