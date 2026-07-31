@@ -1,4 +1,7 @@
-mcp
+# Pinned: the SDK's 2.0.0 (2026-07-28) moved/removed `mcp.server.fastmcp`, which
+# server.py imports. Unpinned, every fresh install resolves to 2.x and CI fails at
+# collection on every branch. Bump only together with the 2.x import migration.
+mcp>=1.29,<2
 # Pinned: the community `h3` extension is built per exact DuckDB version and
 # lags new releases. Unpinned, CI/image builds pull the latest DuckDB for which
 # `INSTALL h3 FROM community` may have no candidate, breaking every tile path.
