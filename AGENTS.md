@@ -20,6 +20,14 @@ server on this machine, stop. The workflow is: land the change on dev (dev track
 `:main` — see Rollout below), then validate on dev with the headless matrix
 (see *Validating guidance changes*).
 
+**When NRP Ceph (`s3-west.nrp-nautilus.io`) is down**, don't improvise a fallback:
+follow [docs/guide/mirror-failover.md](docs/guide/mirror-failover.md) — the single
+runbook for the MinIO mirror and the mirror-configured head at
+`duckdb-mcp.carlboettiger.info`. Its "For agents querying through MCP" section is
+the short version: the normal STAC tools work on a mirror head; use the paths the
+tools return verbatim. Older outage notes elsewhere describing a source.coop route
+are superseded.
+
 ## Contributing
 
 This repo uses **GitHub Flow**: all changes go through a branch + PR, never committed directly to `main`. `main` has branch protection enforced — direct pushes are rejected.
