@@ -12,7 +12,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.session import BaseSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from stac import STAC_DATASETS, STAC_LOAD_ERRORS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection, start_periodic_refresh as _stac_start_periodic_refresh
+from stac import STAC_DATASETS, STAC_LOAD_ERRORS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection, public_catalog_url as _stac_public_catalog_url, start_periodic_refresh as _stac_start_periodic_refresh
 
 # Workaround for https://github.com/boettiger-lab/mcp-data-server/issues/5
 # send_notification crashes with ClosedResourceError when the client disconnects
@@ -398,6 +398,7 @@ from tiles.endpoint import serve_metadata, serve_tile
 from tiles.db import build_tile_connection
 from tiles.pyramid import (
     MVT_LAYER_NAME,
+    _public_base_url,
     prepare_hex_tiles,
     build_hex_tiles,
     cached_result_dict,
@@ -957,7 +958,20 @@ async def _healthz(_request):
 async def _version(_request):
     # App version + git SHA of the running image (issue #221). Lets consumers and
     # ops confirm what's deployed without cluster access.
-    return JSONResponse({"version": APP_VERSION, "git_sha": GIT_SHA})
+    #
+    # Also the server's self-configuration surface (#346): a client that holds only
+    # an `mcp_url` can GET <root>/version and learn where to fetch the catalog and
+    # tiles, with no MCP session and no markdown parsing. That closes the failure
+    # mode where a client's hardcoded `catalog` URL is down while this head is
+    # healthy on a mirror. Only *public* URLs go here — this route is deliberately
+    # auth-exempt, so the internal STAC_CATALOG_URL stays out of it (it is reported
+    # only in browse_stac_catalog, inside an authenticated session).
+    return JSONResponse({
+        "version": APP_VERSION,
+        "git_sha": GIT_SHA,
+        "stac_catalog_url": _stac_public_catalog_url(),
+        "public_base_url": _public_base_url(),
+    })
 
 # -------------------------------------------------------------------------
 # 10. SERVER START
@@ -1020,6 +1034,10 @@ if __name__ == "__main__":
 
     print("🚀 Starting DuckDB MCP Server...", file=sys.stderr)
     print(f"📂 STAC catalog: {STAC_CATALOG_URL}", file=sys.stderr)
+    if _stac_public_catalog_url() != STAC_CATALOG_URL:
+        # Worth a boot line: if this is wrong or unset, clients are told to fetch a
+        # catalog they can't reach (#346).
+        print(f"🌐 STAC catalog (advertised to clients): {_stac_public_catalog_url()}", file=sys.stderr)
     print(f"📊 Datasets loaded: {len(STAC_DATASETS)}", file=sys.stderr)
     # Keep every replica's STAC snapshot fresh without a rollout — a publish to S3
     # (new dataset OR new asset on an existing collection) becomes visible within

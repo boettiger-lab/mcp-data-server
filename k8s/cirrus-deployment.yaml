@@ -33,6 +33,12 @@ spec:
         # resolve to the on-node MinIO S3 endpoint (plain http, path-style).
         - name: STAC_CATALOG_URL
           value: "http://minio-svc.minio.svc.cluster.local:9000/public-data/stac/catalog.json"
+        # Same catalog, external address. STAC_CATALOG_URL above resolves only
+        # inside k3s, so it's useless in a client config; this is what
+        # browse_stac_catalog and GET /version advertise so a client can point
+        # itself at this mirror without reading these manifests (#346).
+        - name: STAC_PUBLIC_CATALOG_URL
+          value: "https://minio.carlboettiger.info/public-data/stac/catalog.json"
         # Reroute nrp_ceph STAC metadata fetches to in-cluster MinIO.
         - name: S3_ENDPOINT_URL
           value: "http://minio-svc.minio.svc.cluster.local:9000"
