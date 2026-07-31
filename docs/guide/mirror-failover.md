@@ -38,6 +38,23 @@ In the app config (`layers-input.json`):
 If the app's `mcp_url` comes from a deployment env var rather than the config
 file, that is a manifest change: `kubectl apply` it, not just a rollout restart.
 
+### Don't guess the mirror host — ask the head
+
+A head reports the client-reachable URL of the catalog it is reading, so step 1
+can be read off the server instead of out of these manifests (#346):
+
+```bash
+curl -s https://duckdb-mcp.carlboettiger.info/version
+# {"version":"...","git_sha":"...",
+#  "stac_catalog_url":"https://minio.carlboettiger.info/public-data/stac/catalog.json",
+#  "public_base_url":"https://duckdb-mcp.carlboettiger.info"}
+```
+
+`/version` takes no MCP session and no auth token, so an app that has an
+`mcp_url` can derive its `catalog` at boot rather than carrying a hardcoded one
+that may be the very thing that's down. `browse_stac_catalog` reports the same
+URL in its header line.
+
 ### Verify before declaring it done
 
 ```bash
@@ -75,10 +92,12 @@ for how to stop owing it.
   paths and creates the matching anonymous, prefix-scoped DuckDB secrets. Never
   hand-edit an endpoint into query SQL.
 - **Internal vs public hosts.** A head's own read endpoint may be an in-cluster
-  address (e.g. `minio-svc.minio.svc.cluster.local`); the URLs it hands you for
-  client use are public. If `browse_stac_catalog` reports an in-cluster catalog
-  root, that's a display bug (#346) — the public equivalent is the mirror host
-  above; asset hrefs from `get_collection` are already public.
+  address (e.g. `minio-svc.minio.svc.cluster.local`), but every URL it hands you
+  for client use is public: asset hrefs from `get_collection`, tile URLs, and —
+  since #346 — the catalog root in `browse_stac_catalog`, which names the
+  in-cluster address only as a labelled aside when the two differ. An
+  unqualified in-cluster catalog root means the head predates #346; get the
+  public equivalent from `GET /version` (above).
 - **When mixing sources, always pass `s3_scope`.** A per-request `s3_endpoint`
   (or credentials) *without* a scope applies to every `s3://` path in that query
   and disables the server default for the request (deterministic since #273) —
@@ -94,6 +113,12 @@ S3_DEFAULT_ENDPOINT=minio.carlboettiger.info
 S3_SOURCES='[{"name":"minio","https_prefix":"https://minio.carlboettiger.info/","s3_prefix":"s3://"}]'
 STAC_CATALOG_URL=https://minio.carlboettiger.info/public-data/stac/catalog.json
 ```
+
+If your head reads the catalog over an address clients can't resolve (an
+in-cluster service DNS name, as the cirrus deployment does), also set
+`STAC_PUBLIC_CATALOG_URL` to the external URL of that same catalog — that is what
+`/version` and `browse_stac_catalog` advertise. It defaults to `STAC_CATALOG_URL`,
+so a head configured like the block above needs nothing.
 
 `s3://public-*` reads — and hex-tile reads, which honor the same default
 endpoint (#275) — then resolve to the mirror anonymously, with no per-query

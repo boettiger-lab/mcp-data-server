@@ -44,6 +44,7 @@ See [`AGENTS.md` → Rollout workflow](https://github.com/boettiger-lab/mcp-data
 
 | Variable | Default | Description |
 |---|---|---|
-| `STAC_CATALOG_URL` | NRP public catalog | URL of the STAC catalog to serve |
+| `STAC_CATALOG_URL` | NRP public catalog | URL of the STAC catalog to serve (the address *this server* reads) |
+| `STAC_PUBLIC_CATALOG_URL` | `STAC_CATALOG_URL` | The same catalog's client-reachable URL. Set it only when the server reads the catalog over an address clients can't resolve (e.g. an in-cluster mirror); this is what `browse_stac_catalog` and `GET /version` advertise |
 | `THREADS` | 100 | DuckDB thread count (S3 workloads are I/O-bound) |
 | `PORT` | 8000 | HTTP server port |

@@ -1714,6 +1714,111 @@ class TestInlineCollectionContent:
         assert result["id"] == "inline-col"
 
 
+class TestPublicCatalogUrl:
+    """`browse_stac_catalog` must advertise a catalog URL a *client* can fetch.
+
+    On cirrus the server reads an in-cluster MinIO address, so reporting
+    `STAC_CATALOG_URL` verbatim gave clients an unresolvable host and no way to
+    self-configure from the server (issue #346).
+    """
+
+    def _reset(self, stac_mod):
+        stac_mod.STAC_DATASETS.clear()
+        stac_mod._STAC_RAW.clear()
+        stac_mod.STAC_LOAD_ERRORS.clear()
+
+    def test_defaults_to_internal_url_when_unset(self, monkeypatch):
+        """No STAC_PUBLIC_CATALOG_URL → the internal URL, unchanged (NRP prod)."""
+        import stac
+
+        monkeypatch.delenv("STAC_PUBLIC_CATALOG_URL", raising=False)
+        monkeypatch.setattr(stac, "STAC_CATALOG_URL", "https://s3-west.example/catalog.json")
+        assert stac.public_catalog_url() == "https://s3-west.example/catalog.json"
+
+    def test_env_override_read_at_call_time(self, monkeypatch):
+        """Set → the public URL wins, with no module reload (same contract as
+        MCP_PUBLIC_BASE_URL in tiles/pyramid.py)."""
+        import stac
+
+        monkeypatch.setenv("STAC_PUBLIC_CATALOG_URL", "https://minio.example/catalog.json")
+        assert stac.public_catalog_url() == "https://minio.example/catalog.json"
+
+    def test_blank_env_falls_back_to_internal(self, monkeypatch):
+        """An empty/whitespace value is treated as unset, not as an empty URL —
+        otherwise a manifest with `value: ""` would advertise nothing."""
+        import stac
+
+        monkeypatch.setenv("STAC_PUBLIC_CATALOG_URL", "   ")
+        monkeypatch.setattr(stac, "STAC_CATALOG_URL", "http://internal.svc:9000/catalog.json")
+        assert stac.public_catalog_url() == "http://internal.svc:9000/catalog.json"
+
+    def test_list_datasets_reports_public_url_and_labels_internal(self, monkeypatch):
+        """When the two differ, the header line is the public URL and the internal
+        one appears only as a labelled aside."""
+        import stac
+
+        self._reset(stac)
+        stac.STAC_DATASETS["ds-1"] = "**DS 1**\nDescription"
+        monkeypatch.setattr(
+            stac, "STAC_CATALOG_URL", "http://minio-svc.minio.svc.cluster.local:9000/public-data/stac/catalog.json"
+        )
+        monkeypatch.setenv(
+            "STAC_PUBLIC_CATALOG_URL", "https://minio.carlboettiger.info/public-data/stac/catalog.json"
+        )
+
+        out = stac.list_datasets()
+
+        assert "STAC catalog: `https://minio.carlboettiger.info/public-data/stac/catalog.json`" in out
+        assert "server reads it at http://minio-svc.minio.svc.cluster.local:9000" in out
+        assert "use the first URL in client configs" in out
+        # The unresolvable host must never be the one presented as *the* catalog.
+        assert "STAC catalog: `http://minio-svc" not in out
+
+    def test_list_datasets_omits_note_when_urls_identical(self, monkeypatch):
+        """NRP prod (public catalog) output is byte-for-byte what it was — no aside."""
+        import stac
+
+        self._reset(stac)
+        stac.STAC_DATASETS["ds-1"] = "**DS 1**\nDescription"
+        monkeypatch.delenv("STAC_PUBLIC_CATALOG_URL", raising=False)
+        monkeypatch.setattr(stac, "STAC_CATALOG_URL", "https://s3-west.example/catalog.json")
+
+        out = stac.list_datasets()
+
+        assert "STAC catalog: `https://s3-west.example/catalog.json`" in out
+        assert "server reads it at" not in out
+
+    def test_empty_catalog_message_uses_public_url(self, monkeypatch):
+        """The degraded-start path (#262) is exactly when an operator is hunting for
+        a reachable catalog, so it must not hand back the in-cluster host either."""
+        import stac
+
+        self._reset(stac)
+        monkeypatch.setattr(stac, "STAC_CATALOG_URL", "http://minio-svc.minio.svc.cluster.local:9000/catalog.json")
+        monkeypatch.setenv("STAC_PUBLIC_CATALOG_URL", "https://minio.example/catalog.json")
+
+        out = stac.list_datasets()
+
+        assert "No datasets loaded" in out
+        assert "https://minio.example/catalog.json" in out
+        assert "server reads it at http://minio-svc" in out
+
+    def test_client_supplied_catalog_url_is_echoed_unchanged(self, monkeypatch):
+        """A caller-provided catalog_url is already client-usable — the public-URL
+        substitution must not leak into that branch."""
+        from unittest.mock import patch
+        import stac
+
+        self._reset(stac)
+        monkeypatch.setenv("STAC_PUBLIC_CATALOG_URL", "https://minio.example/catalog.json")
+        with patch("stac.fetch_stac_catalog", return_value={"ds-1": "**DS 1**\nDesc"}):
+            out = stac.list_datasets(catalog_url="https://elsewhere.example/catalog.json")
+
+        assert "STAC catalog: `https://elsewhere.example/catalog.json`" in out
+        assert "minio.example" not in out
+        assert "server reads it at" not in out
+
+
 class TestFormatCollectionUrl:
     """_format_collection surfaces the collection self href as collection_url."""
 

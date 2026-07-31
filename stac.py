@@ -23,6 +23,20 @@ STAC_CATALOG_URL = os.environ.get(
     "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json",
 )
 
+
+def public_catalog_url() -> str:
+    """The catalog URL a *client* should put in its own config.
+
+    `STAC_CATALOG_URL` is the address this server reads, which on some
+    deployments is in-cluster only (cirrus reads the MinIO mirror at
+    `minio-svc.minio.svc.cluster.local`). Advertising that verbatim leaves a
+    client unable to self-configure from the server (#346). Same pattern as
+    `MCP_PUBLIC_BASE_URL` in `tiles/pyramid.py`: read at call time, and default
+    to the internal URL so NRP prod — where the two are identical — is
+    unchanged.
+    """
+    return os.environ.get("STAC_PUBLIC_CATALOG_URL", "").strip() or STAC_CATALOG_URL
+
 # Backwards-compatible: STAC_TIMEOUT alone still works as a single knob; the two
 # new vars override it when set. Root is a hard prerequisite (generous timeout);
 # children are individually skippable (tight timeout). See
@@ -841,6 +855,9 @@ def list_datasets(
             lines.append(f"- **{cid}**: {first_line}")
         return "\n".join(lines)
 
+    # Set only when the server reads the catalog somewhere a client can't, so the
+    # advertised URL needs disambiguating (#346).
+    internal_note = ""
     if catalog_url:
         datasets = fetch_stac_catalog(catalog_url, catalog_token=catalog_token)
         url = catalog_url
@@ -853,11 +870,20 @@ def list_datasets(
         with _STAC_LOCK:
             datasets = dict(STAC_DATASETS)
             footer_errors = dict(STAC_LOAD_ERRORS)
-        url = STAC_CATALOG_URL
+        # Report the client-usable URL, not the one this process reads.
+        url = public_catalog_url()
+        if url != STAC_CATALOG_URL:
+            internal_note = (
+                f"(server reads it at {STAC_CATALOG_URL} — "
+                "use the first URL in client configs)"
+            )
     if not datasets and not footer_errors:
-        return f"No datasets loaded. STAC catalog: {url}"
+        msg = f"No datasets loaded. STAC catalog: {url}"
+        return f"{msg}\n{internal_note}" if internal_note else msg
     lines = [f"# Available Datasets ({len(datasets)} collections)\n"]
     lines.append(f"STAC catalog: `{url}`\n")
+    if internal_note:
+        lines.append(f"{internal_note}\n")
     for cid, summary in datasets.items():
         first_line = summary.split("\n")[0]
         lines.append(f"- **{cid}**: {first_line}")

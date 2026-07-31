@@ -749,19 +749,51 @@ class TestHealthz:
         finally:
             server._MCP_AUTH_TOKEN = original
 
-    def test_version_returns_app_version_and_sha(self):
-        """GET /version reports the build-stamped app version + git SHA (issue #221)."""
+    def test_version_returns_app_version_and_sha(self, monkeypatch):
+        """GET /version reports the build-stamped app version + git SHA (issue #221),
+        plus the public URLs a client needs to configure itself (issue #346)."""
         import server
         from starlette.testclient import TestClient
+        monkeypatch.setenv("STAC_PUBLIC_CATALOG_URL", "https://mirror.test/catalog.json")
+        monkeypatch.setenv("MCP_PUBLIC_BASE_URL", "https://mcp.test")
         orig_v, orig_s = server.APP_VERSION, server.GIT_SHA
         server.APP_VERSION, server.GIT_SHA = "v9.9.9", "deadbeef"
         try:
             client = TestClient(self._build_app())
             r = client.get("/version")
             assert r.status_code == 200
-            assert r.json() == {"version": "v9.9.9", "git_sha": "deadbeef"}
+            assert r.json() == {
+                "version": "v9.9.9",
+                "git_sha": "deadbeef",
+                "stac_catalog_url": "https://mirror.test/catalog.json",
+                "public_base_url": "https://mcp.test",
+            }
         finally:
             server.APP_VERSION, server.GIT_SHA = orig_v, orig_s
+
+    def test_version_never_leaks_the_internal_catalog_url(self, monkeypatch):
+        """/version is auth-exempt, so it reports only the client-facing catalog URL.
+        The in-cluster address stays inside authenticated MCP responses (#346)."""
+        import server, stac
+        from starlette.testclient import TestClient
+        monkeypatch.setattr(
+            stac, "STAC_CATALOG_URL", "http://minio-svc.minio.svc.cluster.local:9000/catalog.json"
+        )
+        monkeypatch.setenv("STAC_PUBLIC_CATALOG_URL", "https://minio.test/catalog.json")
+        client = TestClient(self._build_app())
+        body = client.get("/version").json()
+        assert body["stac_catalog_url"] == "https://minio.test/catalog.json"
+        assert "minio-svc" not in str(body)
+
+    def test_version_catalog_url_defaults_to_internal_when_no_public_set(self, monkeypatch):
+        """Unset → the server's own catalog URL, which on NRP prod is already public.
+        Clients get a usable value with no extra configuration."""
+        import server, stac
+        from starlette.testclient import TestClient
+        monkeypatch.delenv("STAC_PUBLIC_CATALOG_URL", raising=False)
+        monkeypatch.setattr(stac, "STAC_CATALOG_URL", "https://s3-west.test/catalog.json")
+        client = TestClient(self._build_app())
+        assert client.get("/version").json()["stac_catalog_url"] == "https://s3-west.test/catalog.json"
 
     def test_version_bypasses_auth_middleware(self):
         """/version is public (version discovery is the point) — reachable with no
