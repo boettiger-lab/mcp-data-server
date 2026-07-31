@@ -9,6 +9,11 @@ The reference mirror is **`minio.carlboettiger.info`**: a drop-in copy of the NR
 anonymous reads, CORS + HTTP range enabled for browsers. A mirror-configured MCP
 head already reads from it at **`https://duckdb-mcp.carlboettiger.info/mcp`**.
 
+> **Pointed here mid-outage and just need to query?** Read
+> [For agents querying through MCP](#agents) — those five rules are the whole
+> instruction, and this page is the only place they live. Everything else here is
+> for whoever switches an app over.
+
 ## Runbook
 
 An app reads over **two independent surfaces, and both must be switched** — one
@@ -58,7 +63,7 @@ Flip both hosts back (`minio.carlboettiger.info` → `s3-west.nrp-nautilus.io`,
 obligation** for every app switched — see [Zero-touch alternative](#zero-touch-alternative)
 for how to stop owing it.
 
-## For agents querying through MCP during an outage
+## For agents querying through MCP during an outage {#agents}
 
 - **Use the normal tools.** On a mirror-configured head, `browse_stac_catalog`,
   `get_stac_details`, and `get_collection` all work — the head serves a complete
