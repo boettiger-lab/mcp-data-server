@@ -120,6 +120,8 @@ Units: `'km'`, `'m'`, or `'rads'`.
 
 **Always join by converting the finer (higher-numbered) dataset to the coarser resolution — never look for child columns on the coarser dataset.**
 
+Pick the reducer for that conversion by what the value means: a measured quantity per cell rolls up with `SUM` or `AVG`, but a **coverage fraction** (the share of a cell covered by something) rolls up as the mean over the parent's child cells — see *Feature coarser than the overlay layer* under Problem 3.
+
 ### Step 1: Check for pre-computed parent columns (preferred)
 
 Many fine-resolution datasets (e.g. GEBCO h8) already carry pre-computed parent columns (`h7`, `h6`, `h5`, ...). Use these directly — they are faster than calling `h3_cell_to_parent()` on every row. Check the schema first:
@@ -309,6 +311,32 @@ ORDER BY pct_conserved;
 ```
 
 Asking about **one** class ("what percent of hardwood woodland is conserved") is the same query with `WHERE f.whr13num = <code>` — keep the `frac × weight` product. Joining to the *distinct conserved cells* instead (a `SEMI JOIN` on `(h10, h0)`) counts every partly-conserved cell as fully conserved and overstates the percentage.
+
+**Feature coarser than the overlay layer — average the child cells.** *(Skip unless the feature's native resolution is coarser than the layer you are overlaying — e.g. a res-8 or res-9 feature against a res-10 coverage layer.)* Two reductions are needed, in this order. Across the overlapping units **within one fine cell**, take `MAX` (or `LEAST(SUM(w), 1)`), as above. Across the **child cells of a coarse parent**, take the mean — `SUM(w) / <children per parent>`, which is `7` for one resolution step (res-10 → res-9) and `49` for two (res-10 → res-8). The parent's weight is the share of the parent that is covered, so `MAX` across children is the wrong reducer there: it scores a whole parent as covered whenever a single child is.
+
+```sql
+WITH cell_w AS (          -- one weight per res-10 cell: MAX across overlapping units
+  SELECT h10, h8, h0, MAX((Final_g1_p + Final_g2_p) / 100.0) AS w
+  FROM read_parquet('<conserved-areas hex>')
+  GROUP BY h10, h8, h0
+),
+parent_w AS (             -- res-10 → res-8: mean over the 49 children
+  SELECT h8, h0, SUM(w) / 49 AS w8
+  FROM cell_w
+  GROUP BY h8, h0
+),
+feat AS (
+  SELECT DISTINCT h8, h0
+  FROM read_parquet('<res-8 feature hex>')
+  WHERE <feature filter>
+)
+SELECT 100 * SUM(COALESCE(p.w8, 0) * h3_cell_area(f.h8, 'km^2'))
+           / SUM(h3_cell_area(f.h8, 'km^2')) AS pct_conserved
+FROM feat f
+LEFT JOIN parent_w p USING (h8, h0);
+```
+
+Group on `h3_cell_to_parent(h10, 8)` when the fine layer carries no `h8` column. When the coarse feature is itself a `hex-fractions` layer, keep its `frac` in the product as in the same-resolution case: `SUM(f.frac * COALESCE(p.w9, 0)) / SUM(f.frac)`. Matching the coarse feature against the fine layer's *distinct cells* treats a parent as fully covered when any one child is; the inflation grows with the number of children per parent.
 
 **If you plan to mask this result against another hex dataset:** put the
 `SEMI JOIN` on the raw `read_parquet(...)` *before* `GROUP BY`, not in a
