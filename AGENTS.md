@@ -220,55 +220,58 @@ wording is safer wording — say it once, in the most-read place, and stop. Pref
 editing an existing rule over adding a parallel one; never restate a rule the suite
 already passes.
 
-The harness lives in the sibling repo **`boettiger-lab/open-llm-proxy`** under
-`headless/` (see its `README.md`). It replays the real geo-agent tool-use loop from
-the command line against the LLM proxy, so prompt assembly, the tool-call parser, and
-the MCP transport stay in sync with the browser app by construction.
+The question bank, gold answers, and tiers live in **`boettiger-lab/geo-agent-benchmark`**
+(private) — read its `AGENTS.md` for the full runbook. Execution is the harness in
+**`boettiger-lab/open-llm-proxy`** under `headless/`, which replays the real geo-agent
+tool-use loop from the command line against the LLM proxy, so prompt assembly, the
+tool-call parser, and the MCP transport stay in sync with the browser app by
+construction.
 
 **Workflow for a guidance change:**
 
 1. Merge the change and let dev pick it up — dev tracks `:main` and serves the
    injected guidance. (Confirm: `curl -s https://dev-duckdb-mcp.nrp-nautilus.io/version`
    git_sha matches `main`; the new text appears in the `query` tool description.)
-2. Run the matrix as a one-shot k8s Job (pulls `PROXY_KEY` from the cluster Secret —
-   no local creds). Use **`geo-agent-template`** as the app repo: its
-   `layers-input.json` has `mcp_url` pointed at **dev**, so the test exercises the
-   dev-served guidance without touching any prod app.
+2. Run the `regression` tier as one-shot k8s Jobs (they pull `PROXY_KEY` from the
+   cluster Secret — no local creds, and reading that Secret locally is not the
+   supported path). **`MCP_URL` is what points a run at dev** — every app repo
+   commits an `mcp_url` aimed at a production head, so a run without it measures the
+   *old* guidance no matter what dev is serving:
 
    ```bash
-   cd ../open-llm-proxy/headless
-   cat > runs/q.txt <<'EOF'
-   <a question that forces the behavior the guidance governs>
-   <the standing baseline questions — unrelated to this change>
-   EOF
-   QUESTIONS_FILE="$PWD/runs/q.txt" TAG=<short-tag> \
-     MODELS="glm-5 kimi qwen3 gpt-oss minimax-m2" TRIALS=2 \
-     ./run-matrix-k8s.sh boettiger-lab/geo-agent-template
+   cd ../geo-agent-benchmark
+   MCP_URL=https://dev-duckdb-mcp.nrp-nautilus.io/mcp \
+     APP_REPO=boettiger-lab/ca-30x30 TIER=regression \
+     MODELS="z-ai/glm-5.2" TRIALS=2 TAG=<short-tag> \
+     ./scripts/run_benchmark.sh
    ```
 
-   Run the trap question and the baseline set in the **same** matrix so the fix and the
-   regression check share one job and one set of transcripts.
+   One Job per model runs them in parallel (one pod each, `MODELS` holding a single
+   value, distinct `TAG`s); one Job with several models runs them serially in one pod.
+   The runner is per-app, so repeat per app repo to cover a whole tier. The tier
+   already carries the trap gates *and* the standing baseline, so the fix and the
+   regression check share one run.
 
 3. Read the transcripts from `kubectl -n biodiversity logs job/<JOB_NAME>`: confirm
    (a) the models emit the intended SQL pattern and the correct answer and the prior
    failure form is gone (zero occurrences), **and** (b) every baseline question still
    resolves to its known-good answer — no question the change wasn't aimed at got worse.
+   Check the Job log's `--- mcp: ---` line says dev before believing any of it.
    A regression on the baseline blocks promotion to prod even if the targeted trap is
    fixed — fix forward or revert on dev first.
 
 **Pick the models deliberately.** Always include any model that previously exhibited
 the failure (the logs naming the symptom are the regression set), plus a spread of the
-suite — model values come from `geo-agent-template/k8s/configmap.yaml` (`glm-5`,
-`kimi`, `qwen3`, `qwen3-small`, `gpt-oss`, `nemotron`, `gemma`, `minimax-m2`).
-Establish a ground-truth answer first by running the correct query yourself, so the
-transcripts have something to check against.
+suite. `geo-agent-benchmark/suite/models.yaml` is the model registry
+(`python3 scripts/models.py standard`); an app's `k8s/configmap.yaml` picker is what
+`MODELS`-unset measures — deployed behavior. Establish a ground-truth answer first by
+running the correct query yourself, so the transcripts have something to check against.
 
-**The standing baseline set** is a small, fixed list of questions with computed
-golden answers, kept in the harness repo, that every guidance change is re-run
-against to catch collateral damage. Seed it from the #243 ground-truth set (the
-6-model × 34-question sweep with Opus-computed answers); when a change fixes a new
-trap, add the question that exposed it to the baseline so future changes can't
-silently reintroduce it. Keep the set small enough to run on every change.
+**The standing baseline is the `regression` tier** in `geo-agent-benchmark` — a fixed
+set of questions with golden answers (`suite/gold/`), re-run on every guidance change
+to catch collateral damage, and graded mechanically (`scripts/grade.py`). Grow-on-fix:
+when a change fixes a new trap, add the question that exposed it to the tier with a
+`trap:` tag, so future changes can't silently reintroduce it.
 
 To A/B-test app-level *system prompt* wording (not the MCP-injected guides) without
 forking the app, `run-matrix-k8s.sh` takes `SYSTEM_PROMPT_APPEND_FILE`.
