@@ -40,6 +40,13 @@ spec:
         # extras a running pod believes it has without cracking open the image.
         - name: EXTRA_DUCKDB_EXTENSIONS
           value: "raster,zarr"
+        # GDAL (vendored by the raster extension) looks for the RedHat CA path;
+        # the image is Debian. Without this every /vsicurl/ read fails TLS. Also
+        # set in the image — repeated here so it is visible and overridable.
+        - name: GDAL_HTTP_CAINFO
+          value: "/etc/ssl/certs/ca-certificates.crt"
+        - name: CURL_CA_BUNDLE
+          value: "/etc/ssl/certs/ca-certificates.crt"
         - name: POD_MEMORY_LIMIT
           valueFrom:
             resourceFieldRef:

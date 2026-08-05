@@ -23,6 +23,14 @@ COPY . /app
 # default image, which therefore behaves exactly as before.
 ENV EXTRA_DUCKDB_EXTENSIONS=raster,zarr
 
+# The raster extension ships its own GDAL, whose libcurl is compiled with the
+# RedHat CA path (/etc/pki/tls/certs/ca-bundle.crt). The base image is Debian, so
+# every /vsicurl/ read fails with "CURL error: error setting certificate file"
+# until GDAL is pointed at the Debian bundle. Both names are set because which one
+# a given GDAL build honours depends on how it was compiled.
+ENV GDAL_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
 ARG APP_VERSION=experimental
 ARG GIT_SHA=unknown
 ENV APP_VERSION=$APP_VERSION GIT_SHA=$GIT_SHA
