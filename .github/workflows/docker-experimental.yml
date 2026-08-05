@@ -1,0 +1,90 @@
+name: Build experimental Docker image
+
+# Builds ghcr.io/boettiger-lab/mcp-data-server:experimental from
+# Dockerfile.experimental — the default image plus the `raster` and `zarr`
+# community extensions (issue #354).
+#
+# Deliberately NOT triggered by pushes to main. This tag backs a single testing
+# endpoint (experimental-duckdb-mcp) and is meant to move only when someone is
+# actually exercising it; an automatic rebuild on every main push would swap the
+# image under a live test session.
+#
+# BASE_TAG selects which default image to layer on. It defaults to :main, so the
+# experimental build inherits main's dependency and stock-extension layers while
+# `COPY . /app` overlays the code from *this* ref — that is what lets the tag carry
+# server changes before they merge. When main's deps move, re-run this workflow.
+on:
+  push:
+    branches: ['experimental/**']
+  workflow_dispatch:
+    inputs:
+      base_tag:
+        description: 'Default image tag to layer on (e.g. main, v0.8.12, or a sha)'
+        required: false
+        default: 'main'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile.experimental
+          push: true
+          tags: ghcr.io/boettiger-lab/mcp-data-server:experimental
+          build-args: |
+            BASE_TAG=${{ github.event.inputs.base_tag || 'main' }}
+            APP_VERSION=experimental
+            GIT_SHA=${{ github.sha }}
+          # Always pull, so a moving BASE_TAG (:main) is actually re-resolved
+          # rather than served from a stale local base.
+          pull: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test image
+        run: |
+          image="ghcr.io/boettiger-lab/mcp-data-server@${{ steps.build.outputs.digest }}"
+          docker pull "$image"
+          # Stock extensions must still work, and both extras must load and expose
+          # their entry points — a silently-missing extension would otherwise only
+          # surface as a confusing "function does not exist" at query time.
+          docker run --rm "$image" python -c "
+          import duckdb
+          c = duckdb.connect()
+          for e in ('httpfs', 'spatial', 'h3', 'raster', 'zarr'):
+              c.sql(f'LOAD {e}')
+          c.sql('SELECT h3_latlng_to_cell(37.8, -122.4, 5)')
+          c.sql('SELECT ST_Point(0, 0)')
+          for fn in ('RT_ReadCells', 'read_zarr'):
+              n = c.sql(f\"SELECT count(*) FROM duckdb_functions() WHERE function_name ILIKE '{fn}'\").fetchone()[0]
+              assert n, f'{fn} missing'
+          print('OK: httpfs/spatial/h3 + raster/zarr loaded and functional')
+          "
+
+      - name: Report image digest
+        run: |
+          {
+            echo '### Experimental image digest'
+            echo '```'
+            echo "${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
