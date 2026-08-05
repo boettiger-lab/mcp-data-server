@@ -37,10 +37,36 @@ GROUP BY 1;
 Filter the raster's nodata sentinel in the CTE (see §7) — it is usually a large
 negative value like `-9999` that will wreck any average.
 
-For area, do not multiply a pixel count by a constant in a geographic CRS: pixel
-ground area varies with latitude. Assign cells with `h3_latlng_to_cell(y, x, res)`
-and sum `h3_cell_area()`, or transform to a projected CRS with
-`always_xy := true` (see §5).
+⚠️ **Area: take the pixel size from the raster's own transform.** Do not sum
+`h3_cell_area()` over pixel rows — that charges each pixel a whole H3 cell's area,
+which is a different quantity and overcounts badly (it inflated this fire by ~29%).
+H3 cell area is the right tool for *hex* rows, not raster rows. Do not use a
+hardcoded constant either: in a geographic CRS, pixel ground area varies with
+latitude.
+
+`RT_Read(path).metadata` is JSON; `$.transform` is a **6-element GDAL geotransform
+in the order `[originX, dx, rotX, originY, rotY, dy]`** — the pixel size lives at
+indices **1 and 5**, not 0 and 4:
+
+```sql
+WITH hdr AS (
+  SELECT abs(CAST(metadata->'$.transform'->>1 AS DOUBLE)) AS dlon,
+         abs(CAST(metadata->'$.transform'->>5 AS DOUBLE)) AS dlat
+  FROM RT_Read('<path>')
+), px AS (
+  SELECT band_1 AS value,
+         ST_SetCRS(geometry, 'OGC:CRS84') AS g,
+         h.dlon * 111320.0 * cos(radians(ST_Y(geometry)))   -- metres per degree lon
+           * h.dlat * 110574.0                              -- metres per degree lat
+           AS px_m2
+  FROM RT_ReadCells('<path>'), hdr h
+  WHERE band_1 > 0
+)
+SELECT round(sum(px_m2) / 10000, 2) AS hectares FROM px;
+```
+
+Other useful `metadata` keys: `crs`, `bounds`, `width`, `height`, `bands`. Note
+`RT_Envelope` takes an `RT_DATACUBE`, not the `bbox` column — use `$.bounds`.
 
 #### `zarr` — read Zarr stores
 
