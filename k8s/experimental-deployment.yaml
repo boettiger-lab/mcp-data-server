@@ -1,0 +1,84 @@
+# Testing endpoint for the :experimental image (raster + zarr extensions, issue #354).
+# Not part of the prod or dev rotation — nothing should depend on this being up.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: experimental-duckdb-mcp
+  namespace: biodiversity
+spec:
+  # Single replica on purpose: a testing endpoint on a shared cluster, and a
+  # single pod keeps a test session pinned to one DuckDB process.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: experimental-duckdb-mcp
+  template:
+    metadata:
+      labels:
+        app: experimental-duckdb-mcp
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/region
+                    operator: In
+                    values: ["us-west"]
+      containers:
+      - name: server
+        image: ghcr.io/boettiger-lab/mcp-data-server:experimental
+        imagePullPolicy: Always
+        env:
+        - name: STAC_CATALOG_URL
+          value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
+        - name: MCP_PUBLIC_BASE_URL
+          value: "https://experimental-duckdb-mcp.nrp-nautilus.io"
+        - name: STAC_ALLOW_DEGRADED_START
+          value: "true"
+        # Also baked into the image; set here too so `kubectl describe` shows which
+        # extras a running pod believes it has without cracking open the image.
+        - name: EXTRA_DUCKDB_EXTENSIONS
+          value: "raster,zarr"
+        # GDAL (vendored by the raster extension) looks for the RedHat CA path;
+        # the image is Debian. Without this every /vsicurl/ read fails TLS. Also
+        # set in the image — repeated here so it is visible and overridable.
+        - name: GDAL_HTTP_CAINFO
+          value: "/etc/ssl/certs/ca-certificates.crt"
+        - name: CURL_CA_BUNDLE
+          value: "/etc/ssl/certs/ca-certificates.crt"
+        - name: POD_MEMORY_LIMIT
+          valueFrom:
+            resourceFieldRef:
+              containerName: server
+              resource: limits.memory
+        resources:
+          # Small requests (NRP's "Ignored" utilization bucket), and limits well
+          # below prod's 160Gi/64: this endpoint is for small rasters and Zarr
+          # slices. RT_ReadCells materializes every pixel, so a modest ceiling is
+          # a feature — an over-large read fails here instead of evicting
+          # co-tenants on the node.
+          requests:
+            memory: 2Gi
+            cpu: 250m
+          limits:
+            memory: 32Gi
+            cpu: 16
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 6

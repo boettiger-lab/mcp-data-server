@@ -1,0 +1,38 @@
+# Experimental image: the default server plus the `raster` and `zarr` community
+# extensions. Published as :experimental, deployed to experimental-duckdb-mcp
+# (k8s/experimental-*.yaml). Never promoted to the default endpoint — issue #354.
+#
+# Layered on the default image rather than duplicating it, so the Python deps and
+# the stock httpfs/spatial/h3 extension layer are shared and cannot drift. CI passes
+# BASE_TAG=<sha> so the experimental image is pinned to the exact base build from
+# the same run, not to whatever :main happens to be at pull time.
+ARG BASE_TAG=main
+FROM ghcr.io/boettiger-lab/mcp-data-server:${BASE_TAG}
+
+# Community extensions. These pull GDAL into the query path (raster) and add a
+# chunked-array reader (zarr) — the reason this image is kept separate from the
+# default one rather than gated behind an env var alone.
+RUN python -c "import duckdb; c = duckdb.connect(); c.sql('INSTALL raster FROM community; INSTALL zarr FROM community')"
+
+# Overlay this branch's code on the base image's dependency layers, so the
+# experimental tag can carry server changes that have not landed on main yet.
+COPY . /app
+
+# Read by server.py: LOADs these per connection and injects
+# experimental-extensions.md into the query tool description. Unset on the
+# default image, which therefore behaves exactly as before.
+ENV EXTRA_DUCKDB_EXTENSIONS=raster,zarr
+
+# The raster extension ships its own GDAL, whose libcurl is compiled with the
+# RedHat CA path (/etc/pki/tls/certs/ca-bundle.crt). The base image is Debian, so
+# every /vsicurl/ read fails with "CURL error: error setting certificate file"
+# until GDAL is pointed at the Debian bundle. Both names are set because which one
+# a given GDAL build honours depends on how it was compiled.
+ENV GDAL_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+ARG APP_VERSION=experimental
+ARG GIT_SHA=unknown
+ENV APP_VERSION=$APP_VERSION GIT_SHA=$GIT_SHA
+
+CMD ["python", "server.py"]

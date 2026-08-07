@@ -1,0 +1,32 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: experimental-mcp-server-duckdb-ingress
+  namespace: biodiversity
+  annotations:
+    haproxy-ingress.github.io/cors-enable: "true"
+    haproxy-ingress.github.io/cors-allow-origin: "*"
+    haproxy-ingress.github.io/cors-allow-methods: "GET, POST, OPTIONS"
+    haproxy-ingress.github.io/cors-allow-headers: "DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization,mcp-session-id"
+    haproxy-ingress.github.io/cors-allow-credentials: "true"
+    haproxy-ingress.github.io/cors-max-age: "86400"
+    haproxy-ingress.github.io/balance-algorithm: leastconn
+    haproxy-ingress.github.io/timeout-client: "600s"
+    haproxy-ingress.github.io/timeout-server: "600s"
+    haproxy-ingress.github.io/timeout-tunnel: "3600s"
+spec:
+  ingressClassName: haproxy
+  tls:
+    - hosts:
+        - experimental-duckdb-mcp.nrp-nautilus.io
+  rules:
+    - host: experimental-duckdb-mcp.nrp-nautilus.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: experimental-mcp-server-duckdb
+                port:
+                  number: 8000

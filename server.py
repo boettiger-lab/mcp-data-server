@@ -77,6 +77,21 @@ OPTIM_RAW = load_text_file("query-optimization.md")
 H3_RAW = load_text_file("h3-guide.md")
 ROLE_RAW = load_text_file("assistant-role.md")
 
+# Opt-in DuckDB extensions beyond the stock httpfs/spatial/h3 set (issue #354).
+# The experimental image (Dockerfile.experimental) installs raster + zarr and sets
+# EXTRA_DUCKDB_EXTENSIONS; the default image leaves it unset and behaves exactly as
+# before. LOAD is per-connection, like every statement in SETUP_SQL, so this is a
+# deployment knob rather than a code fork. Names are restricted to identifier
+# characters — they are interpolated into LOAD, which takes no parameters.
+_EXT_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+EXTRA_EXTENSIONS = [
+    e for e in (s.strip() for s in os.environ.get("EXTRA_DUCKDB_EXTENSIONS", "").split(","))
+    if e and _EXT_NAME_RE.match(e)
+]
+# Guidance for the extras is injected only where they are actually loaded, so the
+# default deployment's tool description is unchanged.
+EXTRAS_RAW = load_text_file("experimental-extensions.md") if EXTRA_EXTENSIONS else ""
+
 # -------------------------------------------------------------------------
 # 3. CONTEXT INJECTION (PROMPT ENGINEERING)
 # -------------------------------------------------------------------------
@@ -111,6 +126,7 @@ TOOL_INJECTED_CONTEXT = f"""
 
 ### 📐 H3 SPATIAL MATH
 {H3_RAW}
+{EXTRAS_RAW}
 ---
 """
 
@@ -154,6 +170,14 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
                 conn.sql(stmt)
             except Exception as e:
                 print(f"⚠️ Setup statement skipped: {stmt!r}: {e}", file=sys.stderr)
+        # Opt-in extras (experimental image only — empty list on the default tag).
+        # Warn rather than raise: a missing extension should degrade this connection's
+        # capability, not fail every query the replica serves.
+        for ext in EXTRA_EXTENSIONS:
+            try:
+                conn.sql(f"LOAD {ext}")
+            except Exception as e:
+                print(f"⚠️ Extra extension {ext!r} not loaded: {e}", file=sys.stderr)
         # Bound memory to the pod so a big aggregate spills instead of OOM-killing
         # the replica (#270). Not part of SETUP_SQL: the value is deployment-derived
         # (dbconfig reads POD_MEMORY_LIMIT/DUCKDB_MEMORY_LIMIT), not model guidance.
