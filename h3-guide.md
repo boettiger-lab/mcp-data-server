@@ -292,51 +292,48 @@ GROUP BY class;
 
 `get_schema` names the fractions asset and the no-data code. Per cell `SUM(frac) <= 1`; the shortfall is outside-raster/quantization, so do not treat the layer as covering 100% of a cell.
 
-**Overlaying two partial-coverage layers — multiply the coverage fractions; never count a cell as all-or-nothing.** *(Skip unless you are intersecting a fractional-coverage layer with another layer that only partly covers its cells — e.g. "what percent of each habitat class is conserved".)* Treating a cell as fully inside the other layer whenever it matches over-counts every partly-covered cell. Weight by the coverage fraction on **both** sides. The other layer's per-cell weight is either its own `frac`, or — for a vector layer tiled from features — a per-feature coverage share its STAC documents (e.g. ca30x30 conserved-areas: a unit's GAP 1+2 share is `Acres / Total_Acre`). Reduce to one weight per cell (`MAX` over the features on it), then multiply:
+**Overlaying two partial-coverage layers — multiply the coverage fractions, then weight by cell area; never count a cell as all-or-nothing.** *(Skip unless you are intersecting a fractional-coverage layer with another layer that only partly covers its cells — e.g. "what percent of each habitat class is conserved".)* Treating a cell as fully inside the other layer whenever it matches over-counts every partly-covered cell. Weight by the coverage fraction on **both** sides, and carry `h3_cell_area` through numerator and denominator: cells are not equal-area, so dividing by `SUM(frac)` alone biases the share toward whichever latitudes hold more cells.
+
+The other layer's per-cell weight comes from a companion **per-cell weights asset** when one exists — `get_schema` names it (e.g. ca30x30 conserved-areas publishes `…-hex-weights` at res 10, with `w1`–`w4` giving the share of each cell in GAP status 1–4). Otherwise reduce the layer's features to one weight per cell first: `MAX` over the features on the cell of the per-feature coverage share its STAC documents.
+
+A weights asset covers only its own footprint, so `LEFT JOIN` it and `COALESCE(…, 0)`. Bound the result with a dense land grid for the region (California: `ca30x30-ecoregion` at res 10) — without it the denominator picks up cells outside the region.
 
 ```sql
-WITH cell_w AS (   -- per cell: covering unit's GAP 1+2 coverage share (STAC-documented overlay weight)
-  SELECT h10, h0, MAX(Acres / NULLIF(Total_Acre, 0)) AS w
-  FROM (SELECT DISTINCT h10, h0, _cng_fid, Acres, Total_Acre
-        FROM read_parquet('<conserved-areas hex>'))
-  GROUP BY h10, h0
+WITH land AS (   -- dense res-10 land grid bounding the region
+  SELECT DISTINCT h10, h0 FROM read_parquet('<ecoregion hex>')
 )
 SELECT f.whr13num,
-       100 * SUM(f.frac * COALESCE(c.w, 0)) / SUM(f.frac) AS pct_conserved
+       100 * SUM(f.frac * COALESCE(c.w1 + c.w2, 0) * h3_cell_area(f.h10, 'km^2'))
+           / SUM(f.frac * h3_cell_area(f.h10, 'km^2')) AS pct_conserved
 FROM read_parquet('<cwhr13 hex-fractions>') f
-LEFT JOIN cell_w c ON f.h10 = c.h10 AND f.h0 = c.h0
+JOIN land l ON f.h10 = l.h10 AND f.h0 = l.h0
+LEFT JOIN read_parquet('<conserved-areas hex-weights>') c ON f.h10 = c.h10 AND f.h0 = c.h0
 WHERE f.whr13num <> 0
 GROUP BY f.whr13num
 ORDER BY pct_conserved;
 ```
 
-Asking about **one** class ("what percent of hardwood woodland is conserved") is the same query with `WHERE f.whr13num = <code>` — keep the `frac × weight` product. Joining to the *distinct conserved cells* instead (a `SEMI JOIN` on `(h10, h0)`) counts every partly-conserved cell as fully conserved and overstates the percentage.
+Asking about **one** class ("what percent of hardwood woodland is conserved") is the same query with `WHERE f.whr13num = <code>` — keep the `frac × weight × area` product. Joining to the *distinct conserved cells* instead (a `SEMI JOIN` on `(h10, h0)`) counts every partly-conserved cell as fully conserved and overstates the percentage.
 
-**Feature coarser than the overlay layer — average the child cells.** *(Skip unless the feature's native resolution is coarser than the layer you are overlaying — e.g. a res-8 or res-9 feature against a res-10 coverage layer.)* Two reductions are needed, in this order. Across the overlapping units **within one fine cell**, take `MAX` (or `LEAST(SUM(w), 1)`), as above. Across the **child cells of a coarse parent**, take the mean — `SUM(w) / <children per parent>`, which is `7` for one resolution step (res-10 → res-9) and `49` for two (res-10 → res-8). The parent's weight is the share of the parent that is covered, so `MAX` across children is the wrong reducer there: it scores a whole parent as covered whenever a single child is.
+**Feature coarser than the overlay layer — read the weights asset at the feature's own resolution.** *(Skip unless the feature's native resolution is coarser than the layer you are overlaying — e.g. a res-8 or res-9 feature against a res-10 coverage layer.)* Weights assets are published per resolution (`…-hex-weights-res9`, `…-hex-weights-res8`) and the coarser ones are already averaged over the fine cells inside each parent, so no rollup is needed. Weight each coarse cell by its **land** area — `nland * h3_cell_area(h8, 'km^2')`, where `nland` counts the fine land cells inside it — since coastal and border cells are only partly land.
 
 ```sql
-WITH cell_w AS (          -- one weight per res-10 cell: MAX across overlapping units
-  SELECT h10, h8, h0, MAX((Final_g1_p + Final_g2_p) / 100.0) AS w
-  FROM read_parquet('<conserved-areas hex>')
-  GROUP BY h10, h8, h0
-),
-parent_w AS (             -- res-10 → res-8: mean over the 49 children
-  SELECT h8, h0, SUM(w) / 49 AS w8
-  FROM cell_w
-  GROUP BY h8, h0
-),
-feat AS (
+WITH feat AS (
   SELECT DISTINCT h8, h0
   FROM read_parquet('<res-8 feature hex>')
   WHERE <feature filter>
 )
-SELECT 100 * SUM(COALESCE(p.w8, 0) * h3_cell_area(f.h8, 'km^2'))
-           / SUM(h3_cell_area(f.h8, 'km^2')) AS pct_conserved
+SELECT 100 * SUM((p.w1 + p.w2) * p.nland * h3_cell_area(f.h8, 'km^2'))
+           / SUM(p.nland * h3_cell_area(f.h8, 'km^2')) AS pct_conserved
 FROM feat f
-LEFT JOIN parent_w p USING (h8, h0);
+JOIN read_parquet('<conserved-areas hex-weights-res8>') p USING (h8, h0);
 ```
 
-Group on `h3_cell_to_parent(h10, 8)` when the fine layer carries no `h8` column. When the coarse feature is itself a `hex-fractions` layer, keep its `frac` in the product as in the same-resolution case: `SUM(f.frac * COALESCE(p.w9, 0)) / SUM(f.frac)`. Matching the coarse feature against the fine layer's *distinct cells* treats a parent as fully covered when any one child is; the inflation grows with the number of children per parent.
+The res-9 and res-8 weights assets carry a row for every land cell in the region, so this join also bounds the result to land — no separate land grid is needed.
+
+When no weights asset is published at the coarse resolution, roll the fine layer up in two reductions, in this order: `MAX` (or `LEAST(SUM(w), 1)`) across the units overlapping **one fine cell**, then the mean across the **child cells of a coarse parent** — `SUM(w) / <children per parent>`, `7` for one resolution step (res-10 → res-9) and `49` for two (res-10 → res-8). `MAX` is the wrong reducer across children: it scores a whole parent as covered whenever a single child is.
+
+Group on `h3_cell_to_parent(h10, 8)` when the fine layer carries no `h8` column. When the coarse feature is itself a `hex-fractions` layer, keep its `frac` in the product as in the same-resolution case: `SUM(f.frac * p.w9 * p.nland * h3_cell_area(f.h9, 'km^2')) / SUM(f.frac * p.nland * h3_cell_area(f.h9, 'km^2'))`. Matching the coarse feature against the fine layer's *distinct cells* treats a parent as fully covered when any one child is; the inflation grows with the number of children per parent.
 
 **If you plan to mask this result against another hex dataset:** put the
 `SEMI JOIN` on the raw `read_parquet(...)` *before* `GROUP BY`, not in a
