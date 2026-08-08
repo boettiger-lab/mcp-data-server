@@ -23,7 +23,7 @@ spec:
                     values: ["us-west"]
       containers:
       - name: server
-        image: ghcr.io/boettiger-lab/mcp-data-server:v0.8.12@sha256:332d6df730c1fc66e7b2d317b121828fcb3785339a3a43b49789c3e22e6e0ffd
+        image: ghcr.io/boettiger-lab/mcp-data-server:v0.8.13@sha256:1a3409d56f62bc8c9ba252a8960eb0dad16a240e24c400620eb7afae5233db7f
         imagePullPolicy: IfNotPresent
         env:
         - name: STAC_CATALOG_URL
