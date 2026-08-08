@@ -107,6 +107,22 @@ disagree, the digest wins). **Never apply prod while the manifest points at an i
 hasn't built yet** — the rollout stalls on `ImagePullBackOff`. `kubectl apply` must precede
 `rollout restart`; a git push alone does not update the cluster.
 
+**No `docker` CLI (e.g. a JupyterLab session)?** `imagetools inspect` needs it, and the
+GHCR packages API needs a `read:packages` token most of our `gh` logins don't carry. An
+anonymous pull token against the registry v2 API works anywhere `curl` does — substitute
+`main` or `vX.Y.Z` for `<tag>`:
+```
+repo=boettiger-lab/mcp-data-server
+tok=$(curl -s "https://ghcr.io/token?scope=repository:$repo:pull" \
+      | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+curl -sI -H "Authorization: Bearer $tok" \
+  -H "Accept: application/vnd.oci.image.index.v1+json" \
+  -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+  "https://ghcr.io/v2/$repo/manifests/<tag>" | grep -i '^docker-content-digest:'
+```
+Sanity-check the method before trusting it: run it on the tag prod already pins and
+confirm the digest matches `k8s/deployment.yaml`.
+
 **Verify all replicas converge on a single digest after rollout** (both dev and prod —
 dev is the multi-replica canary, so its convergence matters as much as prod's). Swap the
 label for the deployment you rolled (`duckdb-mcp` for prod, `dev-duckdb-mcp` for dev):
