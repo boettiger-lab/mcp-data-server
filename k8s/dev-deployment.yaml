@@ -23,8 +23,17 @@ spec:
                     values: ["us-west"]
       containers:
       - name: server
-        image: ghcr.io/boettiger-lab/mcp-data-server:main
-        imagePullPolicy: Always
+        # Pinned by digest (not the moving :main tag) so every dev pod converges
+        # on one reproducible build. :main + imagePullPolicy: Always is
+        # non-convergent: Always re-resolves the mutable :main → digest
+        # independently per pod at each (re)start, so pods brought up seconds
+        # apart — or a single later liveness/eviction/cron restart — silently
+        # drift onto different builds with no signal, exactly the cross-pod skew
+        # dev's ≥2 replicas exist to catch. Bump this digest on redeploy (see
+        # AGENTS.md → Rollout workflow). The tag prefix is for humans; the digest
+        # is enforced. See issue #341.
+        image: ghcr.io/boettiger-lab/mcp-data-server:main@sha256:f9be5daeb9af3d96dc77a10d78c557e911c687d5091b1e513eb8b6068b048144
+        imagePullPolicy: IfNotPresent
         env:
         - name: STAC_CATALOG_URL
           value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
