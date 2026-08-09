@@ -315,7 +315,7 @@ ORDER BY pct_conserved;
 
 Asking about **one** class ("what percent of hardwood woodland is conserved") is the same query with `WHERE f.whr13num = <code>` — keep the `frac × weight × area` product. Joining to the *distinct conserved cells* instead (a `SEMI JOIN` on `(h10, h0)`) counts every partly-conserved cell as fully conserved and overstates the percentage.
 
-**Feature coarser than the overlay layer — read the weights asset at the feature's own resolution.** *(Skip unless the feature's native resolution is coarser than the layer you are overlaying — e.g. a res-8 or res-9 feature against a res-10 coverage layer.)* Weights assets are published per resolution (`…-hex-weights-res9`, `…-hex-weights-res8`) and the coarser ones are already averaged over the fine cells inside each parent, so no rollup is needed. Weight each coarse cell by its **land** area — `nland * h3_cell_area(h8, 'km^2')`, where `nland` counts the fine land cells inside it — since coastal and border cells are only partly land.
+**Feature coarser than the overlay layer — read the weights asset at the feature's own resolution.** *(Skip unless the feature's native resolution is coarser than the layer you are overlaying — e.g. a res-8 or res-9 feature against a res-10 coverage layer.)* Weights assets are published per resolution (`…-hex-weights-res9`, `…-hex-weights-res8`) and the coarser ones are already averaged over the fine cells inside each parent, so no rollup is needed. Weight each coarse cell by its **land** area — `land_area_km2`, published on the region's land-grid rollup at the same resolution (California: `ca30x30-ecoregion`, assets `ecoregion-hex-res9` and `ecoregion-hex-res8`) — since coastal and border cells are only partly land. Join the land grid and `LEFT JOIN` the weights asset to it.
 
 ```sql
 WITH feat AS (
@@ -323,17 +323,18 @@ WITH feat AS (
   FROM read_parquet('<res-8 feature hex>')
   WHERE <feature filter>
 )
-SELECT 100 * SUM((p.w1 + p.w2) * p.nland * h3_cell_area(f.h8, 'km^2'))
-           / SUM(p.nland * h3_cell_area(f.h8, 'km^2')) AS pct_conserved
+SELECT 100 * SUM(COALESCE(p.w1 + p.w2, 0) * e.land_area_km2)
+           / SUM(e.land_area_km2) AS pct_conserved
 FROM feat f
-JOIN read_parquet('<conserved-areas hex-weights-res8>') p USING (h8, h0);
+JOIN read_parquet('<ecoregion hex-res8>') e USING (h8, h0)
+LEFT JOIN read_parquet('<conserved-areas hex-weights-res8>') p USING (h8, h0);
 ```
 
-The res-9 and res-8 weights assets carry a row for every land cell in the region, so this join also bounds the result to land — no separate land grid is needed.
+The land grid has a row for every land cell in the region, so it is both the weight and the denominator — no `h3_cell_area()` call and no separate mask.
 
 When no weights asset is published at the coarse resolution, roll the fine layer up in two reductions, in this order: `MAX` (or `LEAST(SUM(w), 1)`) across the units overlapping **one fine cell**, then the mean across the **child cells of a coarse parent** — `SUM(w) / <children per parent>`, `7` for one resolution step (res-10 → res-9) and `49` for two (res-10 → res-8). `MAX` is the wrong reducer across children: it scores a whole parent as covered whenever a single child is.
 
-Group on `h3_cell_to_parent(h10, 8)` when the fine layer carries no `h8` column. When the coarse feature is itself a `hex-fractions` layer, keep its `frac` in the product as in the same-resolution case: `SUM(f.frac * p.w9 * p.nland * h3_cell_area(f.h9, 'km^2')) / SUM(f.frac * p.nland * h3_cell_area(f.h9, 'km^2'))`. Matching the coarse feature against the fine layer's *distinct cells* treats a parent as fully covered when any one child is; the inflation grows with the number of children per parent.
+Group on `h3_cell_to_parent(h10, 8)` when the fine layer carries no `h8` column. At res 9 read `ecoregion-hex-res9` and the `…-hex-weights-res9` weights the same way. When the coarse feature is itself a `hex-fractions` layer, keep its `frac` in the product on both sides, as in the same-resolution case. Matching the coarse feature against the fine layer's *distinct cells* treats a parent as fully covered when any one child is; the inflation grows with the number of children per parent.
 
 **If you plan to mask this result against another hex dataset:** put the
 `SEMI JOIN` on the raw `read_parquet(...)` *before* `GROUP BY`, not in a
