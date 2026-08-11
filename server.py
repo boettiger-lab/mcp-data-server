@@ -335,6 +335,26 @@ def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint
                 keep = [f'"{c}"' for c in result.columns if c not in geom_cols]
                 result = result.select(", ".join(keep))
 
+            # Render temporal types as strings in DuckDB so the formatting does
+            # not depend on the rest of the projection. A DuckDB DATE has no time
+            # component, but pandas' to_markdown renders through df.values, which
+            # flips between an ISO-with-microseconds form (all-datetime frame) and
+            # a space-separated form (mixed frame) depending on the other columns
+            # — neither is YYYY-MM-DD. strftime here is authoritative and
+            # shape-independent (#361).
+            temporal = []
+            for c, t in zip(result.columns, result.dtypes):
+                tu, q = str(t).upper(), f'"{c}"'
+                if tu == "DATE":
+                    temporal.append(f"strftime({q}, '%Y-%m-%d') AS {q}")
+                elif tu.startswith("TIMESTAMP"):
+                    temporal.append(f"strftime({q}, '%Y-%m-%d %H:%M:%S') AS {q}")
+                else:
+                    temporal.append(None)
+            if any(temporal):
+                proj = [expr or f'"{c}"' for expr, c in zip(temporal, result.columns)]
+                result = result.select(", ".join(proj))
+
             # Fetch one extra row to detect truncation without a second COUNT scan.
             df = result.limit(51).df()
             if df.empty: return "No results found."

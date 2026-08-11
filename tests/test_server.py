@@ -148,6 +148,32 @@ class TestQueryFunction:
         result = query("SELECT range as num FROM range(50)")
         assert "preview" not in result.lower()
 
+    def test_query_date_renders_as_iso_date(self):
+        """A DuckDB DATE renders as bare YYYY-MM-DD, with no fabricated time (#361)."""
+        result = query("SELECT DATE '1974-03-01' AS lo, DATE '2024-12-30' AS hi")
+        assert "1974-03-01" in result and "2024-12-30" in result
+        # The bug rendered an invented time component in both shapes.
+        assert "00:00:00" not in result
+        assert "T00:00:00" not in result
+
+    def test_query_date_rendering_is_shape_independent(self):
+        """Adding a non-datetime column must not change how DATE columns render (#361).
+
+        Pre-fix, an all-datetime frame rendered ISO+microseconds while a mixed
+        frame rendered space-separated — same values, different output.
+        """
+        all_dt = query("SELECT DATE '1974-03-01' AS lo, DATE '2024-12-30' AS hi")
+        mixed = query("SELECT DATE '1974-03-01' AS lo, DATE '2024-12-30' AS hi, 'x' AS filler")
+        for r in (all_dt, mixed):
+            assert "1974-03-01" in r and "2024-12-30" in r
+            assert "00:00:00" not in r and ".000000" not in r
+
+    def test_query_timestamp_renders_deterministically(self):
+        """A TIMESTAMP keeps a time component but renders without microseconds (#361)."""
+        result = query("SELECT TIMESTAMP '2024-12-30 13:45:06' AS ts, 'x' AS filler")
+        assert "2024-12-30 13:45:06" in result
+        assert ".000000" not in result
+
 
 class TestResourceFunctions:
     """Test MCP resource functions."""
