@@ -1,0 +1,49 @@
+name: Guidance SQL
+
+# Executes the ```sql examples embedded in the guidance files (h3-guide.md,
+# query-optimization.md, query-setup.md) — which server.py injects verbatim into
+# the query tool description — against public data, so a broken example (a moved
+# column like #364's `nland`, a renamed function, a path that no longer resolves)
+# fails CI before it ships. The model gate cannot catch this: a model routes
+# around a broken example, so the gate goes green either way (#369).
+#
+# No secrets: reads go anonymously to the public source.coop mirror / Ceph
+# external endpoint, same posture as examples.yml. The runner installs the h3
+# community extension itself. The weekly cron catches the catalog rolling forward
+# under a still-valid-looking example.
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'h3-guide.md'
+      - 'query-optimization.md'
+      - 'query-setup.md'
+      - 'tests/guidance_sql/**'
+      - '.github/workflows/guidance-sql.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'h3-guide.md'
+      - 'query-optimization.md'
+      - 'query-setup.md'
+      - 'tests/guidance_sql/**'
+      - '.github/workflows/guidance-sql.yml'
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays 06:17 UTC — catch catalog drift
+  workflow_dispatch:
+
+jobs:
+  guidance-sql:
+    name: Execute guidance SQL examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Install DuckDB
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'duckdb==1.5.4'
+      - name: Run guidance SQL harness
+        run: python tests/guidance_sql/run.py
