@@ -7,10 +7,23 @@
 
 ## Development & test environment — READ FIRST
 
-**The dev server is for development: deploy your branch there and test against it.**
-`dev-duckdb-mcp.nrp-nautilus.io` exists precisely so changes are exercised on real
-infrastructure before prod. All MCP/guidance testing runs against **dev**, never a
-local process.
+**Dev is the pre-prod canary: it tracks `main` and is never repointed by hand.**
+`dev-duckdb-mcp.nrp-nautilus.io` runs the current `:main` build (pinned by digest,
+≥2 replicas) precisely so merged changes are exercised on real infrastructure —
+including cross-pod skew — before prod. All MCP/guidance testing runs against
+**dev**, never a local process. Dev has one job; it is *not* a place to host a
+branch. Repointing dev to a branch stomps `main` and decays into the hand-pinning
+loop that keeps breaking it (#341/#366).
+
+**To test a change before it merges**, do not repoint dev. Options:
+- **Merge-then-validate (works today):** merge to `main` → dev rolls onto that
+  digest → run the headless matrix with `MCP_URL=dev`. This is the current gate.
+- **Preview env (planned, #366):** a `preview` label builds `:pr-<n>` for an
+  ephemeral `dev-pr-<n>` — the build trigger and CI deploy land with the NRP
+  deploy token.
+- **Guidance PR gate (planned, #245):** the matrix Job runs the PR's `server.py`
+  as a sidecar (git-checkout of the branch — no image build) so the *exact* PR
+  guidance is validated pre-merge.
 
 **Never run `server.py` (the MCP server) locally in this JupyterLab environment.**
 It loads DuckDB plus the full STAC catalog in-process; running it here OOM'd the shared

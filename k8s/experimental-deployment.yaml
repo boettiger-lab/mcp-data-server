@@ -27,6 +27,9 @@ spec:
                     values: ["us-west"]
       containers:
       - name: server
+        # ci-image-pin: allow-mutable — single-replica throwaway test endpoint
+        # (replicas: 1, "nothing should depend on this"), so no cross-pod skew;
+        # tracks the moving :experimental tag on purpose as extensions land (#354).
         image: ghcr.io/boettiger-lab/mcp-data-server:experimental
         imagePullPolicy: Always
         env:

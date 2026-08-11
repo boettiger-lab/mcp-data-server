@@ -43,8 +43,15 @@ jobs:
               ;;
             *)
               # schedule / workflow_dispatch: dep+base refresh. Move ONLY the dev
-              # tag — never mint a :sha or :vX.Y.Z from a non-push event.
-              tags="$repo:main"
+              # tag — never mint a :sha or :vX.Y.Z from a non-push event. And only
+              # publish :main from the main branch: a dispatch from a feature
+              # branch must NOT push that branch's code to :main (which dev
+              # tracks) — tag a branch-scoped image instead (#366).
+              if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+                tags="$repo:main"
+              else
+                tags="$repo:branch-${{ github.ref_name }}"
+              fi
               ;;
           esac
           # Version stamp baked into the image: the tag on release builds, else "main".
