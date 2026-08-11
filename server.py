@@ -601,7 +601,11 @@ def register_hex_tiles(
       `SELECT h3_cell_to_parent(h10, 6) AS h6, ...`).
     - `agg`: aggregation applied at each coarser pyramid level.
         - "COUNT" (default): SQL needs only the H3 column; output property
-          is `count` (row count per hex).
+          is `count` (row count per hex). Use it for raw, un-grouped
+          point/polygon rows. If your SELECT already produced one row per
+          cell (you wrote `GROUP BY h<H>`), pass "SUM" to total that value up
+          the pyramid, or "AVG"/"MAX" for an intensity — COUNT would count the
+          single row per cell and drop your value column.
         - "AVG" / "SUM" / "MIN" / "MAX": SQL must return at least one
           numeric value column after the H3 index; each is aggregated by
           `agg` at every coarser level.
