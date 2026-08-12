@@ -96,6 +96,12 @@ def make_connection():
         "URL_STYLE 'path', USE_SSL 'true', SCOPE 's3://public-')"
     )
     con.sql("SET THREADS=4")  # external endpoint is happier at low concurrency
+    # Mirror the server preamble (server.py): a DuckDB statistics_propagation bug
+    # (#378) crashes SEMI/INNER joins over some S3 hex parquet (nhd-flowline, ACE)
+    # with `INTERNAL Error: SetMin or SetMax ...`. The server disables this optimizer
+    # per connection; the harness must too, so CI executes the same plan the server
+    # runs (else a real, server-runnable example would fail here, or vice versa).
+    con.sql("SET disabled_optimizers='statistics_propagation'")
     return con
 
 

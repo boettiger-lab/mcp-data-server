@@ -170,6 +170,22 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
                 conn.sql(stmt)
             except Exception as e:
                 print(f"⚠️ Setup statement skipped: {stmt!r}: {e}", file=sys.stderr)
+        # Work around a DuckDB `statistics_propagation` bug (#378): a SEMI/INNER
+        # join whose probe side is a multi-row-group, UINT64-key-sorted parquet
+        # read over S3 raises `INTERNAL Error: SetMin or SetMax ... does not match
+        # statistics' column value` when the build side's key range is disjoint
+        # from some row groups' zonemaps (empty intersection asserts instead of
+        # pruning). Present in DuckDB 1.5.3/1.5.4; S3-transport-specific. This hits
+        # real queries — masking the nhd-flowline / ACE families by a region scope
+        # (the car-28 line-length cell) crashes instead of returning a number.
+        # Disabling this one optimizer fixes it with no measurable perf cost (h0
+        # hive-partition pruning is independent of it). An engine workaround, not
+        # model guidance, so it lives here rather than in query-setup.md. Remove
+        # when the upstream fix ships and the pin moves past it.
+        try:
+            conn.sql("SET disabled_optimizers='statistics_propagation'")
+        except Exception as e:
+            print(f"⚠️ disabled_optimizers setup skipped: {e}", file=sys.stderr)
         # Opt-in extras (experimental image only — empty list on the default tag).
         # Warn rather than raise: a missing extension should degrade this connection's
         # capability, not fail every query the replica serves.
