@@ -292,11 +292,17 @@ GROUP BY class;
 
 `get_schema` names the fractions asset and the no-data code. Per cell `SUM(frac) <= 1`; the shortfall is outside-raster/quantization, so do not treat the layer as covering 100% of a cell.
 
-**Overlaying two partial-coverage layers — multiply the coverage fractions, then weight by cell area; never count a cell as all-or-nothing.** *(Skip unless you are intersecting a fractional-coverage layer with another layer that only partly covers its cells — e.g. "what percent of each habitat class is conserved".)* Treating a cell as fully inside the other layer whenever it matches over-counts every partly-covered cell. Weight by the coverage fraction on **both** sides, and carry `h3_cell_area` through numerator and denominator. It looks like it divides out; it does not — cells at the same resolution differ in area, which is what `h3_cell_area` exists to measure.
+**Overlaying a feature with a partial-coverage layer — the weight is fixed by the feature's geometry, and it is the same weight at every resolution.** *(Skip unless you are intersecting one layer with another that only partly covers its cells — e.g. "what percent of each habitat class is conserved".)* Reduce the overlay layer to one coverage fraction per cell, then weight each of the feature's cells by:
 
-The other layer's per-cell weight comes from a companion **per-cell weights asset** when one exists — `get_schema` names it (e.g. ca30x30 conserved-areas publishes `…-hex-weights` at res 10, with `w1`–`w4` giving the share of each cell in GAP status 1–4). Otherwise reduce the layer's features to one weight per cell first: `MAX` over the features on the cell of the per-feature coverage share its STAC documents.
+- **polygon or raster feature → area:** `h3_cell_area(hN, 'km^2')`, or the region land grid's `land_area_km2` where cells are partly ocean or border.
+- **line feature → length, never area:** dedup the feature's `length_*` and length-weight the fraction — see Problem 4.
+- **presence-only layer, no fraction column → the presence flag, averaged over the finer layer's cells:** presence at the finer resolution *is* the fraction.
 
-A weights asset covers only its own footprint, so `LEFT JOIN` it and `COALESCE(…, 0)`. Bound the result with a dense land grid for the region (California: `ca30x30-ecoregion` at res 10) — without it the denominator picks up cells outside the region.
+Two invariants make each branch correct. **Multiply the coverage fractions on both sides** — a cell that is 40% habitat and 30% conserved contributes 0.4 × 0.3, never all-or-nothing — and **carry the weight through both numerator and denominator** (it looks like `h3_cell_area` divides out; it does not, because cells differ in area). The overlay layer's per-cell fraction comes from a companion **`…-hex-weights` asset** when one exists — `get_schema` names it (ca30x30 conserved-areas publishes it at res 10, `w1`–`w4` = the cell's share in GAP status 1–4); otherwise it is the layer's own `frac`. A weights asset covers only its own footprint, so `LEFT JOIN` it and `COALESCE(…, 0)`, and bound the result with a dense **land grid** for the region (California: `ca30x30-ecoregion`) or the denominator picks up cells outside it.
+
+Self-check, needs no gold: **if the coarsening is right, the answer does not change with the resolution you joined at.**
+
+At the same resolution — feature and overlay both at res 10 — the area weight is `h3_cell_area` and the land grid bounds the denominator:
 
 ```sql
 WITH land AS (   -- dense res-10 land grid bounding the region
@@ -332,9 +338,33 @@ LEFT JOIN read_parquet('<conserved-areas hex-weights-res8>') p USING (h8, h0);
 
 The land grid has a row for every land cell in the region, so it is both the weight and the denominator — no `h3_cell_area()` call and no separate mask.
 
-When no weights asset is published at the coarse resolution, roll the fine layer up in two reductions, in this order: `MAX` (or `LEAST(SUM(w), 1)`) across the units overlapping **one fine cell**, then the mean across the **child cells of a coarse parent** — `SUM(w) / <children per parent>`, `7` for one resolution step (res-10 → res-9) and `49` for two (res-10 → res-8). `MAX` is the wrong reducer across children: it scores a whole parent as covered whenever a single child is.
+When no weights asset is published at the coarse resolution — or the finer layer carries **only presence**, no fraction column — roll the fine layer up yourself: a coarse parent's value is the **mean over its res-10 land children**, `SUM(child value) / <children per parent>` (`7` per resolution step res-10 → res-9, `49` for two res-10 → res-8). It is the same reduction whether the child value is a weight, a coverage fraction, or a 0/1 presence flag — presence at the finer resolution *is* the fraction, so average it. Reduce multiple units overlapping **one** fine cell with `MAX` (or `LEAST(SUM(w), 1)`) first; but never `MAX`/`MIN`/`EXISTS`/`DISTINCT` **across children** — that scores a whole parent as covered when a single child is, and the overstatement grows with the children per parent.
 
-Group on `h3_cell_to_parent(h10, 8)` when the fine layer carries no `h8` column. At res 9 read `ecoregion-hex-res9` and the `…-hex-weights-res9` weights the same way. When the coarse feature is itself a `hex-fractions` layer, keep its `frac` in the product on both sides, as in the same-resolution case. Matching the coarse feature against the fine layer's *distinct cells* treats a parent as fully covered when any one child is; the inflation grows with the number of children per parent.
+Averaging a res-10 presence flag over the land children of a res-8 feature — the ACE × wetlands case, no GAP column anywhere:
+
+```sql
+WITH feat AS (          -- coarse (res-8) feature cells
+  SELECT DISTINCT h8, h0
+  FROM read_parquet('<res-8 feature hex>')
+  WHERE <feature filter>
+),
+land AS (               -- res-10 land grid: the child cells to average over
+  SELECT DISTINCT h8, h10, h0 FROM read_parquet('<ecoregion hex>')
+),
+present AS (            -- res-10 presence layer; no fraction column
+  SELECT DISTINCT h10, h0
+  FROM read_parquet('<presence hex>')
+  WHERE <presence filter>
+)
+SELECT 100.0 * AVG(CASE WHEN p.h10 IS NOT NULL THEN 1 ELSE 0 END) AS pct_present
+FROM feat f
+JOIN land l USING (h8, h0)
+LEFT JOIN present p USING (h10, h0);
+```
+
+Presence promoted straight to the res-8 cell (`does any child match`) overstates badly — worse for sparser features. The mean over land children is the fraction; the `DISTINCT h8,h0` feature cells and the `AVG` over their children make the answer independent of the join resolution.
+
+Group on `h3_cell_to_parent(h10, 8)` when the fine layer carries no `h8` column. At res 9 read `ecoregion-hex-res9` and the `…-hex-weights-res9` weights the same way. When the coarse feature is itself a `hex-fractions` layer, keep its `frac` in the product on both sides, as in the same-resolution case.
 
 **If you plan to mask this result against another hex dataset:** put the
 `SEMI JOIN` on the raw `read_parquet(...)` *before* `GROUP BY`, not in a
@@ -355,7 +385,7 @@ GROUP BY a.h8;
 
 ### Problem 4 — Lines: per-segment columns and AOI boundaries
 
-*(Applies only to line-derived hex: source geometry is `LineString`/`MultiLineString`, columns like `length_miles`, `length_km`. Skip if your dataset has area/acres columns or is raster-derived.)*
+*(Applies whenever the feature you are measuring is line-derived — source geometry `LineString`/`MultiLineString`, columns like `length_miles`, `length_km`, `lengthkm` — **including** when you overlay it on an area layer that carries acres/area columns. The test is the feature's own geometry, not the overlay's. Skip only if the feature itself is polygon- or raster-derived.)*
 
 Per-segment values are **replicated on every row of any JOIN that matches a segment to multiple things**. Two unrelated mechanisms produce that replication:
 
@@ -383,6 +413,32 @@ GROUP BY rg.name_en ORDER BY miles DESC;
 ```
 
 The geometry column is `geometry` on the GeoParquets — not `geom`.
+
+- **Share of a line network's length under a fractional per-cell overlay** ("what percent of streams are conserved", "what share of trail miles burned"): weight by the **line's own length**, never by cell area — the hex supplies only the per-cell fraction. Dedup the feature's `length_*` first (it is replicated on every cell it touches), take the mean overlay fraction across that feature's cells, then `SUM(length × fraction) / SUM(length)`:
+
+```sql
+WITH land AS (          -- res-8 land grid: the per-cell scope for the network
+  SELECT DISTINCT h8, h0 FROM read_parquet('<ecoregion hex-res8>')
+),
+seg AS (                -- one row per (flowline, cell); lengthkm is the feature's
+                        -- full length, replicated on every cell it crosses
+  SELECT s._cng_fid AS fid, s.lengthkm AS len, s.h8, s.h0
+  FROM read_parquet('<line hex>') s
+  SEMI JOIN land l USING (h8, h0)
+  WHERE <feature filter>
+),
+cell AS (               -- attach each cell's conserved fraction (res-8 weights)
+  SELECT seg.fid, seg.len, COALESCE(w.w1 + w.w2, 0) AS frac
+  FROM seg LEFT JOIN read_parquet('<conserved-areas hex-weights-res8>') w USING (h8, h0)
+),
+per_feature AS (        -- dedup length per feature; mean its cells' fractions
+  SELECT fid, ANY_VALUE(len) AS len, AVG(frac) AS frac FROM cell GROUP BY fid
+)
+SELECT 100 * SUM(len * frac) / SUM(len) AS pct_conserved
+FROM per_feature;
+```
+
+  Weighting by `h3_cell_area` or a `land_area_*` column answers a different question — the conserved share of the *cells* the lines touch — and on a one-row-per-(feature, cell) set it also silently weights each cell by how many features cross it.
 
 ---
 

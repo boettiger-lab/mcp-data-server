@@ -54,6 +54,8 @@ SELECT h8, h0, MODE(lc_class) AS dominant
 FROM lc_on_scope GROUP BY h8, h0;
 ```
 
+The `WHERE l.lc_class IS NOT NULL` here keeps a no-data cell from poisoning the aggregate — but it also **changes which cells the answer describes**. When that column is only partly populated, see §9 before reporting the result as a share of the whole.
+
 ### Scoping by name or feature id (no region mask)
 
 To filter a global `…/hex/h0=*/…` dataset by a name or `_cng_fid` and there is no region-mask hex to join, first restrict `h0` to the region, then apply the attribute filter:
@@ -145,3 +147,39 @@ WHERE value IS NOT NULL AND NOT isnan(value)
 
 Take the sentinel codes from the dataset's STAC description. A `NaN` total or a
 total far smaller than expected is the signature of this trap.
+
+## 8. Total a partial-coverage feature by its own measure, not a hex count
+
+A vector feature's area or length is the value in its **own** column (`acres`,
+`length_km`), summed over `DISTINCT` feature id — tiling replicates that value on
+every cell the feature touches, so dedup by `_cng_fid` before summing.
+`COUNT(DISTINCT hN) * h3_cell_area(...)` is a larger, different number: it counts
+every partially-covered boundary cell as if the feature filled it. Use the hex
+only to *locate* the feature (mask, join, overlay); take the magnitude from the
+measured column. For the conserved or overlaid **share** of that total, weight by
+the coverage fraction — area for polygons and rasters, length for lines — and keep
+the weight inside the same `SUM()` as the measure, not derived in a subquery the
+outer aggregate then ignores. (See the overlay rules in the H3 guide.)
+
+## 9. Filtering no-data changes what you measured — say so
+
+`WHERE col IS NOT NULL` (or excluding sentinels) fixes the arithmetic but replaces
+the population. Missing values are rarely missing at random: incomplete columns are
+usually incomplete in patterns that track geography, feature type, or source
+vintage, so the rows that survive are a biased sample, and any share computed from
+them describes that sample, not the whole. Before using a partially-populated
+column as a filter, a class selector, or a denominator:
+
+1. **Quantify coverage** — what fraction of rows, and of the relevant measure
+   (area, length, count), survive the filter?
+2. **Check it against at least one independent grouping** — a partition key,
+   region, category, or date. Uniform coverage is safe to filter on; coverage that
+   is near 0% in some groups and near 100% in others means the filter is a group
+   selector wearing an attribute's clothes.
+3. **Confirm how absence is encoded.** `IS NOT NULL` misses sentinel values
+   (`0`, `-9999`, `''`); take them from the STAC description and exclude them before
+   measuring coverage — a sentinel can fake coverage a column does not have.
+4. **Report it.** If coverage is materially incomplete, state the covered fraction
+   and what it covers alongside the number. If coverage is concentrated in part of
+   the study area, the honest answer is that the breakdown is unavailable for the
+   whole — not a number with a caveat.
