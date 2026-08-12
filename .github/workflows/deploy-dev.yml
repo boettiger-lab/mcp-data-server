@@ -1,0 +1,91 @@
+name: Deploy dev
+
+# Converge dev-duckdb-mcp onto the freshly-built :main digest after each main
+# build, so dev tracks main automatically instead of a human running
+# `kubectl set image` (the decay behind #341/#366).
+#
+# Credential + RBAC + rotation: geo-agent-ops/DEV_DEPLOY_AUTOMATION.md. The
+# NRP_DEPLOY_KUBECONFIG secret is a least-privilege ServiceAccount kubeconfig that
+# can get/patch ONLY this one Deployment. This workflow SKIPS cleanly when the
+# secret is unset, so it is safe to merge before the credential is provisioned;
+# until then, fall back to the manual rollout in AGENTS.md.
+on:
+  workflow_run:
+    workflows: ["Build Docker image"]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Only after a successful build on main (or a manual run). Release-tag builds
+    # (head_branch = the tag) are for prod and are excluded here.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    env:
+      REPO: ghcr.io/boettiger-lab/mcp-data-server
+      NS: biodiversity
+      DEPLOY: dev-duckdb-mcp
+      CONTAINER: server
+      HAS_CRED: ${{ secrets.NRP_DEPLOY_KUBECONFIG != '' }}
+    steps:
+      - name: Skip if no deploy credential
+        if: env.HAS_CRED != 'true'
+        run: echo "NRP_DEPLOY_KUBECONFIG not set — skipping (see geo-agent-ops/DEV_DEPLOY_AUTOMATION.md)."
+
+      - name: Install kubectl
+        if: env.HAS_CRED == 'true'
+        run: |
+          curl -sLO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+
+      - name: Resolve current :main digest
+        if: env.HAS_CRED == 'true'
+        id: digest
+        run: |
+          tok=$(curl -s "https://ghcr.io/token?scope=repository:boettiger-lab/mcp-data-server:pull" \
+                | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+          d=$(curl -sI -H "Authorization: Bearer $tok" \
+                -H "Accept: application/vnd.oci.image.index.v1+json" \
+                -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+                "https://ghcr.io/v2/boettiger-lab/mcp-data-server/manifests/main" \
+              | grep -i '^docker-content-digest:' | tr -d '\r' | awk '{print $2}')
+          [ -n "$d" ] || { echo "could not resolve :main digest" >&2; exit 1; }
+          echo "digest=$d" >> "$GITHUB_OUTPUT"
+
+      - name: Write kubeconfig
+        if: env.HAS_CRED == 'true'
+        run: |
+          echo "${{ secrets.NRP_DEPLOY_KUBECONFIG }}" | base64 -d > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+
+      - name: Set dev image and wait for convergence
+        if: env.HAS_CRED == 'true'
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+        run: |
+          img="$REPO:main@${{ steps.digest.outputs.digest }}"
+          echo "Setting $DEPLOY -> $img"
+          kubectl -n "$NS" set image "deployment/$DEPLOY" "$CONTAINER=$img"
+          # Poll to convergence with `get` only (no watch) — matches the SA's RBAC.
+          for _ in $(seq 1 60); do
+            gen=$(kubectl -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.metadata.generation}')
+            og=$(kubectl  -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.status.observedGeneration}')
+            rep=$(kubectl -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.spec.replicas}')
+            up=$(kubectl  -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.status.updatedReplicas}')
+            av=$(kubectl  -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.status.availableReplicas}')
+            echo "  gen=$gen observed=${og:-0} updated=${up:-0}/$rep available=${av:-0}/$rep"
+            if [ "$og" = "$gen" ] && [ "${up:-0}" = "$rep" ] && [ "${av:-0}" = "$rep" ]; then
+              echo "converged on ${{ steps.digest.outputs.digest }}"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "did not converge within timeout" >&2
+          exit 1
+
+      - name: Clean up kubeconfig
+        if: always()
+        run: rm -f "$RUNNER_TEMP/kubeconfig"
