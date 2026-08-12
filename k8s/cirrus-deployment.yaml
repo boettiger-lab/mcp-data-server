@@ -26,8 +26,11 @@ spec:
         kubernetes.io/hostname: cirrus
       containers:
       - name: server
-        image: ghcr.io/boettiger-lab/mcp-data-server:main
-        imagePullPolicy: Always
+        # Digest-pinned so cirrus's 2 replicas converge on one build. :main +
+        # Always was non-convergent here too (#341/#366). Bump on redeploy; this
+        # cluster is self-hosted (k3s), so apply it from a cirrus context.
+        image: ghcr.io/boettiger-lab/mcp-data-server:main@sha256:458a014dc1763d6fef21574f7889e3c8199d442640e5a2df16f343dd50c973ef
+        imagePullPolicy: IfNotPresent
         env:
         # In-cluster MinIO mirror (matches gpu-mcp). STAC metadata + S3 data both
         # resolve to the on-node MinIO S3 endpoint (plain http, path-style).

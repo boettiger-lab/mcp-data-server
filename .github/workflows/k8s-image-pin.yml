@@ -1,0 +1,32 @@
+name: k8s image pin
+
+# Fails if any Deployment in k8s/*.yaml references this repo's image by a mutable
+# tag instead of an @sha256: digest (#366). A mutable tag re-resolves per pod at
+# each restart, so multi-replica pods silently drift onto different builds (#341).
+# A deliberately-moving deployment opts out with a `# ci-image-pin: allow-mutable`
+# comment; see tests/check_k8s_image_pins.py.
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'k8s/**'
+      - 'tests/check_k8s_image_pins.py'
+      - '.github/workflows/k8s-image-pin.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'k8s/**'
+      - 'tests/check_k8s_image_pins.py'
+      - '.github/workflows/k8s-image-pin.yml'
+
+jobs:
+  image-pin:
+    name: Deployments are digest-pinned
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Check image pins
+        run: python tests/check_k8s_image_pins.py
