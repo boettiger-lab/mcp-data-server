@@ -25,6 +25,14 @@ _H0 = "577762574070710271"
 # ca30x30 conserved-areas assessment family (the #364 coarse-overlay surface)
 ECO8 = f"s3://public-ca30x30/ecoregion/hex-res8/h0={_H0}/data_0.parquet"          # h8, nland, land_area_km2, h0
 CW8 = f"s3://public-ca30x30/conserved-areas-terrestrial-2025/hex-weights-res8/h0={_H0}/data_0.parquet"  # h8, w1..w4, h0
+# res-10 members of the same family (the #367 design-pass overlay/presence examples)
+ECO10 = f"s3://public-ca30x30/ecoregion/hex/h0={_H0}/data_0.parquet"              # h8, h9, h10 land grid, h0
+CWHR = f"s3://public-ca30x30/cwhr13/hex-fractions/h0={_H0}/data_0.parquet"        # whr13num, frac, h10, h0
+CW10 = f"s3://public-ca30x30/conserved-areas-terrestrial-2025/hex-weights/h0={_H0}/data_0.parquet"  # h10, w1..w4, h0
+# line + presence layers (#363 line-length, #355 presence-only)
+NHD = f"s3://public-usgs-nhd/nhdplus-hr/flowline/hex/h0={_H0}/data_0.parquet"     # _cng_fid, lengthkm, innetwork, streamorde, h8, h0
+NWI = f"s3://public-wetlands/nwi-v2/hex/h0={_H0}/data_0.parquet"                  # WETLAND_TYPE, state_code, h10, h0
+ACE = f"s3://public-cdfw/ace/terrestrial-biodiversity-summary/hex/h0={_H0}/data_0.parquet"  # BioRankSW, h8, h0
 # cross-dataset staples
 CENSUS = f"s3://public-census/census-2024/state/hex/h0={_H0}/data_0.parquet"      # h8, STUSPS, GEOID, h0
 CARBON = f"s3://public-carbon/irrecoverable-carbon-2024/hex/h0={_H0}/data_0.parquet"  # carbon, h5..h9, h0
@@ -49,6 +57,35 @@ EXECUTABLE = {
         "<ecoregion hex-res8>": ECO8,
         "<conserved-areas hex-weights-res8>": CW8,
     },
+    # res-10 fractional overlay (#289/#367): frac x GAP weight x area, weight
+    #   inside the SUM; binds cwhr13 fractions + res-10 land grid + res-10 weights.
+    "h3-guide.md:a3af36a53b": {
+        "<ecoregion hex>": ECO10,
+        "<cwhr13 hex-fractions>": CWHR,
+        "<conserved-areas hex-weights>": CW10,
+    },
+    # line-network conserved share (#363): dedup lengthkm per _cng_fid, length-
+    #   weight the res-8 GAP fraction. This is the shape that crashed pre-#378
+    #   (nhd-flowline SEMI JOIN), so it also guards that regression.
+    "h3-guide.md:0c6ddd1d29": {
+        "<ecoregion hex-res8>": ECO8,
+        "<line hex>": NHD,
+        "<feature filter>": "s.innetwork = 1 AND s.streamorde IN (1, 2)",
+        "<conserved-areas hex-weights-res8>": CW8,
+    },
+    # presence-only over res-10 land children (#355): mean of a 0/1 flag, never
+    #   promoted to the res-8 parent. ACE feature x NWI wetlands, no GAP column.
+    "h3-guide.md:da766d501c": {
+        "<res-8 feature hex>": ACE,
+        "<feature filter>": "BioRankSW = 5",
+        "<ecoregion hex>": ECO10,
+        "<presence hex>": NWI,
+        "<presence filter>": (
+            "state_code = 'CA' AND WETLAND_TYPE IN ("
+            "'Freshwater Emergent Wetland','Freshwater Forested/Shrub Wetland',"
+            "'Estuarine and Marine Wetland')"
+        ),
+    },
     # [19] rows-per-hex profiling on a single partition
     "h3-guide.md:2aab9a5de8": {"<STAC_HEX_PATH_SINGLE_PARTITION>": ECO8},
     # query-setup.md — the required SET/LOAD preamble (no S3); validates it runs
@@ -66,10 +103,9 @@ FRAGMENTS = {
     "h3-guide.md:e2dfe983ec": "CTE fragment referencing an undefined `flat_funding` relation",
     "h3-guide.md:ec06ef4087": "CTE fragment referencing undefined `countries`/`carbon_data` relations",
     "h3-guide.md:377ec327e2": "two-query block over generic `value`/`class` columns (SUM/AVG vs MODE illustration)",
-    "h3-guide.md:b774ac61d1": "fractional-coverage overlay; a class+frac dataset is not yet mapped (promote in the #367 design pass)",
-    "h3-guide.md:a3af36a53b": "res-10 fractional overlay; cwhr13 fractions + res-10 conserved weights not yet mapped (design pass)",
+    "h3-guide.md:b774ac61d1": "single-layer fractional overlay over a literal `class` column; no mapped dataset uses that column name (cwhr13 uses `whr13num`)",
     "h3-guide.md:1ccc1fb7d7": "references an undefined `mask` relation (DPP mask-first illustration)",
-    "h3-guide.md:acf2ad1267": "line-mileage over line/aoi hex + geoparquet datasets not yet mapped (promote with #363)",
+    "h3-guide.md:acf2ad1267": "line-mileage via ST_Intersection over line+AOI GeoParquet; those AOI geoparquets are not mapped (the conserved-share line example IS executable — see da766d501c's sibling 0c6ddd1d29)",
     "h3-guide.md:ae094c7f8c": "COPY to a write path with a `SELECT ...` ellipsis (export idiom)",
     # --- query-optimization.md ---
     "query-optimization.md:2f7793ba77": "bare JOIN clause (include-h0-in-join idiom)",
