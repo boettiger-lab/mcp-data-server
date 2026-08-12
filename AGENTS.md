@@ -151,10 +151,26 @@ label for the deployment you rolled (`duckdb-mcp` for prod, `dev-duckdb-mcp` for
 kubectl -n biodiversity get pods -l app=duckdb-mcp \
   -o custom-columns='NAME:.metadata.name,IMAGE:.status.containerStatuses[0].imageID'
 ```
-Every live (non-`Terminating`) pod must report the **same** `imageID` digest, and it must
-match the digest pinned in the manifest. Stuck `Terminating` zombie pods on unreachable
-NRP nodes are out of the Service's endpoints, so ignore them here — **never** force-delete
-them (NRP ops policy).
+Every pod **that serves traffic** must report the **same** `imageID` digest, matching the
+manifest. But `containerStatuses[0].imageID` is a *stale* witness on a pod whose node is
+unreachable: a disrupted-node orphan from an old ReplicaSet keeps Running with its
+last-known status — often `ready: true` and an **old digest** — so the command above can
+list mismatched digests that are **not** a live convergence failure. (Observed on prod
+2026-08-12: three weeks-old orphans on disrupted nodes, `containerStatuses[0].ready` a
+stale `true`, sitting on v0.8.8/0.8.9-era digests alongside six converged v0.8.15 pods.)
+
+Check what actually serves, not the raw pod list:
+- **Service endpoints are authoritative** — `kubectl -n biodiversity get endpoints mcp-server-duckdb`
+  (prod) or `dev-mcp-server-duckdb` (dev) lists only the pods receiving traffic. Orphans are
+  excluded because their **pod-level `Ready` condition is `False`**, even when the container's
+  own `ready` is a stale `true`. So the real check is: **every endpoint-backing pod converges
+  on the manifest digest.**
+- To explain a mismatched digest, read the pod-level Ready condition
+  (`.status.conditions[?(@.type=="Ready")].status`) and the node — an orphan reads `Ready=False`
+  on an unreachable node.
+
+Such orphans may be **Running**, not just `Terminating`. Either way they are out of rotation
+and NRP GCs them when the node recovers — **never** force-delete them (NRP ops policy).
 
 ---
 
