@@ -8,6 +8,18 @@ on:
     - cron: '0 6 * * 1'  # Mondays 06:00 UTC — refresh base image + unpinned deps
   workflow_dispatch:
 
+# Serialize builds per ref so rapid merges to main don't run concurrently and
+# corrupt each other's build (#377): concurrent buildx builds sharing one gha
+# cache scope can import a half-written manifest and reuse a code layer from a
+# different commit's context — a tag then ships another commit's bytes. With
+# cancel-in-progress:false the in-flight build finishes and the newest queued
+# ref builds last, so `:main` deterministically lands on the latest commit with
+# its own code. (Intermediate commits' `:<sha>` may be skipped during a burst;
+# the durable one-image-per-commit guarantee is #366's build-once/promote.)
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -83,8 +95,13 @@ jobs:
           # cache-to still warms the cache for subsequent pushes.
           # (When no-cache=true, cache-from is ignored by design; cache-to is kept
           # so the next code-push still gets a warm cache.)
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Scope the gha cache per ref (#377): the per-ref concurrency guard above
+          # serializes builds of the *same* ref, and a distinct scope per ref keeps
+          # cross-ref builds (e.g. a release tag building while main builds) from
+          # sharing — and poisoning — one cache. Reuse is preserved *within* a ref
+          # (main reuses main's deps layer across commits).
+          cache-from: type=gha,scope=${{ github.ref_name }}
+          cache-to: type=gha,scope=${{ github.ref_name }},mode=max
           no-cache: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           pull: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
