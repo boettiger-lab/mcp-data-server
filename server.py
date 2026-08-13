@@ -626,9 +626,14 @@ def register_hex_tiles(
     area".
 
     Call this ONLY to display a value your SQL COMPUTES that is not already a
-    servable field anywhere — not a column in a layer's PMTiles, and not a
-    raster field served by a COG. If the value already lives somewhere
-    renderable, render that instead. If intent is ambiguous, ask first.
+    servable field anywhere. If the value already lives somewhere renderable,
+    render that instead:
+      - a raster field (effort, elevation, SST) -> the COG via titiler
+      - a column already in a layer's PMTiles   -> data-driven paint (set_style)
+      - a value your SQL computes, served by neither -> this tool
+    It also expects per-hex values across a region, large enough to exceed the
+    50-row `query` cap: a top-N answer is a `query` table, not a tile layer.
+    If intent is ambiguous, ask first.
 
     Parameters:
     - `sql`: a SELECT whose first column is an H3 index. The tool reads that
