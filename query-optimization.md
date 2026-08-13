@@ -171,7 +171,7 @@ the weight inside the same `SUM()` as the measure, not derived in a subquery the
 outer aggregate then ignores. (See the overlay rules in the H3 guide.)
 
 ## 9. Filtering no-data changes what you measured — say so
-<!-- prov: issue=#359 models=unrecorded added=2026-08-12 cell=none tier=core -->
+<!-- prov: issue=#359 models=unrecorded added=2026-08-12 cell=instance-only:streamorder-use-nhdplus-hr-not-base-nhd tier=core -->
 
 `WHERE col IS NOT NULL` (or excluding sentinels) fixes the arithmetic but replaces
 the population. Missing values are rarely missing at random: incomplete columns are
