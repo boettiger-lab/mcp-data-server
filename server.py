@@ -71,10 +71,21 @@ def parse_setup_sql(content):
     match = re.search(r"```sql\n(.*?)\n```", content, re.DOTALL)
     return match.group(1).strip() if match else ""
 
+# `<!-- prov: ... -->` lines under each guidance heading record why a rule exists:
+# motivating issue, the model(s) that actually failed, when it was added, and the
+# geo-agent-benchmark cell that regresses if it is removed (#384). They live next to
+# the rule so they cannot drift from it, and are stripped here so they cost the model
+# nothing — every byte of these files is injected into the `query` tool description on
+# every call. Kept out of the docs/ tree for the same reason: adjacency is the point.
+PROV_RE = re.compile(r"^[ \t]*<!--[ \t]*prov:.*?-->[ \t]*\n", re.MULTILINE)
+
+def strip_prov(text):
+    return PROV_RE.sub("", text)
+
 SETUP_RAW = load_text_file("query-setup.md")
 SETUP_SQL = parse_setup_sql(SETUP_RAW)
-OPTIM_RAW = load_text_file("query-optimization.md")
-H3_RAW = load_text_file("h3-guide.md")
+OPTIM_RAW = strip_prov(load_text_file("query-optimization.md"))
+H3_RAW = strip_prov(load_text_file("h3-guide.md"))
 ROLE_RAW = load_text_file("assistant-role.md")
 
 # Opt-in DuckDB extensions beyond the stock httpfs/spatial/h3 set (issue #354).

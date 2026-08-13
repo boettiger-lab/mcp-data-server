@@ -1,6 +1,7 @@
 # Query Optimization Essentials
 
 ## 1. Always include h0 in joins
+<!-- prov: issue=#40 models=unrecorded added=2026-03-31 cell=hex-join-include-h0 tier=core -->
 
 Most datasets are hive-partitioned by h0. When both sides of a join have h0, always include it in the join condition:
 
@@ -13,6 +14,7 @@ schema). Omitting `AND t1.h0 = t2.h0` causes DuckDB to open every partition file
 instead of only the matching ones (10-100x slower).
 
 ## 2. Start with a small geographic reference dataset
+<!-- prov: issue=#83,#87 models=unrecorded added=2026-08-12 cell=mask-before-aggregate tier=core -->
 
 Use `regions/hex/**` or `countries.parquet` as the first CTE to establish geographic
 scope before joining large thematic datasets (PADUS, carbon, wetlands, species).
@@ -57,6 +59,7 @@ FROM lc_on_scope GROUP BY h8, h0;
 The `WHERE l.lc_class IS NOT NULL` here keeps a no-data cell from poisoning the aggregate — but it also **changes which cells the answer describes**. When that column is only partly populated, see §9 before reporting the result as a share of the whole.
 
 ### Scoping by name or feature id (no region mask)
+<!-- prov: issue=#163 models=unrecorded added=2026-06-07 cell=none tier=core -->
 
 To filter a global `…/hex/h0=*/…` dataset by a name or `_cng_fid` and there is no region-mask hex to join, first restrict `h0` to the region, then apply the attribute filter:
 
@@ -79,6 +82,7 @@ FROM (
 ```
 
 ## 3. Trust your schema — don't grep with DESCRIBE+LIKE
+<!-- prov: issue=#108,#113 models=qwen3 added=2026-05-03 cell=none tier=core -->
 
 For datasets already loaded in your app, the column list returned by `get_schema`
 (or `get_stac_details`) is canonical: every column, with type and description.
@@ -94,6 +98,7 @@ context. Search the existing schema response instead. `DESCRIBE` is appropriate
 only for arbitrary parquet files not represented in any STAC collection.
 
 ## 4. Text matching: fuzzy search vs exact keys
+<!-- prov: issue=#209,#220 models=unrecorded added=2026-06-20 cell=feature_type-exact,county-name-filter,program-like-lwcf tier=core -->
 
 DuckDB `LIKE` is case-sensitive by default. For **fuzzy substring search** on a
 free-text label the user typed (site, owner, program names), normalize both
@@ -115,6 +120,7 @@ WHERE sci_name = 'Rana draytonii'
 ```
 
 ## 5. GeoParquet geometry columns
+<!-- prov: issue=#48 models=unrecorded added=2026-05-03 cell=none tier=core -->
 
 GeoParquet files contain a geometry column (usually `geom`) typed as `GEOMETRY('OGC:CRS84')`.
 This type cannot be displayed in tabular output — the server drops it automatically.
@@ -122,6 +128,7 @@ Avoid `SELECT *` on GeoParquet files; select only the columns you need. If you n
 coordinates, cast explicitly: `ST_AsText(geom) AS geom_wkt`.
 
 ## 6. Apostrophes in string literals
+<!-- prov: issue=unrecorded models=unrecorded added=2026-06-24 cell=none tier=core -->
 
 Site names and owner names can contain apostrophes (e.g. `O'Brien Ranch`). Double any
 single quote inside a SQL string literal — do not use a backslash:
@@ -132,6 +139,7 @@ WHERE site = 'O'Brien Ranch'    -- parse error
 ```
 
 ## 7. Filter no-data values before SUM / AVG
+<!-- prov: issue=#243,#244 models=gemma,glm-5,kimi added=2026-08-12 cell=sum-amount-safe tier=core -->
 
 A single `NaN` turns the entire aggregate into `NaN` — one no-data cell poisons a
 whole `SUM` or `AVG`. No-data shows up as literal `NaN`, or as sentinel codes a
@@ -149,6 +157,7 @@ Take the sentinel codes from the dataset's STAC description. A `NaN` total or a
 total far smaller than expected is the signature of this trap.
 
 ## 8. Total a partial-coverage feature by its own measure, not a hex count
+<!-- prov: issue=#289 models=claude-sonnet-5,glm-5.2,kimi-k3,qwen,qwen3-small added=2026-08-12 cell=acres-from-geoparquet-not-hex tier=core -->
 
 A vector feature's area or length is the value in its **own** column (`acres`,
 `length_km`), summed over `DISTINCT` feature id — tiling replicates that value on
@@ -162,6 +171,7 @@ the weight inside the same `SUM()` as the measure, not derived in a subquery the
 outer aggregate then ignores. (See the overlay rules in the H3 guide.)
 
 ## 9. Filtering no-data changes what you measured — say so
+<!-- prov: issue=#359 models=unrecorded added=2026-08-12 cell=none tier=core -->
 
 `WHERE col IS NOT NULL` (or excluding sentinels) fixes the arithmetic but replaces
 the population. Missing values are rarely missing at random: incomplete columns are

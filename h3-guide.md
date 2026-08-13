@@ -1,4 +1,5 @@
 # H3 Geospatial Indexing
+<!-- prov: issue=#49 models=unrecorded added=2026-05-28 cell=background tier=core -->
 
 **Most datasets have H3 hex versions.** Always use them for spatial operations instead of GeoParquet geometry columns.
 
@@ -8,6 +9,7 @@ When a dataset appears in the STAC catalog as GeoParquet, a hex-indexed version 
 If you browse the catalog and only find a GeoParquet with no hex equivalent, **say so** rather than falling back to spatial predicates. A missing hex version is a data pipeline gap (not something to work around silently).
 
 ## The H3 Data Model
+<!-- prov: issue=#92,#93 models=unrecorded added=2026-04-21 cell=background tier=core -->
 
 All datasets are already stored as H3 hex parquet in the STAC catalog — no conversion is needed. Understanding the origin of each dataset explains the structure you will encounter when you query it.
 
@@ -18,6 +20,7 @@ All datasets are already stored as H3 hex parquet in the STAC catalog — no con
 All spatial operations are hex joins — two datasets overlap wherever their hex IDs match. **Never use `ST_Within`, `ST_Intersects`, `ST_Centroid`, or any spatial function.** For coordinates (e.g. to supply a map zoom), use `h3_cell_to_lat(hN)` and `h3_cell_to_lng(hN)`.
 
 ## Resolution Direction
+<!-- prov: issue=#45 models=unrecorded added=2026-04-06 cell=background tier=core -->
 
 **Higher H3 resolution numbers are finer (smaller cells); lower numbers are coarser (larger cells).** h0 is the coarsest (~1000 km edge length); h15 is the finest. A higher-resolution cell is always a *child* of a lower-resolution cell — never the reverse.
 
@@ -26,12 +29,14 @@ All spatial operations are hex joins — two datasets overlap wherever their hex
 - Always check the dataset schema for available resolution columns before writing a join
 
 ## Key Facts
+<!-- prov: issue=#35 models=unrecorded added=2026-05-28 cell=background tier=core -->
 
 - Always report **areas** (km², acres, etc.), never raw hex counts
 - For nationwide/global aggregates over millions of cells, `APPROX_COUNT_DISTINCT(hN)` is fast and accurate to ~1–2%. For per-group breakdowns (per-state, per-class, per-county, per-district) where each group has fewer than ~1M distinct cells, use `COUNT(DISTINCT hN)` instead — DuckDB's HLL error grows steeply at smaller cardinalities and compounds inside `GROUP BY` (real-world per-group errors of +30% have been observed). Total scan size matters less than per-group cell count.
 - **Never SUM area columns** (ACRES, GIS_Acres, area_ha, etc.) on hex data. These store the source polygon's total area repeated on every hex row. `SUM(ACRES)` = polygon_area × num_hex_cells — wrong by 10³–10⁶×. Always compute area from hex cells instead. Note: `DISTINCT` deduplication removes duplicate rows for the same feature but does not resolve overlapping features — two features covering the same ground still sum their acreages independently. Counting distinct hex cells × `area_per_cell` is the only method immune to this, since it counts physical cells rather than feature declarations (see the previous bullet for `APPROX` vs exact `COUNT DISTINCT`). The same row-replication problem applies to `length_*` columns on line hex at smaller scale — see Problem 4.
 
 ## Area Conversion
+<!-- prov: issue=#163,#259,#288 models=gemma,qwen3,qwen3-small added=2026-07-07 cell=units-acres,cell-count-units,carbon-cell-is-total tier=core -->
 
 H3 cells are not equal-area — true area varies with latitude and icosahedral distortion (res-8 cells span ~0.55–0.82 km²). Pick the method by scope:
 
@@ -82,6 +87,7 @@ The constants below are latitude/distortion-averaged, not true per-cell values (
 Use the constant for the dataset's **native** resolution — the column it is actually indexed on (check with `DESCRIBE`). Multiplying a cell count by the constant for a different resolution is off by ~7× per level.
 
 ## Coordinates from H3 Cells
+<!-- prov: issue=#104,#114 models=qwen3 added=2026-05-03 cell=none tier=core -->
 
 To get latitude/longitude from a hex column (e.g. to supply a `fly_to` map
 center), call `h3_cell_to_lat(hN)` / `h3_cell_to_lng(hN)` on the cell **column**.
@@ -101,6 +107,7 @@ which loses precision even when accepted. Accepted argument types are
 `VARCHAR`, `UBIGINT`, and `BIGINT`.
 
 ## Distance Between Hexes
+<!-- prov: issue=#168,#228 models=glm-5,kimi added=2026-06-21 cell=none tier=core -->
 
 `h3_great_circle_distance` measures between two coordinate pairs, not cell
 indices. To get the distance between two hex cells, convert each to its center
@@ -117,12 +124,14 @@ FROM ...
 Units: `'km'`, `'m'`, or `'rads'`.
 
 ## Joining Different Resolutions
+<!-- prov: issue=#45,#312,#350 models=claude-sonnet-5,glm-5.2,kimi-k3,qwen added=2026-08-03 cell=h8-h9-join,h3-rollup-mean-not-max-res8,h3-rollup-mean-not-max-res9 tier=core -->
 
 **Always join by converting the finer (higher-numbered) dataset to the coarser resolution — never look for child columns on the coarser dataset.**
 
 Pick the reducer for that conversion by what the value means: a measured quantity per cell rolls up with `SUM` or `AVG`, but a **coverage fraction** (the share of a cell covered by something) rolls up as the mean over the parent's child cells — see *Feature coarser than the overlay layer* under Problem 3.
 
 ### Step 1: Check for pre-computed parent columns (preferred)
+<!-- prov: issue=#45 models=unrecorded added=2026-04-06 cell=h8-h9-join tier=core -->
 
 Many fine-resolution datasets (e.g. GEBCO h8) already carry pre-computed parent columns (`h7`, `h6`, `h5`, ...). Use these directly — they are faster than calling `h3_cell_to_parent()` on every row. Check the schema first:
 
@@ -146,6 +155,7 @@ JOIN gebco_by_h6 g ON s.h6 = g.h6 AND s.h0 = g.h0
 ```
 
 ### Step 2: Fall back to h3_cell_to_parent() when no pre-computed column exists
+<!-- prov: issue=#35,#40 models=unrecorded added=2026-06-24 cell=h8-h9-join tier=core -->
 
 Use `h3_cell_to_parent()` — not `h3_cell_to_children()` — when the pre-computed parent column is absent:
 
@@ -165,6 +175,7 @@ When one side lacks h0, omit it from that side. Prefer hex-partitioned variants 
 Some datasets carry NULL in their finest pre-computed parent column for very large features (e.g. WDPA's largest protected areas have h8 but NULL h9). Joining on that finer column silently drops those features and undercounts coverage. Join at the coarsest resolution both sides share, or fall back to `h3_cell_to_parent()` which is always populated.
 
 ## Subsetting a dataset to a region (state, county, district)
+<!-- prov: issue=#322,#324,#325 models=qwen,nimbus added=2026-07-15 cell=h0-not-a-boundary,region-subset-finest-shared-res,mask-to-state-not-unit-set tier=core -->
 
 **`h0` is the res-0 partition key — a coarse *storage* key, never a spatial or boundary filter.** Each res-0 base cell spans ~4.35 **million** km² (larger than any US state), so `WHERE h0 = …` or `WHERE h0 IN (…)` selects whole base cells, not the region. Florida sits inside a single base cell, so `WHERE h0 = <fl_cell>` renders the entire continental US; California spans two base cells, so `WHERE h0 IN (<ca_cell_1>, <ca_cell_2>)` renders both, far larger than the state. Resolving a region to its base cells (`SELECT DISTINCT h0 … WHERE STUSPS='CA'`) and filtering the value dataset by that `h0` set **alone** is always wrong — it clips to nothing finer than the base cells.
 
@@ -199,12 +210,14 @@ GROUP BY c.h8;
 Restricting `h0` is legitimate only as a **partition-pruning prefilter paired with a real boundary filter** — the `h8 IN`/mask join above, or an attribute filter on the value dataset itself (see *Scoping by name or feature id* in query-optimization.md). On its own, `h0` narrows which files are scanned; it never clips to the region.
 
 ## Multiple Rows per Hex: Four Different Problems
+<!-- prov: issue=#92,#93 models=unrecorded added=2026-05-28 cell=background tier=core -->
 
 There are **four distinct reasons** a dataset can have multiple rows with the same `h8` value, and they require different fixes:
 
 ---
 
 ### Problem 1 — Tiling: same feature repeated across many hexes
+<!-- prov: issue=#92,#93,#98,#116 models=unrecorded added=2026-05-30 cell=dedup-protected-hexes,dedup-hexes-before-sum-population,dedup-landvote-id,count-distinct-ramsarid tier=core -->
 
 Every vector polygon is tiled into N hex rows — one per H3 cell it covers — all sharing the same `_cng_fid` and identical feature-level attributes (name, declared acres, funding amount). Summing an attribute directly multiplies it by N; deduplicate to one row per feature first:
 
@@ -237,6 +250,7 @@ GROUP BY sd.GEOID
 ---
 
 ### Problem 2 — Overlapping polygons (vector datasets)
+<!-- prov: issue=#3,#35 models=unrecorded added=2026-05-30 cell=dominant-class,dominant-class-per-cell tier=core -->
 
 Some vector datasets store one row per *feature* (e.g. each protected area). Multiple features can cover the same hex, producing duplicate `h8` values. Joining the raw hex table directly inflates downstream aggregates (two features over the same cell sum carbon twice). Deduplicate to unique `(h8, h0)` pairs first:
 
@@ -258,6 +272,7 @@ Check the dataset's STAC description — it will note when DISTINCT is required.
 ---
 
 ### Problem 3 — Raster pixels (raster-derived datasets)
+<!-- prov: issue=#3,#309,#355,#367 models=deepseek-v4-flash-0731,glm-5.2,kimi-k3 added=2026-08-12 cell=cwhr13-use-fractional-hex-not-mode,fractional-overlay-weight-by-cell-area,h3-presence-mean-not-promote-res8 tier=core -->
 
 Raster datasets are converted to hex by assigning each **pixel** its H3 cell — no aggregation is applied during processing. When the raster resolution is finer than the H3 resolution, many pixels map to the same hex cell, producing many rows with the same `h8`, all with different values.
 
@@ -384,6 +399,7 @@ GROUP BY a.h8;
 ---
 
 ### Problem 4 — Lines: per-segment columns and AOI boundaries
+<!-- prov: issue=#153,#155,#363,#367 models=deepseek-v4-flash-0731,glm-5.2 added=2026-08-12 cell=line-length-not-hex-area,stream-order-class-boundary,streamorder-use-nhdplus-hr-not-base-nhd tier=core -->
 
 *(Applies whenever the feature you are measuring is line-derived — source geometry `LineString`/`MultiLineString`, columns like `length_miles`, `length_km`, `lengthkm` — **including** when you overlay it on an area layer that carries acres/area columns. The test is the feature's own geometry, not the overlay's. Skip only if the feature itself is polygon- or raster-derived.)*
 
@@ -443,6 +459,7 @@ FROM per_feature;
 ---
 
 ### Diagnostic: check rows-per-hex before writing queries
+<!-- prov: issue=#3 models=unrecorded added=2026-05-28 cell=none tier=core -->
 
 When uncertain, run this check on a single h0 partition first:
 
@@ -461,6 +478,7 @@ FROM read_parquet('<STAC_HEX_PATH_SINGLE_PARTITION>');
 | >> 1, non-integer | Raster pixels — use GROUP BY + SUM/AVG/MODE |
 
 ## Generating Output Files
+<!-- prov: issue=#60 models=unrecorded added=2026-04-16 cell=none tier=core -->
 
 ```sql
 COPY (SELECT ...) TO 's3://public-output/unique-file-name.csv' (FORMAT CSV, HEADER, OVERWRITE_OR_IGNORE);
