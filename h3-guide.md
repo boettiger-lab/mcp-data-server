@@ -100,12 +100,6 @@ FROM read_parquet('<hex parquet path>')
 WHERE <feature filter>;
 ```
 
-**Always pass the column** (`h8`, `h0`) — never copy a displayed h3 ID as a
-literal. Markdown table output may render the BIGINT in scientific notation
-(e.g. `6.15323e+17`), which DuckDB parses as DOUBLE (function rejects it) and
-which loses precision even when accepted. Accepted argument types are
-`VARCHAR`, `UBIGINT`, and `BIGINT`.
-
 ## Distance Between Hexes
 <!-- prov: issue=#168,#228 models=glm-5,kimi added=2026-06-21 cell=none tier=core -->
 
