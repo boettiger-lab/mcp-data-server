@@ -210,11 +210,30 @@ class TestQueryFunction:
         assert "|   3 |" in result or "| 3 " in result
 
     def test_query_nullable_wide_int_still_exact(self):
-        """A NULL in the column must not reintroduce float coercion (#387)."""
+        """A NULL must not reintroduce float coercion (#387).
+
+        Under pandas 3 a str-dtype column stores missing as the FLOAT nan, so a
+        single NULL makes tabulate type the column as float and every wide int
+        reverts to `6.13762e+17` — the cast undone by one missing cell. The
+        IUCN size-stratified assets have NULL finer h-columns, so this is live.
+        """
         result = query(
             "SELECT h8 FROM (VALUES (613762179077668863::UBIGINT), (NULL::UBIGINT)) t(h8)"
         )
         assert "613762179077668863" in result and "e+17" not in result
+        assert "nan" not in result
+
+    def test_query_null_date_is_blank_not_nan(self):
+        """A NULL date renders blank, never the literal `nan` (#387).
+
+        Same pandas-3 mechanism as above. `nan` in a date column reads as a
+        value rather than as missing.
+        """
+        result = query(
+            "SELECT d FROM (VALUES (DATE '2024-12-30'), (NULL::DATE)) t(d)"
+        )
+        assert "2024-12-30" in result
+        assert "nan" not in result
 
     def test_query_negative_and_hugeint_exact(self):
         """Signed negatives and HUGEINT aggregates render exactly (#387)."""

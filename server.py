@@ -379,18 +379,27 @@ def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint
             # shape-dependent: a single-column frame renders scientific too.
             # Casting is only a display change — a count still renders as `3`,
             # right-aligned, because tabulate re-parses the numeric string.
+            # NULLs must become '' rather than staying NULL. Under pandas 3 a
+            # str-dtype column holds missing values as the FLOAT nan, so one NULL
+            # makes tabulate type the whole column as float and every wide int
+            # reverts to `6.13762e+17` — the cast silently undone by a single
+            # missing cell (the IUCN size-stratified assets have NULL finer
+            # h-columns, so this is live). It also stops a NULL date printing as
+            # the literal `nan`, which reads as a value.
             WIDE_INTS = ("BIGINT", "UBIGINT", "HUGEINT", "UHUGEINT")  # > 2^53
             rendered = []
             for c, t in zip(result.columns, result.dtypes):
                 tu, q = str(t).upper(), f'"{c}"'
                 if tu == "DATE":
-                    rendered.append(f"strftime({q}, '%Y-%m-%d') AS {q}")
+                    expr = f"strftime({q}, '%Y-%m-%d')"
                 elif tu.startswith("TIMESTAMP"):
-                    rendered.append(f"strftime({q}, '%Y-%m-%d %H:%M:%S') AS {q}")
+                    expr = f"strftime({q}, '%Y-%m-%d %H:%M:%S')"
                 elif tu in WIDE_INTS:
-                    rendered.append(f"CAST({q} AS VARCHAR) AS {q}")
+                    expr = f"CAST({q} AS VARCHAR)"
                 else:
                     rendered.append(None)
+                    continue
+                rendered.append(f"COALESCE({expr}, '') AS {q}")
             if any(rendered):
                 proj = [expr or f'"{c}"' for expr, c in zip(rendered, result.columns)]
                 result = result.select(", ".join(proj))
