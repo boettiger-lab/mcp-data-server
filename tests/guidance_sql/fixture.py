@@ -33,6 +33,14 @@ CW10 = f"s3://public-ca30x30/conserved-areas-terrestrial-2025/hex-weights/h0={_H
 NHD = f"s3://public-usgs-nhd/nhdplus-hr/flowline/hex/h0={_H0}/data_0.parquet"     # _cng_fid, lengthkm, innetwork, streamorde, h8, h0
 NWI = f"s3://public-wetlands/nwi-v2/hex/h0={_H0}/data_0.parquet"                  # WETLAND_TYPE, state_code, h10, h0
 ACE = f"s3://public-cdfw/ace/terrestrial-biodiversity-summary/hex/h0={_H0}/data_0.parquet"  # BioRankSW, h8, h0
+# line + AOI GeoParquet pair for the AOI-clip recipe (#394). Deliberately a pair
+# whose geometry columns DIFFER — trails `geometry` vs census `geom` — since asserting
+# one name for both is exactly the defect this block shipped with.
+TRAILS_HEX = f"s3://public-trails/federal-trails-2026/hex/h0={_H0}/data_0.parquet"   # _cng_fid, length_miles, h8, h0
+TRAILS_GPQ = "s3://public-trails/federal-trails-2026.parquet"                        # _cng_fid, length_miles, geometry
+CD_HEX = f"s3://public-census/census-2024/cd/hex/h0={_H0}/data_0.parquet"            # _cng_fid, GEOID, h8, h0
+CD_GPQ = "s3://public-census/census-2024/cd.parquet"                                 # _cng_fid, GEOID, NAMELSAD, geom
+
 # cross-dataset staples
 CENSUS = f"s3://public-census/census-2024/state/hex/h0={_H0}/data_0.parquet"      # h8, STUSPS, GEOID, h0
 CARBON = f"s3://public-carbon/irrecoverable-carbon-2024/hex/h0={_H0}/data_0.parquet"  # carbon, h5..h9, h0
@@ -73,6 +81,22 @@ EXECUTABLE = {
         "<feature filter>": "s.innetwork = 1 AND s.streamorde IN (1, 2)",
         "<conserved-areas hex-weights-res8>": CW8,
     },
+    # AOI-clipped line mileage (#394). Was a FRAGMENT ("AOI geoparquets not
+    #   mapped") — which is why the block shipped with `tg.geometry` against
+    #   datasets whose column is `geom`, and with ST_Length (degrees) divided by
+    #   1609.344. Binding this pair is what catches the first of those; the
+    #   trap cell tplca-trail-miles-siskiyou (geo-agent-benchmark#34) catches
+    #   the second. Mapped to a line/AOI pair with DIFFERENT geometry column
+    #   names on purpose.
+    "h3-guide.md:989f348f87": {
+        "<line_hex>": TRAILS_HEX,
+        "<aoi_hex>": CD_HEX,
+        "<line_geoparquet>": TRAILS_GPQ,
+        "<aoi_geoparquet>": CD_GPQ,
+        "<line_geom>": "geometry",
+        "<aoi_geom>": "geom",
+        "<aoi_name>": "NAMELSAD",
+    },
     # presence-only over res-10 land children (#355): mean of a 0/1 flag, never
     #   promoted to the res-8 parent. ACE feature x NWI wetlands, no GAP column.
     "h3-guide.md:da766d501c": {
@@ -105,7 +129,6 @@ FRAGMENTS = {
     "h3-guide.md:377ec327e2": "two-query block over generic `value`/`class` columns (SUM/AVG vs MODE illustration)",
     "h3-guide.md:b774ac61d1": "single-layer fractional overlay over a literal `class` column; no mapped dataset uses that column name (cwhr13 uses `whr13num`)",
     "h3-guide.md:1ccc1fb7d7": "references an undefined `mask` relation (DPP mask-first illustration)",
-    "h3-guide.md:acf2ad1267": "line-mileage via ST_Intersection over line+AOI GeoParquet; those AOI geoparquets are not mapped (the conserved-share line example IS executable — see da766d501c's sibling 0c6ddd1d29)",
     "h3-guide.md:ae094c7f8c": "COPY to a write path with a `SELECT ...` ellipsis (export idiom)",
     # --- query-optimization.md ---
     "query-optimization.md:2f7793ba77": "bare JOIN clause (include-h0-in-join idiom)",

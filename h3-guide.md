@@ -414,14 +414,14 @@ WITH cand AS (
   FROM read_parquet('<line_hex>') t
   JOIN read_parquet('<aoi_hex>') r ON t.h8 = r.h8 AND t.h0 = r.h0
 )
-SELECT rg.name_en AS aoi,
+SELECT rg.<aoi_name> AS aoi,
        SUM(tg.length_miles
-           * ST_Length(ST_Intersection(tg.<geom>, rg.<geom>))
-           / ST_Length(tg.<geom>)) AS miles
+           * ST_Length(ST_Intersection(tg.<line_geom>, rg.<aoi_geom>))
+           / ST_Length(tg.<line_geom>)) AS miles
 FROM cand c
 JOIN read_parquet('<line_geoparquet>') tg ON tg._cng_fid = c.trail_fid
 JOIN read_parquet('<aoi_geoparquet>') rg ON rg._cng_fid = c.aoi_fid
-GROUP BY rg.name_en ORDER BY miles DESC;
+GROUP BY rg.<aoi_name> ORDER BY miles DESC;
 ```
 
 **`ST_Length` returns degrees, not metres,** because these GeoParquets store lon/lat. Dividing
@@ -430,9 +430,10 @@ by `1609.344` is off by ~5 orders of magnitude, and the usual repairs are unavai
 ratio above is the way through — both lengths carry the same wrong unit, so it cancels, and
 `length_miles` supplies the real scale. Same idea as the fractional-overlay recipe below.
 
-**Read the geometry column name off the schema** (`DESCRIBE`, or the STAC `table:columns`) —
+**Read each geometry column name off the schema** (`DESCRIBE`, or the STAC `table:columns`) —
 it is `geom` on the census layers, `geometry` on trails and seafloor-geomorphology, and
-`SHAPE` on PAD-US and the WWF ecoregions. There is no safe default.
+`SHAPE` on PAD-US and the WWF ecoregions. There is no safe default, and the two sides of this
+join often differ.
 
 - **Share of a line network's length under a fractional per-cell overlay** ("what percent of streams are conserved", "what share of trail miles burned"): weight by the **line's own length**, never by cell area — the hex supplies only the per-cell fraction. Dedup the feature's `length_*` first (it is replicated on every cell it touches), take the mean overlay fraction across that feature's cells, then `SUM(length × fraction) / SUM(length)`:
 
