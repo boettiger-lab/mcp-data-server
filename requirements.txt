@@ -7,7 +7,15 @@ mcp>=1.29,<2
 # `INSTALL h3 FROM community` may have no candidate, breaking every tile path.
 # Bump only once community h3 ships for the target version.
 duckdb==1.5.4
-pandas
+# Pinned: `query` renders results through pandas -> tabulate, and the pandas major
+# version silently changes that rendering. Under pandas 3 a str-dtype column holds
+# missing values as the FLOAT nan, so one NULL makes tabulate type the whole column
+# as float and 18-digit H3 indexes collapse back to `6.13762e+17` (#387) — the exact
+# defect #387 fixed. The fix is version-robust (COALESCE to ''), but the rendering
+# layer #361/#387 live in is decided by this dependency, so it should not float.
+# Also: an unpinned pandas can differ between the image dev validated and the image
+# a release tag rebuilds, which is unverifiable drift in a promotion (#366).
+pandas==3.0.5
 uvicorn
 tabulate
 pystac
