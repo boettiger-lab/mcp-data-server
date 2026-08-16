@@ -174,6 +174,74 @@ class TestQueryFunction:
         assert "2024-12-30 13:45:06" in result
         assert ".000000" not in result
 
+    def test_query_h3_index_renders_exactly(self):
+        """An H3 index must render all 18 digits, not `6.13762e+17` (#387).
+
+        tabulate formats numbers through float64, exact only to 2^53 — so the
+        scientific form has dropped ~11 digits and names a DIFFERENT cell. A
+        model cannot round-trip a cell id it reads out of a result.
+        """
+        result = query("SELECT 613762179077668863::UBIGINT AS h8, COUNT(*) AS n FROM range(3)")
+        assert "613762179077668863" in result
+        assert "6.13762e+17" not in result and "e+17" not in result
+
+    def test_query_h3_index_exact_for_signed_and_unsigned(self):
+        """h0 is BIGINT while h8/h10 are UBIGINT — both must survive (#387)."""
+        result = query(
+            "SELECT 577762574070710271::BIGINT AS h0, 613762179077668863::UBIGINT AS h8"
+        )
+        assert "577762574070710271" in result and "613762179077668863" in result
+        assert "e+17" not in result
+
+    def test_query_wide_int_rendering_is_shape_independent(self):
+        """Unlike #361, this was never shape-dependent — a lone wide-int column
+        renders scientific too. Both shapes must be exact (#387)."""
+        alone = query("SELECT 613762179077668863::UBIGINT AS h8")
+        mixed = query("SELECT 613762179077668863::UBIGINT AS h8, 27.4638 AS pct, 'x' AS filler")
+        for r in (alone, mixed):
+            assert "613762179077668863" in r and "e+17" not in r
+
+    def test_query_small_ints_and_floats_unaffected(self):
+        """The cast is display-only: counts stay plain integers (not `3.0`) and
+        floats keep their formatting (#387)."""
+        result = query("SELECT COUNT(*) AS n, 27.4638 AS pct FROM range(3)")
+        assert "| 27.4638 " in result
+        assert "3.0" not in result
+        assert "|   3 |" in result or "| 3 " in result
+
+    def test_query_nullable_wide_int_still_exact(self):
+        """A NULL must not reintroduce float coercion (#387).
+
+        Under pandas 3 a str-dtype column stores missing as the FLOAT nan, so a
+        single NULL makes tabulate type the column as float and every wide int
+        reverts to `6.13762e+17` — the cast undone by one missing cell. The
+        IUCN size-stratified assets have NULL finer h-columns, so this is live.
+        """
+        result = query(
+            "SELECT h8 FROM (VALUES (613762179077668863::UBIGINT), (NULL::UBIGINT)) t(h8)"
+        )
+        assert "613762179077668863" in result and "e+17" not in result
+        assert "nan" not in result
+
+    def test_query_null_date_is_blank_not_nan(self):
+        """A NULL date renders blank, never the literal `nan` (#387).
+
+        Same pandas-3 mechanism as above. `nan` in a date column reads as a
+        value rather than as missing.
+        """
+        result = query(
+            "SELECT d FROM (VALUES (DATE '2024-12-30'), (NULL::DATE)) t(d)"
+        )
+        assert "2024-12-30" in result
+        assert "nan" not in result
+
+    def test_query_negative_and_hugeint_exact(self):
+        """Signed negatives and HUGEINT aggregates render exactly (#387)."""
+        result = query("SELECT (-577762574070710271)::BIGINT AS neg, "
+                       "SUM(9223372036854775807::HUGEINT) AS huge FROM range(2)")
+        assert "-577762574070710271" in result
+        assert "18446744073709551614" in result
+
 
 class TestResourceFunctions:
     """Test MCP resource functions."""
