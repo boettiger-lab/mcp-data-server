@@ -393,7 +393,7 @@ GROUP BY a.h8;
 ---
 
 ### Problem 4 — Lines: per-segment columns and AOI boundaries
-<!-- prov: issue=#153,#155,#363,#367 models=deepseek-v4-flash-0731,glm-5.2 added=2026-08-12 cell=line-length-not-hex-area,stream-order-class-boundary,streamorder-use-nhdplus-hr-not-base-nhd tier=core -->
+<!-- prov: issue=#153,#155,#363,#367,#394 models=deepseek-v4-flash-0731,glm-5.2 added=2026-08-12 cell=line-length-not-hex-area,stream-order-class-boundary,streamorder-use-nhdplus-hr-not-base-nhd,line-length-clip-not-sum tier=core -->
 
 *(Applies whenever the feature you are measuring is line-derived — source geometry `LineString`/`MultiLineString`, columns like `length_miles`, `length_km`, `lengthkm` — **including** when you overlay it on an area layer that carries acres/area columns. The test is the feature's own geometry, not the overlay's. Skip only if the feature itself is polygon- or raster-derived.)*
 
@@ -406,7 +406,7 @@ Per-segment values are **replicated on every row of any JOIN that matches a segm
 
 - **Total per agency / class / surface** (no AOI): dedup by feature first. `SELECT admin_agency, SUM(length_miles) FROM (SELECT DISTINCT _cng_fid, admin_agency, length_miles FROM <line_hex>) GROUP BY admin_agency`.
 - **Presence / count** ("which trails cross this AOI"): hex SEMI JOIN + `COUNT(DISTINCT _cng_fid)`. No spatial functions.
-- **Mileage *inside* an AOI** (per-state, per-county, per-perimeter): `length_miles` is the **wrong column** — it's the segment's *full* length, not the AOI-clipped length. Default pattern: hex SEMI JOIN to a candidate `(trail _cng_fid, aoi _cng_fid)` list, then `ST_Intersection` on the GeoParquets joined by `_cng_fid` (the per-feature key, deterministic — avoid joining on names which can repeat across admin levels).
+- **Mileage *inside* an AOI** (per-state, per-county, per-perimeter): `length_miles` is the **wrong column** — it's the segment's *full* length, not the AOI-clipped length. Default pattern: hex SEMI JOIN to a candidate `(trail _cng_fid, aoi _cng_fid)` list, then `ST_Intersection` on the GeoParquets joined by `_cng_fid` (the per-feature key, deterministic — avoid joining on names which can repeat across admin levels). **Never convert a geometry length to real units — take the clipped-to-whole ratio and scale the feature's own `length_miles`** (why: below the query).
 
 ```sql
 WITH cand AS (
@@ -415,14 +415,24 @@ WITH cand AS (
   JOIN read_parquet('<aoi_hex>') r ON t.h8 = r.h8 AND t.h0 = r.h0
 )
 SELECT rg.name_en AS aoi,
-       SUM(ST_Length(ST_Intersection(tg.geometry, rg.geometry)) / 1609.344) AS miles
+       SUM(tg.length_miles
+           * ST_Length(ST_Intersection(tg.<geom>, rg.<geom>))
+           / ST_Length(tg.<geom>)) AS miles
 FROM cand c
 JOIN read_parquet('<line_geoparquet>') tg ON tg._cng_fid = c.trail_fid
 JOIN read_parquet('<aoi_geoparquet>') rg ON rg._cng_fid = c.aoi_fid
 GROUP BY rg.name_en ORDER BY miles DESC;
 ```
 
-The geometry column is `geometry` on the GeoParquets — not `geom`.
+**`ST_Length` returns degrees, not metres,** because these GeoParquets store lon/lat. Dividing
+by `1609.344` is off by ~5 orders of magnitude, and the usual repairs are unavailable here:
+`ST_Transform` returns `POINT (inf inf)` and every `*_Spheroid` function returns `nan`. The
+ratio above is the way through — both lengths carry the same wrong unit, so it cancels, and
+`length_miles` supplies the real scale. Same idea as the fractional-overlay recipe below.
+
+**Read the geometry column name off the schema** (`DESCRIBE`, or the STAC `table:columns`) —
+it is `geom` on the census layers, `geometry` on trails and seafloor-geomorphology, and
+`SHAPE` on PAD-US and the WWF ecoregions. There is no safe default.
 
 - **Share of a line network's length under a fractional per-cell overlay** ("what percent of streams are conserved", "what share of trail miles burned"): weight by the **line's own length**, never by cell area — the hex supplies only the per-cell fraction. Dedup the feature's `length_*` first (it is replicated on every cell it touches), take the mean overlay fraction across that feature's cells, then `SUM(length × fraction) / SUM(length)`:
 
