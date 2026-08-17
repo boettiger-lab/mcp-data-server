@@ -23,15 +23,25 @@ spec:
                     values: ["us-west"]
       containers:
       - name: server
+        # ⚠️ THIS DIGEST IS A FLOOR, NOT A RECORD OF WHAT DEV IS RUNNING (#406).
+        # .github/workflows/deploy-dev.yml converges dev after every successful
+        # :main build by patching the live Deployment (kubectl set image); it does
+        # NOT commit back here, so this value lags the cluster by design. To learn
+        # what dev actually serves, ask the cluster:
+        #   kubectl -n biodiversity get deploy dev-duckdb-mcp \
+        #     -o jsonpath='{.spec.template.spec.containers[0].image}'
+        # Do not "fix" the drift by hand-rolling dev — see AGENTS.md → Rollout
+        # workflow. (Prod is the opposite: k8s/deployment.yaml IS authoritative,
+        # because prod is promoted deliberately per release.)
+        #
         # Pinned by digest (not the moving :main tag) so every dev pod converges
         # on one reproducible build. :main + imagePullPolicy: Always is
         # non-convergent: Always re-resolves the mutable :main → digest
         # independently per pod at each (re)start, so pods brought up seconds
         # apart — or a single later liveness/eviction/cron restart — silently
         # drift onto different builds with no signal, exactly the cross-pod skew
-        # dev's ≥2 replicas exist to catch. Bump this digest on redeploy (see
-        # AGENTS.md → Rollout workflow). The tag prefix is for humans; the digest
-        # is enforced. See issue #341.
+        # dev's ≥2 replicas exist to catch. The tag prefix is for humans; the
+        # digest is enforced. See issue #341.
         image: ghcr.io/boettiger-lab/mcp-data-server:main@sha256:dd626e6f0830ed0423016ab1356b3118a94205ede25ae2f725ae161bdc324ea6
         imagePullPolicy: IfNotPresent
         env:
