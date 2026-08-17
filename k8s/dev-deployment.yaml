@@ -32,7 +32,7 @@ spec:
         # dev's ≥2 replicas exist to catch. Bump this digest on redeploy (see
         # AGENTS.md → Rollout workflow). The tag prefix is for humans; the digest
         # is enforced. See issue #341.
-        image: ghcr.io/boettiger-lab/mcp-data-server:main@sha256:16abf693eb28cd0652c4eac52e6751f45b7c9e29ea42af444c30ee4a2169b843
+        image: ghcr.io/boettiger-lab/mcp-data-server:main@sha256:dd626e6f0830ed0423016ab1356b3118a94205ede25ae2f725ae161bdc324ea6
         imagePullPolicy: IfNotPresent
         env:
         - name: STAC_CATALOG_URL
