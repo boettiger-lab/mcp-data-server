@@ -95,24 +95,46 @@ release tags. The image is the unit of release.
 - `:<git-sha>` — immutable; one per commit.
 - `:vX.Y.Z` — immutable; built on release tags. **prod** pins this (by digest, below).
 
-**Merge to `main` → redeploy dev (promote by digest — same discipline as prod):**
-Dev pins an immutable `:main@sha256:…` (tag for humans, digest enforced), **not** the
-bare moving `:main` tag. `:main` + `imagePullPolicy: Always` is *non-convergent*: `Always`
-re-resolves the mutable `:main` → digest independently per pod at each (re)start, and
-`:main` moves on every push to `main` plus the weekly cron. So pods brought up seconds
-apart, or any single later liveness/eviction/crash/cron restart, silently drift onto
-different builds — the exact cross-pod skew dev's ≥2 replicas exist to catch (issue #341).
-Pinning a digest makes every dev pod run one reproducible build.
+**Merge to `main` → dev redeploys itself. Do not roll it by hand (#406).**
+`.github/workflows/deploy-dev.yml` fires on every successful `Build Docker image` run for
+`main`, resolves the fresh `:main` digest, and `kubectl set image`s the dev Deployment to
+`:main@sha256:…`, waiting for convergence. Dev pins an immutable digest (tag for humans,
+digest enforced) rather than the bare moving `:main`, because `:main` + `imagePullPolicy:
+Always` is *non-convergent*: `Always` re-resolves the mutable tag per pod at each (re)start,
+and `:main` moves on every push plus the weekly cron. Pods brought up seconds apart, or any
+later liveness/eviction/crash restart, then silently drift onto different builds — the
+cross-pod skew dev's ≥2 replicas exist to catch (#341).
 
-1. **Wait for the `docker.yml` run on your merge to go green first** — rolling before the
-   image is pushed gives `ImagePullBackOff`.
-2. Read the freshly-built `:main` digest from the build run's job summary, or:
-   `docker buildx imagetools inspect ghcr.io/boettiger-lab/mcp-data-server:main --format '{{.Manifest.Digest}}'`
-3. Set `image: ghcr.io/boettiger-lab/mcp-data-server:main@sha256:<digest>` in
-   `k8s/dev-deployment.yaml` (keep `imagePullPolicy: IfNotPresent`).
-4. `kubectl apply -f k8s/dev-deployment.yaml`
-5. `kubectl rollout restart deployment/dev-duckdb-mcp -n biodiversity`
-6. Verify convergence (below) — this is dev's canary job; do not skip it.
+So the normal flow after a merge is: **wait, then verify.** Nothing to run.
+
+⚠️ **A merge does not guarantee an image.** Confirm the build actually fired for *your*
+commit before trusting dev — a dropped push webhook (observed 2026-08-17 during a GitHub API
+outage) leaves `:main` on the previous build, the auto-deploy never runs, and dev keeps
+serving the old guidance while looking healthy. Gating a prompt change on that dev is
+validating the wrong image. Check the run, not the branch:
+
+```bash
+gh api "repos/boettiger-lab/mcp-data-server/actions/workflows/docker.yml/runs?per_page=5" \
+  --jq '.workflow_runs[] | "\(.head_branch)\t\(.head_sha[0:8])\t\(.status)/\(.conclusion)"'
+# no row for your commit on `main`? re-trigger it:
+gh workflow run docker.yml -R boettiger-lab/mcp-data-server --ref main
+```
+
+Then verify convergence (below) and confirm `/version` reports your `git_sha` — **sample it
+more than once.** A single read can hit a not-yet-replaced pod mid-rollout and return the
+previous sha.
+
+**Manual fallback**, only when the automation is unavailable — `deploy-dev.yml` skips
+cleanly when `NRP_DEPLOY_KUBECONFIG` is unset, and that skip is the signal:
+`kubectl -n biodiversity set image deployment/dev-duckdb-mcp server=ghcr.io/boettiger-lab/mcp-data-server:main@sha256:<digest>`,
+then verify convergence.
+
+**`k8s/dev-deployment.yaml` is the shape of the Deployment, not a record of what dev is
+running.** The automation patches the live object and does not commit, so the file's digest
+is a floor that lags the cluster by design — read the cluster, not the file, when you want to
+know what dev serves. (`k8s-image-pin.yml` checks the pin *is* a digest, not that it is
+current.) Prod is the opposite: its digest is committed in `k8s/deployment.yaml` and is
+authoritative, because prod is promoted deliberately per release.
 
 **Tag a release → redeploy prod (promote by digest):**
 1. `git tag vX.Y.Z && git push origin vX.Y.Z`, then wait for `docker.yml` to build `:vX.Y.Z`.
