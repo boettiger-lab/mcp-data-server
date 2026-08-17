@@ -87,7 +87,7 @@ The constants below are latitude/distortion-averaged, not true per-cell values (
 Use the constant for the dataset's **native** resolution — the column it is actually indexed on (check with `DESCRIBE`). Multiplying a cell count by the constant for a different resolution is off by ~7× per level.
 
 ## Coordinates from H3 Cells
-<!-- prov: issue=#104,#114 models=qwen3 added=2026-05-03 cell=none tier=core -->
+<!-- prov: issue=#104,#114 models=qwen3 added=2026-05-03 cell=bosl-nearest-fishing-jarvis tier=core -->
 
 To get latitude/longitude from a hex column (e.g. to supply a `fly_to` map
 center), call `h3_cell_to_lat(hN)` / `h3_cell_to_lng(hN)` on the cell **column**.
@@ -101,7 +101,7 @@ WHERE <feature filter>;
 ```
 
 ## Distance Between Hexes
-<!-- prov: issue=#168,#228 models=glm-5,kimi added=2026-06-21 cell=none tier=core -->
+<!-- prov: issue=#168,#228 models=glm-5,kimi added=2026-06-21 cell=bosl-nearest-fishing-jarvis tier=core -->
 
 `h3_great_circle_distance` measures between two coordinate pairs, not cell
 indices. To get the distance between two hex cells, convert each to its center
@@ -464,7 +464,7 @@ FROM per_feature;
 ---
 
 ### Diagnostic: check rows-per-hex before writing queries
-<!-- prov: issue=#3 models=unrecorded added=2026-05-28 cell=none tier=core -->
+<!-- prov: issue=#3 models=unrecorded added=2026-05-28 cell=none tier=extra -->
 
 When uncertain, run this check on a single h0 partition first:
 

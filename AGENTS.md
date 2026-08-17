@@ -262,6 +262,38 @@ Decision rule when you catch a model error:
   guidance in its proper layer; if it's a per-dataset fact, STAC is what surfaces it at
   the right moment.
 
+### Tiering: `core` vs `extra` (`EXTRA_INSTRUCTIONS`)
+
+Every section of `h3-guide.md` / `query-optimization.md` declares a tier in its `prov`
+line. `select_tiers()` in `server.py` assembles the description from it:
+
+| tier | who gets it | what belongs here |
+|---|---|---|
+| `core` (default) | everyone, including prod and dev | anything whose absence changes an **answer** |
+| `extra` | only deployments setting `EXTRA_INSTRUCTIONS=1` | rules whose absence costs **turns, not correctness**, and whose motivating failure was last seen on a model outside the shipping set |
+
+A section with no `prov`, or a `prov` with no `tier=`, is treated as **`core`** — guidance
+is load-bearing until shown otherwise. Demoting a `##` takes its `###` children with it.
+
+**The bar for `tier=extra` is evidence, not intuition.** Both current members
+(`query-optimization.md` §3 DESCRIBE+LIKE, and the h3-guide rows-per-hex diagnostic) are
+efficiency-only *and* qwen3-era. If a rule can produce a wrong number, it is `core` even
+if only weak models get it wrong — the flag is off in production, so `extra` means "the
+shipping models never see this."
+
+**Demotion is cheap to prove, which is the point.** The weak models keep the text either
+way, so a demotion only has to show the *core* models are unaffected: run the `regression`
+tier on the `standard` set with the flag off and compare **`tool_call_count`**, which the
+harness already records, against the same run before the change. Efficiency rules are
+graded on turns, not accuracy — that A/B is a couple of free NRP jobs.
+
+**What tiering will not do is shrink the prompt much.** Measured 2026-08-17: the two
+demotions together are **1,300 ch of 51,720** (2.5%). The audit behind #384 is the reason —
+of the sections originally flagged `cell=none`, nearly all turned out to be load-bearing
+with live consumers, and the honest remedy was to write cells for them, not to demote them.
+Treat the flag as a discipline for keeping weak-model-only text out of the shipping
+description, not as a budget lever.
+
 ---
 
 ## Validating guidance changes (headless model-suite test)

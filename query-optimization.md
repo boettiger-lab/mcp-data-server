@@ -59,7 +59,7 @@ FROM lc_on_scope GROUP BY h8, h0;
 The `WHERE l.lc_class IS NOT NULL` here keeps a no-data cell from poisoning the aggregate — but it also **changes which cells the answer describes**. When that column is only partly populated, see §9 before reporting the result as a share of the whole.
 
 ### Scoping by name or feature id (no region mask)
-<!-- prov: issue=#163 models=unrecorded added=2026-06-07 cell=none tier=core -->
+<!-- prov: issue=#163 models=unrecorded added=2026-06-07 cell=bosl-pri-eez-area tier=core -->
 
 To filter a global `…/hex/h0=*/…` dataset by a name or `_cng_fid` and there is no region-mask hex to join, first restrict `h0` to the region, then apply the attribute filter:
 
@@ -82,7 +82,7 @@ FROM (
 ```
 
 ## 3. Trust your schema — don't grep with DESCRIBE+LIKE
-<!-- prov: issue=#108,#113 models=qwen3 added=2026-05-03 cell=none tier=core -->
+<!-- prov: issue=#108,#113 models=qwen3 added=2026-05-03 cell=none tier=extra -->
 
 For datasets already loaded in your app, the column list returned by `get_schema`
 (or `get_stac_details`) is canonical: every column, with type and description.
@@ -128,7 +128,7 @@ Avoid `SELECT *` on GeoParquet files; select only the columns you need. If you n
 coordinates, cast explicitly: `ST_AsText(geom) AS geom_wkt`.
 
 ## 6. Apostrophes in string literals
-<!-- prov: issue=unrecorded models=unrecorded added=2026-06-24 cell=none tier=core -->
+<!-- prov: issue=unrecorded models=unrecorded added=2026-06-24 cell=tpl-tates-hell-acres tier=core -->
 
 Site names and owner names can contain apostrophes (e.g. `O'Brien Ranch`). Double any
 single quote inside a SQL string literal — do not use a backslash:

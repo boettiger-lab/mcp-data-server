@@ -12,7 +12,90 @@ from server import (
     parse_setup_sql,
     get_isolated_db,
     query,
+    select_tiers,
+    strip_prov,
 )
+
+
+DOC = """## Alpha
+<!-- prov: issue=#1 models=qwen3 added=2026-01-01 cell=a-cell tier=core -->
+
+alpha body
+
+## Bravo
+<!-- prov: issue=#2 models=qwen3 added=2026-01-01 cell=none tier=extra -->
+
+bravo body
+
+### Bravo child
+
+child body
+
+## Charlie
+<!-- prov: issue=#3 models=glm-5 added=2026-01-01 cell=c-cell tier=core -->
+
+charlie body
+
+### Delta
+<!-- prov: issue=#4 models=qwen3 added=2026-01-01 cell=none tier=extra -->
+
+delta body
+
+## Echo
+
+echo body, no prov line at all
+"""
+
+
+class TestGuidanceTiers:
+    """EXTRA_INSTRUCTIONS tiering (#384): `tier=extra` sections load only when opted in."""
+
+    def test_extra_sections_dropped_by_default(self):
+        out = select_tiers(DOC, include_extra=False)
+        assert "alpha body" in out
+        assert "charlie body" in out
+        assert "bravo body" not in out
+        assert "delta body" not in out
+
+    def test_demoting_a_parent_takes_its_children(self):
+        # `### Bravo child` has no prov of its own; it must not survive its `##` parent,
+        # or a demotion silently leaves an orphaned fragment in the description.
+        assert "child body" not in select_tiers(DOC, include_extra=False)
+        assert "child body" in select_tiers(DOC, include_extra=True)
+
+    def test_a_deeper_extra_section_ends_at_the_next_sibling(self):
+        # `### Delta` is extra and sits under a core `##`; dropping it must not swallow
+        # `## Echo`, the next same-or-higher heading.
+        out = select_tiers(DOC, include_extra=False)
+        assert "delta body" not in out
+        assert "echo body, no prov line at all" in out
+
+    def test_missing_or_tierless_prov_defaults_to_core(self):
+        # Guidance is load-bearing until shown otherwise, so an unlabelled section stays.
+        assert "echo body" in select_tiers(DOC, include_extra=False)
+        tierless = "## Solo\n<!-- prov: issue=#9 models=x added=2026-01-01 cell=none -->\n\nsolo body\n"
+        assert "solo body" in select_tiers(tierless, include_extra=False)
+
+    def test_prov_lines_are_stripped_on_both_paths(self):
+        for flag in (False, True):
+            assert "prov:" not in select_tiers(DOC, include_extra=flag)
+
+    def test_include_extra_is_the_full_document_minus_prov(self):
+        assert select_tiers(DOC, include_extra=True) == strip_prov(DOC)
+
+    def test_tier_word_in_prose_is_not_read_as_a_declaration(self):
+        doc = "## Solo\n\nWe use tier=extra pricing in this prose.\n"
+        assert "tier=extra pricing" in select_tiers(doc, include_extra=False)
+
+    def test_real_guides_shrink_with_the_flag_off_and_stay_valid(self):
+        for fn in ("h3-guide.md", "query-optimization.md"):
+            raw = load_text_file(fn)
+            core = select_tiers(raw, include_extra=False)
+            full = select_tiers(raw, include_extra=True)
+            assert len(core) <= len(full)
+            # Never leave a dangling ```sql fence: an odd count means a section was cut
+            # mid-block, which would ship the model a truncated query.
+            assert core.count("```") % 2 == 0, f"{fn}: unbalanced code fence after tiering"
 
 
 class TestFileLoading:
