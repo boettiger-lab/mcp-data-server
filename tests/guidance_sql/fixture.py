@@ -108,6 +108,14 @@ EXECUTABLE = {
         "<aoi_geom>": "geom",
         "<aoi_name>": "NAMELSAD",
     },
+    # geodesic length via flip + spheroid (#396). ST_Length_Spheroid reads the first
+    #   ordinate as LATITUDE, the opposite of how these files store it, and returns nan
+    #   rather than erroring on lon/lat input — which is exactly how the guide came to
+    #   claim the function was broken. Binding this keeps the claim honest.
+    "h3-guide.md:a0dab29752": {
+        "<line_geoparquet>": TRAILS_GPQ,
+        "<line_geom>": "geometry",
+    },
     # presence-only over res-10 land children (#355): mean of a 0/1 flag, never
     #   promoted to the res-8 parent. ACE feature x NWI wetlands, no GAP column.
     "h3-guide.md:da766d501c": {
