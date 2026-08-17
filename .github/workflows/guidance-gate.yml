@@ -1,0 +1,58 @@
+name: Guidance gate
+
+# Stage 4 of #384. Holds three properties on the guidance files that server.py injects
+# verbatim into the `query` tool description on every call:
+#
+#   1. every section carries a well-formed `prov` line (issue, models, added, cell, tier),
+#      so a rule cannot merge without naming why it exists and what guards it;
+#   2. `tier=` is spelled correctly — select_tiers() treats an unrecognised tier as `core`,
+#      so a typo'd demotion is silently a no-op that keeps shipping to prod;
+#   3. the assembled description stays under a committed ceiling, and a deferred
+#      guidance-SQL exemption names a tracking issue (#394's lesson: an exemption with a
+#      good reason is indistinguishable from coverage until someone checks).
+#
+# Deliberately not gated: `cell=none`. That is the audit signal, not a violation — banning
+# it would push authors to invent a cell reference instead of writing a cell.
+#
+# No secrets and no network: importing server.py to measure the description logs a STAC
+# catalog warning and continues, which is the intended degraded-start behaviour (#260).
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'h3-guide.md'
+      - 'query-optimization.md'
+      - 'query-setup.md'
+      - 'assistant-role.md'
+      - 'server.py'
+      - 'tests/check_guidance_prov.py'
+      - 'tests/guidance_sql/fixture.py'
+      - '.github/workflows/guidance-gate.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'h3-guide.md'
+      - 'query-optimization.md'
+      - 'query-setup.md'
+      - 'assistant-role.md'
+      - 'server.py'
+      - 'tests/check_guidance_prov.py'
+      - 'tests/guidance_sql/fixture.py'
+      - '.github/workflows/guidance-gate.yml'
+  workflow_dispatch:
+
+jobs:
+  guidance-gate:
+    name: Guidance provenance + budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Check guidance provenance, tiers and budget
+        run: python tests/check_guidance_prov.py
