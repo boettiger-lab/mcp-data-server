@@ -17,6 +17,17 @@ see. It is not a result-value check (that is the model gate's job).
 
 Datasets/paths verified 2026-08-11. To grow coverage, promote a FRAGMENT whose
 reason is "not yet mapped" to EXECUTABLE with real mappings and confirm it runs.
+
+Two kinds of FRAGMENT, and only one is debt:
+  * NOT A STATEMENT — a bare clause, a CTE over an undefined relation, a write-path
+    COPY, a deliberate parse-error illustration. Can never bind; exempt forever.
+  * DEFERRED ("not yet mapped") — a real runnable query waiting on placeholder
+    mappings. This IS debt and must cite a tracking issue, so the deferral has an
+    owner. #394 is why: the AOI-clip recipe sat here as "those AOI geoparquets are
+    not mapped" and shipped with a wrong geometry column name and degrees divided by
+    1609.344. Binding alone would have caught the first on day one. An exemption with
+    a good reason is indistinguishable from coverage until someone checks.
+    tests/check_guidance_prov.py enforces the citation.
 """
 
 # One CA partition present in every dataset used below (verified).
@@ -121,7 +132,7 @@ FRAGMENTS = {
     "h3-guide.md:523cd143ac": "two-query block; the per-group form needs a literal `state` column not present in a clean mapping",
     "h3-guide.md:21d7da17ad": "incomplete — `FROM ...` ellipsis (illustrative approx-area shortcut)",
     "h3-guide.md:da9876be19": "incomplete — `FROM ...` ellipsis (great-circle distance illustration)",
-    "h3-guide.md:39e204c12b": "GEBCO x geomorphology h6 join; two co-indexed datasets not yet mapped",
+    "h3-guide.md:39e204c12b": "GEBCO x geomorphology h6 join; two co-indexed datasets not yet mapped (#402)",
     "h3-guide.md:e258e8fec8": "bare JOIN clauses over undefined dataset_a/b, wdpa/gfw (resolution-conversion idiom)",
     "h3-guide.md:598ddf3355": "needs dataset-specific columns (_cng_fid, amount, state_id); no representative mapping",
     "h3-guide.md:e2dfe983ec": "CTE fragment referencing an undefined `flat_funding` relation",
@@ -132,12 +143,12 @@ FRAGMENTS = {
     "h3-guide.md:ae094c7f8c": "COPY to a write path with a `SELECT ...` ellipsis (export idiom)",
     # --- query-optimization.md ---
     "query-optimization.md:2f7793ba77": "bare JOIN clause (include-h0-in-join idiom)",
-    "query-optimization.md:a941d3b637": "regions x padus x carbon 3-way; regions/padus hex paths not yet mapped",
+    "query-optimization.md:a941d3b637": "regions x padus x carbon 3-way; regions/padus hex paths not yet mapped (#402)",
     "query-optimization.md:0681d81d61": "references an undefined `scope` CTE (join-before-aggregate illustration)",
-    "query-optimization.md:48c32ed53a": "`<bucket>/<dataset>` with `_cng_fid` and `data_00.parquet`; dataset not yet mapped",
+    "query-optimization.md:48c32ed53a": "`<bucket>/<dataset>` with `_cng_fid` and `data_00.parquet`; dataset not yet mapped (#402)",
     "query-optimization.md:e103e0c492": "`read_parquet('…')` ellipsis placeholder (DESCRIBE-to-find-a-column idiom)",
     "query-optimization.md:b344ccbf7e": "bare WHERE clause (fuzzy text match)",
     "query-optimization.md:557a390cc8": "bare WHERE clause (exact text match)",
     "query-optimization.md:b63ace2673": "bare WHERE clauses incl. a deliberate parse-error illustration; not executable",
-    "query-optimization.md:29b78ebc22": "generic `value`/`lc_class` columns with sentinel exclusion; dataset not yet mapped",
+    "query-optimization.md:29b78ebc22": "generic `value`/`lc_class` columns with sentinel exclusion; dataset not yet mapped (#402)",
 }

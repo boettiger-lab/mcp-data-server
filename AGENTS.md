@@ -294,6 +294,44 @@ with live consumers, and the honest remedy was to write cells for them, not to d
 Treat the flag as a discipline for keeping weak-model-only text out of the shipping
 description, not as a budget lever.
 
+**Grade an efficiency demotion on the behaviour it targets, not on turn count.** Aggregate
+`tool_calls` is recorded and cheap, and it is also too noisy to use: at 2 trials over 27
+cells the per-cell delta was −0.52 with a stdev of 4.43, so a −6% total meant nothing.
+Count the move the rule exists to prevent instead. For §3 that is
+`DESCRIBE … WHERE column_name LIKE '%…%'`, and `deepseek-v4-flash` emitted **zero**
+`DESCRIBE` statements with the section present *or* absent — a direct answer where the
+aggregate had none.
+
+### The guidance gate (CI)
+
+`tests/check_guidance_prov.py` runs on any guidance change (`.github/workflows/guidance-gate.yml`)
+and enforces four things:
+
+1. **Every `##`/`###` section carries a well-formed `prov`** with `issue`, `models`, `added`,
+   `cell`, `tier`. New guidance cannot merge without naming its model and its cell.
+2. **`tier=` is spelled correctly.** `select_tiers()` defaults an unrecognised tier to
+   `core`, so `tier=exta` would silently un-do a demotion and keep shipping to prod.
+3. **The assembled `query` description stays under `QUERY_DESC_CEILING`.** A ratchet, not a
+   target — raising it is a one-line diff a reviewer can question. Say in the PR what earned
+   the space.
+4. **A *deferred* guidance-SQL exemption cites an issue.** `FRAGMENTS` holds two kinds of
+   entry and only one is debt: something that can never bind (a bare clause, a CTE over an
+   undefined relation) is exempt forever, while a "not yet mapped" deferral is a real
+   runnable query waiting on placeholder mappings and must name a tracking issue.
+
+That last one is #394's lesson, and the most transferable thing in this section. The
+AOI-clip recipe sat in `FRAGMENTS` as *"those AOI geoparquets are not mapped"* — an honest
+deferral — and shipped with the wrong geometry column name and degrees divided by 1609.344.
+Two guards were nominally over that block, a benchmark cell and the SQL harness, and both
+had been opted out of. **An exemption with a good reason is indistinguishable from coverage
+until someone checks.**
+
+Note what each guard can and cannot do, because they are complementary and neither is
+sufficient: **binding** catches a moved column, a renamed function, a path that no longer
+resolves. It cannot catch `/1609.344`, which is valid SQL that is simply wrong — that needs
+a **trap cell** with a gold value. `cell=none` is deliberately *not* gated: it is the audit
+signal, and banning it would push authors to invent a cell reference rather than write a cell.
+
 ---
 
 ## Validating guidance changes (headless model-suite test)
