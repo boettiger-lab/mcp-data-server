@@ -82,10 +82,69 @@ PROV_RE = re.compile(r"^[ \t]*<!--[ \t]*prov:.*?-->[ \t]*\n", re.MULTILINE)
 def strip_prov(text):
     return PROV_RE.sub("", text)
 
+# `tier=extra` marks guidance that only weak models need — a rule whose absence costs
+# turns rather than correctness, and whose motivating failure was last observed on a model
+# outside the shipping set (#384). Those sections are dropped unless EXTRA_INSTRUCTIONS is
+# set, so a deployment serving small open models can opt back in without forking the file.
+#
+# Single source of truth on purpose: the tier is one word in the section's own `prov` line,
+# adjacent to the rule it governs. A parallel weak-model-guide.md would drift within two
+# cycles, and a one-word change in a diff is reviewable.
+#
+# A section runs from its heading to the next heading at the SAME OR HIGHER level, so
+# demoting a `##` takes its `###` children with it. A section with no `prov` line, or none
+# naming a tier, is treated as `core` — the safe default, since guidance is load-bearing
+# until shown otherwise. CI (#384 stage 4) is what requires the line to exist at all.
+_HEADING_RE = re.compile(r"^(#{2,6})[ \t]+\S")
+_TIER_RE = re.compile(r"\btier=([A-Za-z0-9_-]+)")
+
+def _section_tier(lines, i):
+    """Tier declared by the `prov` line belonging to the heading at `lines[i]`, or None.
+
+    Only the run of lines between the heading and the first non-blank, non-prov line is
+    searched, so a `tier=` mentioned in prose further down cannot be picked up.
+    """
+    for line in lines[i + 1:]:
+        if not line.strip():
+            continue
+        m = PROV_RE.match(line if line.endswith("\n") else line + "\n")
+        if not m:
+            return None
+        t = _TIER_RE.search(line)
+        return t.group(1).lower() if t else None
+    return None
+
+def select_tiers(text, include_extra):
+    """Drop `tier=extra` sections unless `include_extra`. Prov lines are stripped either way."""
+    if include_extra:
+        return strip_prov(text)
+    lines = text.splitlines(keepends=True)
+    keep, i = [], 0
+    while i < len(lines):
+        m = _HEADING_RE.match(lines[i])
+        if m and _section_tier(lines, i) == "extra":
+            level = len(m.group(1))
+            j = i + 1
+            while j < len(lines):
+                m2 = _HEADING_RE.match(lines[j])
+                if m2 and len(m2.group(1)) <= level:
+                    break
+                j += 1
+            i = j
+            continue
+        keep.append(lines[i])
+        i += 1
+    return strip_prov("".join(keep))
+
+# Off by default: `duckdb-mcp` and `dev-duckdb-mcp` serve core only, which is what the
+# `standard`/shipping model sets are gated against.
+EXTRA_INSTRUCTIONS = os.environ.get("EXTRA_INSTRUCTIONS", "").strip().lower() in (
+    "1", "true", "yes", "on")
+
 SETUP_RAW = load_text_file("query-setup.md")
 SETUP_SQL = parse_setup_sql(SETUP_RAW)
-OPTIM_RAW = strip_prov(load_text_file("query-optimization.md"))
-H3_RAW = strip_prov(load_text_file("h3-guide.md"))
+OPTIM_RAW = select_tiers(load_text_file("query-optimization.md"), EXTRA_INSTRUCTIONS)
+H3_RAW = select_tiers(load_text_file("h3-guide.md"), EXTRA_INSTRUCTIONS)
 ROLE_RAW = load_text_file("assistant-role.md")
 
 # Opt-in DuckDB extensions beyond the stock httpfs/spatial/h3 set (issue #354).
