@@ -424,11 +424,23 @@ JOIN read_parquet('<aoi_geoparquet>') rg ON rg._cng_fid = c.aoi_fid
 GROUP BY rg.<aoi_name> ORDER BY miles DESC;
 ```
 
-**`ST_Length` returns degrees, not metres,** because these GeoParquets store lon/lat. Dividing
-by `1609.344` is off by ~5 orders of magnitude, and the usual repairs are unavailable here:
-`ST_Transform` returns `POINT (inf inf)` and every `*_Spheroid` function returns `nan`. The
-ratio above is the way through — both lengths carry the same wrong unit, so it cancels, and
-`length_miles` supplies the real scale. Same idea as the fractional-overlay recipe below.
+**`ST_Length` returns degrees, not metres,** because these GeoParquets store lon/lat — so
+dividing by `1609.344` is off by ~5 orders of magnitude. The ratio above sidesteps units
+entirely: both lengths carry the same wrong unit, it cancels, and `length_miles` supplies the
+real scale. Same idea as the fractional-overlay recipe below, and it needs no CRS choice.
+
+**If you need a true length in metres, flip the axes first.** `ST_Length_Spheroid`,
+`ST_Distance_Spheroid` and `ST_Transform` all read the first ordinate as **latitude**, the
+opposite of how these files store it; passing lon/lat gives `nan` or `POINT (inf inf)` rather
+than an error. `ST_FlipCoordinates` is the fix:
+
+```sql
+SELECT ROUND(SUM(ST_Length_Spheroid(ST_FlipCoordinates(<line_geom>))) / 1609.344, 1) AS miles
+FROM read_parquet('<line_geoparquet>');
+```
+
+Both routes agree — on federal trails clipped to a county, 1,177.4 mi geodesic against
+1,177.9 mi by the ratio (0.04%).
 
 **Read each geometry column name off the schema** (`DESCRIBE`, or the STAC `table:columns`) —
 it is `geom` on the census layers, `geometry` on trails and seafloor-geomorphology, and
