@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "duckdb-geo": {
+      "type": "http",
+      "url": "https://duckdb-mcp.nrp-nautilus.io/mcp"
+    }
+  }
+}
