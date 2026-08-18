@@ -1,9 +1,13 @@
 name: Build Docker image
 
+# Build once, on main. A release does NOT build (#413): it adds a `:vX.Y.Z` tag to the
+# manifest that `main` already produced and dev already gated, so prod runs the exact
+# bytes that were validated instead of a same-commit rebuild that differs. Release
+# identity moved to the Deployment's APP_VERSION env, which is what made this possible —
+# it used to be a build arg, and that alone forced a rebuild per release.
 on:
   push:
     branches: [main]
-    tags: ['v*']
   schedule:
     - cron: '0 6 * * 1'  # Mondays 06:00 UTC — refresh base image + unpinned deps
   workflow_dispatch:
@@ -45,13 +49,10 @@ jobs:
           repo=ghcr.io/boettiger-lab/mcp-data-server
           case "${{ github.event_name }}" in
             push)
-              if [ "${{ github.ref_type }}" = "tag" ]; then
-                # Release tag (vX.Y.Z): immutable version tag + immutable sha.
-                tags="$repo:${{ github.ref_name }}"$'\n'"$repo:${{ github.sha }}"
-              else
-                # Push to main: moving dev tag + immutable sha.
-                tags="$repo:main"$'\n'"$repo:${{ github.sha }}"
-              fi
+              # Push to main: moving dev tag + immutable sha. Tags no longer trigger
+              # this workflow (#413), so there is no release-build branch here — a
+              # release retags one of these digests.
+              tags="$repo:main"$'\n'"$repo:${{ github.sha }}"
               ;;
             *)
               # schedule / workflow_dispatch: dep+base refresh. Move ONLY the dev
@@ -66,12 +67,12 @@ jobs:
               fi
               ;;
           esac
-          # Version stamp baked into the image: the tag on release builds, else "main".
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            app_version="${{ github.ref_name }}"
-          else
-            app_version="main"
-          fi
+          # The image's own stamp is always "main" now: it is built from main and
+          # released by retag, so it cannot know its release name. `k8s/deployment.yaml`
+          # supplies the real one via APP_VERSION env, and CI checks the two agree
+          # (tests/check_k8s_image_pins.py). GIT_SHA below stays accurate through a
+          # retag — it is the commit this image was built from.
+          app_version="main"
           {
             echo "tags<<EOF"
             echo "$tags"
