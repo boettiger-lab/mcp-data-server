@@ -15,8 +15,10 @@ column and runs cheaply — enough to catch a moved column (#364), a renamed
 function, or a path that no longer resolves, which is what the model gate cannot
 see. It is not a result-value check (that is the model gate's job).
 
-Datasets/paths verified 2026-08-11. To grow coverage, promote a FRAGMENT whose
+Datasets/paths verified 2026-08-18. To grow coverage, promote a FRAGMENT whose
 reason is "not yet mapped" to EXECUTABLE with real mappings and confirm it runs.
+No such deferral is currently outstanding (#402 promoted the last four); every
+remaining FRAGMENT is a non-statement that can never bind.
 
 Two kinds of FRAGMENT, and only one is debt:
   * NOT A STATEMENT — a bare clause, a CTE over an undefined relation, a write-path
@@ -32,6 +34,11 @@ Two kinds of FRAGMENT, and only one is debt:
 
 # One CA partition present in every dataset used below (verified).
 _H0 = "577762574070710271"
+# A second CA partition, for the one example that needs the join to be non-empty.
+# `_H0` holds US-CA cells and PAD-US `Des_Tp='NP'` cells but no cell that is both, so
+# the q-opt §2 three-way would bind over an empty join. This one covers Yosemite,
+# Death Valley and Joshua Tree.
+_H0_PARKS = "577199624117288959"
 
 # ca30x30 conserved-areas assessment family (the #364 coarse-overlay surface)
 ECO8 = f"s3://public-ca30x30/ecoregion/hex-res8/h0={_H0}/data_0.parquet"          # h8, nland, land_area_km2, h0
@@ -55,6 +62,19 @@ CD_GPQ = "s3://public-census/census-2024/cd.parquet"                            
 # cross-dataset staples
 CENSUS = f"s3://public-census/census-2024/state/hex/h0={_H0}/data_0.parquet"      # h8, STUSPS, GEOID, h0
 CARBON = f"s3://public-carbon/irrecoverable-carbon-2024/hex/h0={_H0}/data_0.parquet"  # carbon, h5..h9, h0
+CARBON_PARKS = f"s3://public-carbon/irrecoverable-carbon-2024/hex/h0={_H0_PARKS}/data_0.parquet"  # same, parks partition
+
+# co-indexed pair for the parent-resolution join (#402): GEBCO is h8-indexed and
+# carries h6; geomorphology is h6-indexed. The example joins on the h6 both share.
+GEBCO = f"s3://public-high-seas/gebco-2025/hex/h0={_H0}/data_0.parquet"           # elevation, h8, h7, h6, h5, h0
+GEOMORPH = f"s3://public-high-seas/seafloor-geomorphology/hex/h0={_H0}/data_0.parquet"  # feature_type, area_km2, h6, h5, h0
+# region-mask -> PAD-US -> carbon, the mask-before-aggregate three-way (#402).
+REGIONS = f"s3://public-overturemaps/2026-02-18.0/regions/hex/h0={_H0_PARKS}/data_0.parquet"  # region ('US-CA'), h8, h0
+PADUS = f"s3://public-padus/padus-4-1/combined/hex/h0={_H0_PARKS}/data_0.parquet"  # Des_Tp ('NP'), h8, h0
+# CGLS-LC100 fractions — a measure and a sentinel-coded class in ONE table (#402).
+# The 0/80/200 the no-data example excludes are this dataset's real sentinels
+# (unknown / permanent water / open sea), which is what it was written against.
+LC_FRAC = f"s3://public-land-cover/cgls-lc100-2019/hex-fractions/h0={_H0}/data_0.parquet"  # lc_class, frac, h5..h9, h0
 
 EXECUTABLE = {
     # [1] region/feature area in acres — DISTINCT cells, h3_cell_area
@@ -129,6 +149,28 @@ EXECUTABLE = {
             "'Estuarine and Marine Wetland')"
         ),
     },
+    # parent-resolution join (#402): a fine dataset's pre-computed h6 column joined
+    #   to a coarse dataset indexed at h6. Binds `elevation` on GEBCO and
+    #   `feature_type` on geomorphology, so a rename on either side fails here.
+    "h3-guide.md:39e204c12b": {"<GEBCO_PATH>": GEBCO, "<GEOMORPHOLOGY_PATH>": GEOMORPH},
+    # mask-before-aggregate three-way (#402): region hex -> PAD-US -> carbon. Pinned
+    #   to the parks partition so the join is non-empty, not merely bindable.
+    "query-optimization.md:a941d3b637": {
+        "<STAC_REGIONS_HEX_PATH>": REGIONS,
+        "<STAC_PADUS_HEX_PATH>": PADUS,
+        "<STAC_CARBON_HEX_PATH>": CARBON_PARKS,
+    },
+    # scope-by-h0-set then filter by feature id (#402), the bosl-pri-eez-area shape.
+    #   The only mapping that cannot be pinned to one partition: the `h0=*` glob and
+    #   `data_00.parquet` are literal in the block — that layout is what it teaches.
+    #   Still cheap, since binding globs one prefix and reads one footer.
+    "query-optimization.md:48c32ed53a": {"<bucket>": "public-high-seas", "<dataset>": "iho/eez"},
+    # no-data before SUM/AVG (#402). Was deferred as "dataset not yet mapped": no
+    #   dataset in the catalog has a column named `value`, so the block could never
+    #   bind as written. `<value>` is now a placeholder like the `<hex>` beside it,
+    #   and it binds against the CGLS-LC100 fractions, whose `lc_class` sentinels
+    #   0/80/200 are the ones the block already cited.
+    "query-optimization.md:33fe4b5802": {"<hex>": LC_FRAC, "<value>": "frac"},
     # [19] rows-per-hex profiling on a single partition
     "h3-guide.md:2aab9a5de8": {"<STAC_HEX_PATH_SINGLE_PARTITION>": ECO8},
     # query-setup.md — the required SET/LOAD preamble (no S3); validates it runs
@@ -140,7 +182,6 @@ FRAGMENTS = {
     "h3-guide.md:523cd143ac": "two-query block; the per-group form needs a literal `state` column not present in a clean mapping",
     "h3-guide.md:21d7da17ad": "incomplete — `FROM ...` ellipsis (illustrative approx-area shortcut)",
     "h3-guide.md:da9876be19": "incomplete — `FROM ...` ellipsis (great-circle distance illustration)",
-    "h3-guide.md:39e204c12b": "GEBCO x geomorphology h6 join; two co-indexed datasets not yet mapped (#402)",
     "h3-guide.md:e258e8fec8": "bare JOIN clauses over undefined dataset_a/b, wdpa/gfw (resolution-conversion idiom)",
     "h3-guide.md:598ddf3355": "needs dataset-specific columns (_cng_fid, amount, state_id); no representative mapping",
     "h3-guide.md:e2dfe983ec": "CTE fragment referencing an undefined `flat_funding` relation",
@@ -151,12 +192,9 @@ FRAGMENTS = {
     "h3-guide.md:ae094c7f8c": "COPY to a write path with a `SELECT ...` ellipsis (export idiom)",
     # --- query-optimization.md ---
     "query-optimization.md:2f7793ba77": "bare JOIN clause (include-h0-in-join idiom)",
-    "query-optimization.md:a941d3b637": "regions x padus x carbon 3-way; regions/padus hex paths not yet mapped (#402)",
     "query-optimization.md:0681d81d61": "references an undefined `scope` CTE (join-before-aggregate illustration)",
-    "query-optimization.md:48c32ed53a": "`<bucket>/<dataset>` with `_cng_fid` and `data_00.parquet`; dataset not yet mapped (#402)",
     "query-optimization.md:e103e0c492": "`read_parquet('…')` ellipsis placeholder (DESCRIBE-to-find-a-column idiom)",
     "query-optimization.md:b344ccbf7e": "bare WHERE clause (fuzzy text match)",
     "query-optimization.md:557a390cc8": "bare WHERE clause (exact text match)",
     "query-optimization.md:b63ace2673": "bare WHERE clauses incl. a deliberate parse-error illustration; not executable",
-    "query-optimization.md:29b78ebc22": "generic `value`/`lc_class` columns with sentinel exclusion; dataset not yet mapped (#402)",
 }

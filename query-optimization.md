@@ -147,9 +147,9 @@ dataset reserves for "no data" (e.g. land-cover classes 0, 80, 200). Exclude bot
 before aggregating:
 
 ```sql
-SELECT SUM(value) AS total
+SELECT SUM(<value>) AS total
 FROM read_parquet('<hex>')
-WHERE value IS NOT NULL AND NOT isnan(value)
+WHERE <value> IS NOT NULL AND NOT isnan(<value>)
   AND lc_class NOT IN (0, 80, 200);   -- dataset's no-data sentinels
 ```
 
