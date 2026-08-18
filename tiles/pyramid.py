@@ -287,6 +287,25 @@ _COUNT_DISTINCT_ROLLUP_NOTE = (
 )
 
 
+# Building tiles is not displaying them (#330). The done payload carries a
+# paste-ready MapLibre recipe, and weak models read that plus `status: "done"`
+# as "the map is updated", narrate success and never hand off — observed at
+# ~50% on qwen against the real apps. Nothing else in the response says the
+# layer is not on the map yet, and this text is read at exactly the moment that
+# decision is made, so it states the required next action first.
+#
+# The client tool is named because the generic phrasing is what failed: a model
+# that cannot identify which tool to call stops. Deployments without it are
+# still served — the MapLibre recipe remains, and is offered as the fallback.
+_DISPLAY_HANDOFF_NOTE = (
+    "Tiles are built, but they are NOT on the map yet. To display them, call "
+    "your client's map-display tool (`add_hex_tile_layer` in the geo-agent "
+    "apps) with `tile_url` copied verbatim from `tile_url_template` above, "
+    "plus a `value_column` from `value_columns`. If your client has no such "
+    "tool, `source` and `layer` are a paste-ready MapLibre recipe."
+)
+
+
 def _rollup_note(agg: str) -> str | None:
     """Human-facing caveat about rollup fidelity for aggs whose coarse levels
     are not exact. None when the agg is exact at every level."""
@@ -451,6 +470,7 @@ def cached_result_dict(plan: dict, cached: dict) -> dict:
     note = _rollup_note(cached.get("agg", ""))
     if note:
         result["rollup_note"] = note
+    result["next_step"] = _DISPLAY_HANDOFF_NOTE
     result.update(render_recipe(cached, plan["tile_url_template"]))
     return result
 
@@ -678,6 +698,7 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     note = _rollup_note(agg)
     if note:
         result["rollup_note"] = note
+    result["next_step"] = _DISPLAY_HANDOFF_NOTE
     result.update(render_recipe(metadata, plan["tile_url_template"]))
     return result
 
