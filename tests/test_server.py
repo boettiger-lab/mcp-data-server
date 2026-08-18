@@ -325,6 +325,67 @@ class TestQueryFunction:
         assert "-577762574070710271" in result
         assert "18446744073709551614" in result
 
+    def test_query_double_renders_full_magnitude(self):
+        """A DOUBLE must not be cut to six significant figures (#410).
+
+        tabulate's default floatfmt is `g`, so a 26-million-acre total rendered
+        `2.64715e+07` and a dollar sum `3.212e+08`. Acreages, areas and dollar
+        totals are almost all DOUBLE, so this hit most answers this server gives.
+        """
+        result = query("SELECT 19573561.06::DOUBLE AS acres, 321200000.0::DOUBLE AS dollars")
+        assert "19573561.06" in result and "321200000" in result
+        assert "1.95736e+07" not in result and "3.212e+08" not in result
+        assert "e+0" not in result
+
+    def test_query_round_does_not_mask_the_display_layer(self):
+        """ROUND() was not a workaround — the loss was in rendering, not the value
+        (#410). Worth pinning: it is the fix a model would reach for."""
+        result = query("SELECT ROUND(19573561.06::DOUBLE, 2) AS rounded")
+        assert "19573561.06" in result and "1.95736e+07" not in result
+
+    def test_query_null_double_is_blank_and_real_nan_is_not(self):
+        """A NULL double renders blank; a genuine NaN still says `nan` (#410).
+
+        Both printed `nan` before, which is the one distinction that must survive
+        here: `query-optimization.md` §7 tells models to filter the NaN sentinel
+        before aggregating, and they cannot filter what they cannot see.
+        """
+        result = query(
+            "SELECT v FROM (VALUES (1.5::DOUBLE), (NULL::DOUBLE), ('NaN'::DOUBLE)) t(v)"
+        )
+        lines = [l for l in result.splitlines() if l.startswith("|") and "---" not in l]
+        assert sum("nan" in l for l in lines) == 1, result
+        assert any(l.strip("| ").strip() == "" for l in lines[1:]), result
+
+    def test_query_double_does_not_expose_float_noise(self):
+        """`%.10g`, not a raw cast: a plain VARCHAR cast renders 1.74 as
+        `1.7400000000000002` (#410). 1.74 is a live gold value (car-31)."""
+        result = query("SELECT (1.74::DOUBLE + 0.0)::DOUBLE AS pct, (1.0/3.0)::DOUBLE AS third")
+        assert "1.7400000000000002" not in result
+        assert "1.74" in result and "0.3333333333" in result
+
+    def test_query_small_floats_survive(self):
+        """A fixed-decimal format would flatten small values to 0.00 — they must
+        keep their magnitude (#410)."""
+        result = query("SELECT 1e-7::DOUBLE AS tiny")
+        assert "1e-07" in result and "0.00" not in result
+
+    def test_query_decimal_renders_exactly(self):
+        """DECIMAL is exact in DuckDB and only lossy at the pandas boundary, so it
+        casts rather than going through %.10g (#410)."""
+        result = query("SELECT 123456789.1234567890::DECIMAL(38,10) AS d")
+        assert "123456789.123456789" in result
+        assert "1.23457e+08" not in result
+
+    def test_query_wide_int_still_exact_beside_a_double(self):
+        """#410 disables tabulate number-parsing per column. The wide-int columns
+        must NOT be included, or #387 regresses."""
+        result = query(
+            "SELECT 613762179077668863::UBIGINT AS h8, 19573561.06::DOUBLE AS acres"
+        )
+        assert "613762179077668863" in result and "e+17" not in result
+        assert "19573561.06" in result
+
 
 class TestResourceFunctions:
     """Test MCP resource functions."""

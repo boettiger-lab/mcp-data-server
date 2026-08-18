@@ -445,9 +445,30 @@ def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint
             # missing cell (the IUCN size-stratified assets have NULL finer
             # h-columns, so this is live). It also stops a NULL date printing as
             # the literal `nan`, which reads as a value.
+            # Floats need the same treatment for the same reason, but the fix is NOT
+            # the same (#410). tabulate's default `floatfmt` is `g` — six significant
+            # figures — so a 26-million-acre total printed `2.64715e+07` and a dollar
+            # sum `3.212e+08`. `ROUND()` does not help: this is the display layer, so
+            # the obvious model-side workaround fails. Two traps here:
+            #   * A VARCHAR cast alone is NOT enough. Unlike a wide int, a float string
+            #     is re-parsed by tabulate and re-formatted straight back to
+            #     `1.95736e+07`, so the cast must be paired with `disable_numparse` for
+            #     exactly those columns. (Whole-table `disable_numparse` would undo the
+            #     wide-int alignment above; a `colalign` tuple with `None` holes drops
+            #     the padding entirely.)
+            #   * `%.10g` rather than a plain cast, because a raw DOUBLE cast exposes
+            #     representation noise — `1.74` becomes `1.7400000000000002`, and 1.74
+            #     is a live gold value. DECIMAL casts exactly instead, since it is
+            #     exact in DuckDB and only becomes lossy at the pandas boundary.
+            # The cost is that these columns render left-aligned. Accepted: this table
+            # is consumed by a model, so precision matters and alignment does not.
+            # It also restores the NULL-vs-NaN distinction — both printed `nan` before,
+            # while `query-optimization.md` §7 tells models to filter the NaN sentinel.
+            # A NULL is now blank and a real NaN still says `nan`.
             WIDE_INTS = ("BIGINT", "UBIGINT", "HUGEINT", "UHUGEINT")  # > 2^53
             rendered = []
-            for c, t in zip(result.columns, result.dtypes):
+            no_numparse = []  # column indices tabulate must not re-parse (#410)
+            for i, (c, t) in enumerate(zip(result.columns, result.dtypes)):
                 tu, q = str(t).upper(), f'"{c}"'
                 if tu == "DATE":
                     expr = f"strftime({q}, '%Y-%m-%d')"
@@ -455,6 +476,12 @@ def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint
                     expr = f"strftime({q}, '%Y-%m-%d %H:%M:%S')"
                 elif tu in WIDE_INTS:
                     expr = f"CAST({q} AS VARCHAR)"
+                elif tu in ("DOUBLE", "FLOAT"):
+                    expr = f"printf('%.10g', {q})"
+                    no_numparse.append(i)
+                elif tu.startswith("DECIMAL"):
+                    expr = f"CAST({q} AS VARCHAR)"
+                    no_numparse.append(i)
                 else:
                     rendered.append(None)
                     continue
@@ -467,7 +494,7 @@ def query(sql_query: str, s3_key: str = None, s3_secret: str = None, s3_endpoint
             df = result.limit(51).df()
             if df.empty: return "No results found."
             truncated = len(df) > 50
-            md = df.head(50).to_markdown(index=False)
+            md = df.head(50).to_markdown(index=False, disable_numparse=no_numparse)
             if truncated:
                 md += (
                     "\n\n⚠️ Showing the first 50 rows only — this is a preview, not the"
