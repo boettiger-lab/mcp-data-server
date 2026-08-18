@@ -26,6 +26,15 @@ spec:
         image: ghcr.io/boettiger-lab/mcp-data-server:v0.8.22@sha256:10052de08be75ca09fe2b0f10970eea1b5c1058713cf3f13d9d6ec4d473f5cd4
         imagePullPolicy: IfNotPresent
         env:
+        # Release identity is supplied HERE, not baked into the image (#413). The
+        # image is built once from `main` and a release only adds a tag to that
+        # existing manifest — so its own ENV still says "main", and this overrides
+        # it. Keep this in step with the `:vX.Y.Z` in `image:` above; CI enforces
+        # that they match (tests/check_k8s_image_pins.py). GIT_SHA is NOT overridden:
+        # the image's own value is the commit it was built from, which stays correct
+        # through a retag.
+        - name: APP_VERSION
+          value: "v0.8.22"
         - name: STAC_CATALOG_URL
           value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
         - name: MCP_PUBLIC_BASE_URL

@@ -3,8 +3,9 @@ name: Publish GitHub Release
 # When a vX.Y.Z tag is pushed, publish a matching GitHub Release with
 # auto-generated notes (the merged-PR list since the previous tag) so the
 # Releases page reflects what's actually shipped. See issue #221.
-# docker.yml builds the image for the same tag in parallel; this only creates
-# the Release entry.
+# This only creates the Release entry. It does NOT build an image: since #413 a
+# release names the digest dev already gated (retag-release.yml) rather than
+# rebuilding the commit, so docker.yml no longer runs on tags.
 on:
   push:
     tags: ['v*']

@@ -136,19 +136,50 @@ know what dev serves. (`k8s-image-pin.yml` checks the pin *is* a digest, not tha
 current.) Prod is the opposite: its digest is committed in `k8s/deployment.yaml` and is
 authoritative, because prod is promoted deliberately per release.
 
-**Tag a release → redeploy prod (promote by digest):**
-1. `git tag vX.Y.Z && git push origin vX.Y.Z`, then wait for `docker.yml` to build `:vX.Y.Z`.
-2. Read the digest from the build run's job summary, or:
-   `docker buildx imagetools inspect ghcr.io/boettiger-lab/mcp-data-server:vX.Y.Z --format '{{.Manifest.Digest}}'`
-3. Set `image: ghcr.io/boettiger-lab/mcp-data-server:vX.Y.Z@sha256:<digest>` in
-   `k8s/deployment.yaml` (separate commit).
+**Release → promote prod. Retag, never rebuild (#413).**
+
+A release ships the artifact dev gated, not a fresh build of the same commit. `docker.yml`
+does not run on tags; a release only adds a name to a manifest that already exists.
+
+1. Take the digest dev validated — the `:main` digest at the gated commit:
+   ```bash
+   kubectl -n biodiversity get pods -l app=dev-duckdb-mcp \
+     -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+   ```
+2. Name that manifest as the release (no build). Use the workflow, not a local
+   `docker` — this box has no docker CLI, and CI already holds the registry credential:
+   ```bash
+   gh workflow run retag-release.yml -f version=vX.Y.Z -f digest=sha256:<digest>
+   ```
+   It refuses to re-point an existing release tag, and verifies the tag resolves to the
+   digest you asked for. `git tag vX.Y.Z` for the source record too — it just no longer
+   triggers a build.
+3. In `k8s/deployment.yaml`, set **both** (one commit):
+   - `image: …:vX.Y.Z@sha256:<the same digest>`
+   - the `APP_VERSION` env to `vX.Y.Z`
 4. `kubectl apply -f k8s/deployment.yaml`
 5. `kubectl rollout restart deployment/duckdb-mcp -n biodiversity`
 
+**Why APP_VERSION lives in the manifest.** It used to be a build arg, so stamping a release
+name meant rebuilding — and a rebuild of the same commit is not the same bytes (on v0.8.16,
+6 of 10 layers differed, and an unpinned pandas could have silently reverted the fix that
+release was shipping). `server.py` reads the stamp from the environment, so the Deployment
+overrides the image's own `"main"`. The image stays identity-free and immutable; the release
+name is deploy-time metadata. `GIT_SHA` is *not* overridden — it is the commit the image was
+built from and survives a retag intact.
+
+The two now have to agree, so `tests/check_k8s_image_pins.py` fails the build if the
+`:vX.Y.Z` in `image:` and the `APP_VERSION` env differ, or if a release-pinned Deployment
+omits the env entirely (`/version` would then report `main` in production).
+
 prod pins an immutable `:vX.Y.Z@sha256:…` (tag for humans, digest enforced — if they ever
-disagree, the digest wins). **Never apply prod while the manifest points at an image CI
-hasn't built yet** — the rollout stalls on `ImagePullBackOff`. `kubectl apply` must precede
-`rollout restart`; a git push alone does not update the cluster.
+disagree, the digest wins). **Never apply prod while the manifest points at an image that
+does not exist in the registry** — the rollout stalls on `ImagePullBackOff`. `kubectl apply`
+must precede `rollout restart`; a git push alone does not update the cluster.
+
+**What this buys.** Prod's digest now *equals* dev's, so "prod runs what was validated" is
+structural. The served-artifact diff (comparing prod's `query` description against dev's)
+drops from a required safety net to a spot check.
 
 **No `docker` CLI (e.g. a JupyterLab session)?** `imagetools inspect` needs it, and the
 GHCR packages API needs a `read:packages` token most of our `gh` logins don't carry. An

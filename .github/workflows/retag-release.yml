@@ -1,0 +1,79 @@
+name: Release (retag, no rebuild)
+
+# Names an existing manifest as a release (#413). This deliberately does NOT build:
+# a release ships the exact bytes dev gated, and a rebuild of the same commit is not
+# the same bytes (on v0.8.16, 6 of 10 layers differed, and an unpinned pandas could
+# have silently reverted the fix that release was shipping).
+#
+# You supply the digest explicitly rather than letting this resolve `:main` itself.
+# That is the point: `:main` moves on every merge, so "whatever main is now" is not
+# the same claim as "the artifact dev validated". Read it off the running dev pod:
+#
+#   kubectl -n biodiversity get pods -l app=dev-duckdb-mcp \
+#     -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+#
+# Then set the SAME digest and version in k8s/deployment.yaml (image: + APP_VERSION
+# env); tests/check_k8s_image_pins.py fails the build if those two disagree.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. v0.8.23'
+        required: true
+      digest:
+        description: 'Digest to name (sha256:...) — the one dev gated'
+        required: true
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Validate inputs
+        run: |
+          echo "${{ inputs.version }}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::version must look like v1.2.3"; exit 1; }
+          echo "${{ inputs.digest }}" | grep -Eq '^sha256:[0-9a-f]{64}$' \
+            || { echo "::error::digest must be sha256:<64 hex>"; exit 1; }
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Refuse to re-point an existing release tag
+        run: |
+          repo=ghcr.io/boettiger-lab/mcp-data-server
+          if docker buildx imagetools inspect "$repo:${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::$repo:${{ inputs.version }} already exists — release tags are immutable"
+            exit 1
+          fi
+
+      - name: Retag
+        run: |
+          repo=ghcr.io/boettiger-lab/mcp-data-server
+          docker buildx imagetools create -t "$repo:${{ inputs.version }}" "$repo@${{ inputs.digest }}"
+
+      - name: Verify the tag resolves to the requested digest
+        run: |
+          repo=ghcr.io/boettiger-lab/mcp-data-server
+          got=$(docker buildx imagetools inspect "$repo:${{ inputs.version }}" --format '{{.Manifest.Digest}}')
+          echo "requested: ${{ inputs.digest }}"
+          echo "resolved:  $got"
+          [ "$got" = "${{ inputs.digest }}" ] \
+            || { echo "::error::tag resolved to a different digest"; exit 1; }
+          {
+            echo "### Released \`${{ inputs.version }}\`"
+            echo ""
+            echo "Named existing digest \`${{ inputs.digest }}\` — no rebuild."
+            echo ""
+            echo "Next: set both \`image:\` and the \`APP_VERSION\` env to this version"
+            echo "in \`k8s/deployment.yaml\`, then apply and restart."
+          } >> "$GITHUB_STEP_SUMMARY"
