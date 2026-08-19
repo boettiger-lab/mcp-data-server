@@ -1302,6 +1302,57 @@ class TestGetHexTileStatus:
         assert status["status"] == "done"
         assert "rollup_note" in status and "lower bound" in status["rollup_note"]
 
+    def test_done_response_names_the_display_handoff(self, isolated_jobs, monkeypatch):
+        """Every done response must say the tiles are not yet on the map (#330).
+
+        The failure this guards: on a `status:"done"` register the model reads
+        the paste-ready recipe, concludes the map is updated, narrates success
+        and never calls the client's display tool — ~50% of hex requests on
+        qwen against the real apps. Nothing else in the payload contradicts
+        that reading, and this text is what it sees at the deciding moment.
+        """
+        import server
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        sub = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        assert sub["status"] == "done"
+        for field in ("next_step",):
+            assert field in sub, sub.keys()
+        assert "NOT on the map" in sub["next_step"]
+        assert "add_hex_tile_layer" in sub["next_step"]
+        assert "tile_url_template" in sub["next_step"]
+
+    def test_poll_path_also_names_the_display_handoff(self, isolated_jobs, monkeypatch):
+        """The async-poll done response reaches "done" through a different
+        builder, and it is the common path for big builds — #331 is the
+        precedent for a note landing on one path and not the other."""
+        import server
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        sub = server.register_hex_tiles(
+            sql="SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 1.0 AS val",
+            agg="AVG",
+        )
+        status = server.get_hex_tile_status(hash=sub["hash"])
+        assert status["status"] == "done"
+        assert "next_step" in status
+        assert "add_hex_tile_layer" in status["next_step"]
+
+    def test_cache_hit_names_the_display_handoff(self, isolated_jobs, monkeypatch):
+        """The cache-hit path is the one #330 actually observed failing, and it
+        is the one no benchmark cell exercises — every register in the matrix
+        runs so far returned "running"."""
+        import server
+        monkeypatch.setattr(server, "_BUILD_INLINE_WAIT_SECONDS", 30.0)
+        sql = "SELECT h3_latlng_to_cell(37.8, -122.3, 5) AS h5, 2.0 AS val"
+        first = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert first["status"] == "done"
+        second = server.register_hex_tiles(sql=sql, agg="AVG")
+        assert second.get("cache_hit") is True, second.keys()
+        assert "next_step" in second
+        assert "add_hex_tile_layer" in second["next_step"]
+
     def test_non_count_distinct_status_has_no_rollup_note(self, isolated_jobs, monkeypatch):
         # Exact aggs (AVG here) must NOT carry the caveat — it's specific to
         # the non-composable COUNT_DISTINCT rollup.

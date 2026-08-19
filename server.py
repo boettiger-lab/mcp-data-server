@@ -582,6 +582,7 @@ from tiles.pyramid import (
     build_hex_tiles,
     cached_result_dict,
     render_recipe,
+    _DISPLAY_HANDOFF_NOTE,
     _rollup_note,
     lock_is_stale,
     read_existing_metadata,
@@ -789,13 +790,14 @@ def register_hex_tiles(
       the extrusions; the returned `layer` is a `fill-extrusion` layer.
 
     Returns a dict with `status` ∈ {"done", "running", "failed"}:
-    - status="done" (cache hit or fast build): includes the render recipe —
-      `source` (pass to map.addSource) and `layer` (pass to map.addLayer),
-      both ready to use as-is with a default viridis color ramp. Also
-      `value_columns` and `value_stats` ({<col>: {"by_res": {"<res>":
-      {"min","max","mean"}}, "suggested_scale": "linear"|"log"}}) if you want
-      to customize the palette or honor the log-scale hint, plus `hash`,
-      `bounds`, `feature_count_finest`.
+    - status="done" (cache hit or fast build): the tiles exist. They are NOT
+      on the map yet — display them by calling your client's map-display tool
+      (`add_hex_tile_layer` in the geo-agent apps) with `tile_url` copied
+      verbatim from `tile_url_template`, plus a `value_column`. `next_step` in
+      the response says the same thing. Also `value_columns` and `value_stats`
+      ({<col>: {"by_res": {"<res>": {"min","max","mean"}}, "suggested_scale":
+      "linear"|"log"}}) if you want to customize the palette or honor the
+      log-scale hint, plus `hash`, `bounds`, `feature_count_finest`.
     - status="running": being built in the background. You get `hash` and
       `tile_url_template`. Call `get_hex_tile_status(hash, wait_seconds=30)`
       to poll — it long-polls server-side, so one call returns either the
@@ -805,7 +807,8 @@ def register_hex_tiles(
     - status="failed": build raised an error inline. `error` has the message.
       Safe to re-submit with adjusted parameters.
 
-    MapLibre usage (identical regardless of format — render what you got):
+    If your client has no map-display tool and you are driving MapLibre
+    directly, `source` and `layer` are paste-ready with a viridis ramp:
         map.addSource(id, result.source);
         map.addLayer({id: ..., source: id, ...result.layer});
 
@@ -988,6 +991,11 @@ def _done_response(base: dict, meta: dict) -> dict:
     note = _rollup_note(meta.get("agg", ""))
     if note:
         result["rollup_note"] = note
+    # The async-poll path reaches "done" here rather than through pyramid.py's
+    # builders, and it is the common one for big builds — the note has to be on
+    # every done response or the handoff advice is missing exactly when the
+    # build took long enough for the model to lose the thread (#330).
+    result["next_step"] = _DISPLAY_HANDOFF_NOTE
     return result
 
 
