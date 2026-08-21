@@ -1,0 +1,10 @@
+query_id,server,run,elapsed_s,error
+Q3a-c,cpu-cirrus,1,5.28,
+Q3a-c,cpu-cirrus,2,5.226,
+Q3a-c,cpu-cirrus,3,5.122,
+Q4a-c,cpu-cirrus,1,9.966,
+Q4a-c,cpu-cirrus,2,10.268,
+Q4a-c,cpu-cirrus,3,9.963,
+Q5a-c,cpu-cirrus,1,5.41,
+Q5a-c,cpu-cirrus,2,5.326,
+Q5a-c,cpu-cirrus,3,5.441,

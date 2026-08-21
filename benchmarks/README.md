@@ -21,6 +21,25 @@ uv run --with duckdb benchmark-public.py
 
 Post-mortem on the DPP investigation. Conclusion: not a DuckDB bug — the original benchmark joined only on `h8` (missing `h0`), so there was nothing for DPP to propagate. When the join includes `AND p.h0 = c.h0`, DuckDB correctly prunes to 1/94 files on S3.
 
+### `gpu-vs-cpu.md`
+
+**Canonical record for the DuckDB-CPU vs Polars/cuDF-GPU comparison** (#227). Read it
+before the issue threads: the findings were spread over five issues in two repos, several
+of which lead with a conclusion a later comment invalidated. Covers the three benchmark
+generations (which ones actually engaged the GPU), the numbers, and the open gaps.
+Raw CSVs and the RAPIDS bug reports are migrated into `gpu/` so they survive archiving
+the `mcp-gpu-data-server` fork.
+
+### `gpu-cpu-cirrus-bench.py`
+
+The cirrus CPU baseline for that comparison — the April GPU suite's Q3a/Q4a/Q5a adapted to
+the current data model (WDPA hex moved; IUCN hex lost `h8`, replacement stores h3 indices
+as hex strings). Both endpoints are env-overridable, unlike the fork's harness.
+
+```bash
+CPU_MCP_URL=https://duckdb-mcp.carlboettiger.info/mcp RUNS=3 python3 benchmarks/gpu-cpu-cirrus-bench.py
+```
+
 ### `k8s/benchmark-job-static.yaml`
 
 Kubernetes Job (opportunistic priority, no GPU nodes) that tests the `s3_allow_recursive_globbing` regression against the internal NRP endpoint (`rook-ceph-rgw-nautiluss3.rook`). Compares file counts and GET requests with and without the workaround setting.
@@ -207,8 +226,10 @@ opportunistic pod (`kubectl top` showed 0.19 of 16 requested cores).
 3. A static `WHERE c.h0 = X` literal is ~9s faster and ~200 fewer GETs than join-driven DPP for single-partition queries, due to build-side materialization overhead — but both open only 1 file.
 4. Queryable hex datasets are 1 file per h0 (carbon 122, padus 21, gbif-2026 122), so a pruned query opens 1 footer and a global scan ≤122. The historical "~923 files / ~126-per-h0" was a since-fixed GBIF over-sharding bug, not steady state — large scans are bandwidth-bound, not open-latency-bound. This retires the per-object-latency framing in older notes.
 5. For the source.coop mirror, read the **direct AWS bucket** (`us-west-2.opendata.source.coop` → AWS S3), not the `data.source.coop` Cloudflare proxy: direct is ~25–27% faster on throughput-bound reads and the CDN provides no caching benefit for these large, cold objects. The #260/#261 fallback already maps to the direct bucket.
-6. **Real queries are compute/decode-bound, not network/httpfs-bound** — S3 ≈ local ≈ internal-MinIO for heavy aggregates; every shape (scans, joins, h3 rollups) scales ~linearly with threads. DuckDB local/httpfs parquet reads are GB/s-class uncompressed and competitive with Polars / faster than PyArrow.
+6. **On low-latency storage, real queries are compute/decode-bound, not network/httpfs-bound** (this holds for cirrus on-box MinIO; it is *reversed* for production NRP/Ceph, where ~120ms RGW GET latency makes reads I/O-latency-bound — see the 2026-07-01 correction in #250) — S3 ≈ local ≈ internal-MinIO for heavy aggregates; every shape (scans, joins, h3 rollups) scales ~linearly with threads. DuckDB local/httpfs parquet reads are GB/s-class uncompressed and competitive with Polars / faster than PyArrow.
 7. **Column pruning is the ~10× lever**: `sum(carbon)` (1 col) ≈ 873 Mrow/s vs `sum(all 7)` ≈ 471 Mrow/s. Far bigger than thread/network tuning. Column selection is governed by the registration SQL — recipes should select only the h3 index + value column(s).
 8. **`THREADS=48` is well-chosen**: 1-column queries saturate at ~32 threads; multi-column / h3 queries still benefit past 48. Pushing higher raises connection fan-out risk (#103) under concurrency. (Full 4.84B-row carbon hex: mean-carbon/h0 in ~5s, /h1 in ~7s at T=48 on a dedicated machine.)
+
+9. **CPU beats GPU on these S3-backed join queries**, by >10× on the closest like-for-like pair, because the win is bytes transferred (column-selective range reads + streaming joins) rather than compute. GPU compute does work on this stack, but only with hive-partitioned scans kept out of the plan — still unsupported upstream. See `gpu-vs-cpu.md`.
 
 See `../query-optimization.md` for the actionable rules derived from these findings.

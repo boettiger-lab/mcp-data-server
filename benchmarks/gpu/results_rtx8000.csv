@@ -1,0 +1,10 @@
+query_id,server,run,elapsed_s,row_count,error
+Q3a,gpu,1,25.776,,
+Q3a,gpu,2,23.519,,
+Q3a,gpu,3,23.402,,
+Q4a,gpu,1,202.533,,
+Q4a,gpu,2,205.517,,
+Q4a,gpu,3,206.12,,
+Q5a,gpu,1,25.452,,
+Q5a,gpu,2,24.519,,
+Q5a,gpu,3,24.471,,
