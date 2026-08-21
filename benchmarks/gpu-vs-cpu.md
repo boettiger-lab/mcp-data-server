@@ -88,6 +88,64 @@ consistent with the fact that cirrus serves the CPU deploy and the GPU deploy is
    it as a pending follow-up on 2026-07-02, flagging the streaming case as the hard half.
    Always run benchmarks with fallback disabled, or a "GPU" number may be a CPU number.
 
+## Picking this back up when a GPU is available
+
+Everything needed to resume, so nothing depends on the fork (which #227 archives) or on
+issue archaeology. Tracking issue: **#227** — this is its benchmark acceptance step.
+
+### 1. Redeploy a GPU server
+
+The last working config was `k8s/mcp/deployment.yaml` in the fork (cirrus, 2× Quadro
+RTX 8000), reproduced here because an archived repo is easy to lose:
+
+| Setting | Value | Why |
+|---|---|---|
+| `runtimeClassName` | `nvidia` | — |
+| `nvidia.com/gpu` | `14` | Virtual slices; on cirrus this is what exposes *both* physical cards |
+| `memory` limit | `128Gi` | Q4a peaked >64Gi materializing the join |
+| `QUERY_ENGINE` | `gpu-cudf` | Beat `gpu` mode 31.7s vs 53.7s at matched threads |
+| `POLARS_MAX_THREADS` | `64` | Sweet spot; >64 degrades end-to-end on 885M-row joins |
+| `KVIKIO_NTHREADS` | `64` | Must be an **env var** — `set_num_threads()` silently no-ops |
+| `KVIKIO_TASK_SIZE` | `16777216` | 16 MiB chunks |
+| `ALLOW_CPU_FALLBACK` | **`false`** | Not in the old manifest (defaults `true`). Without it a "GPU" run may be a CPU run |
+| `strategy` | `Recreate` | Rolling update deadlocks on a single-GPU node |
+| `S3_ENDPOINT_URL` / `STAC_CATALOG_URL` | on-node MinIO | Keeps data traffic on-node, matching the CPU deploy |
+
+The NRP variant additionally needs the `nautilus.io/issue` toleration and a GPU-node
+`nodeSelector`; prefer a co-located store over NRP Ceph (~120ms RGW GET latency, #250).
+
+### 2. Rewrite the queries first — the old suite will not bind
+
+Non-optional, and the main reason a rerun isn't a one-liner. See the drift notes above:
+WDPA hex moved to versioned prefixes, IUCN hex lost `h8` and its h8-grain replacement
+stores h3 indices as hex strings. The rewrite must be executable by **both** engines —
+Polars `SQLContext` forbids `CAST` in an `ON` clause, so casts belong in a CTE, and the
+`h0` filter needs literals in each side's own key type or partition pruning dies.
+
+### 3. Verify the GPU is actually computing, before trusting any number
+
+1. `GPUEngine(raise_on_fail=True)` (or `ALLOW_CPU_FALLBACK=false`) so unsupported nodes
+   raise instead of silently falling back.
+2. Watch VRAM during a run — generation 1's tell was 0% utilization and 1 MiB VRAM.
+3. Confirm no scan node carries `hive_parts`; that is still an upstream hard stop.
+
+### 4. Run both sides and record
+
+```bash
+CPU_MCP_URL=<cpu endpoint> RUNS=3 python3 benchmarks/gpu-cpu-cirrus-bench.py
+```
+
+Add the GPU endpoint the same way (env-overridable — the fork's harness hardcoded the CPU
+URL to NRP, which is why the matched baseline was missing for four months). Then update the
+tables in this file. **Results belong here, not in an issue comment.**
+
+### 5. If the box is a DGX Spark or similar unified-memory machine
+
+That is the interesting case: with no PCIe hop and no separate VRAM budget, the
+column-projection gap that decides every result above should mostly disappear. Treat it as
+a distinct generation in the table rather than a rerun, and record the storage path
+(on-box NVMe vs S3) since that, not the GPU, has dominated every result so far.
+
 ## Known gaps
 
 - **No same-node, same-data GPU-vs-CPU pair.** Closing it needs either a re-run of the
@@ -95,7 +153,8 @@ consistent with the fact that cirrus serves the CPU deploy and the GPU deploy is
   can run. Acceptance step under #227.
 - **DGX Spark (unified memory)** was benchmarked but nothing was pushed to any
   boettiger-lab repo. That config is the one where the column-projection gap largely
-  disappears, so it is the most interesting missing data point.
+  disappears, so it is the most interesting missing data point. If those numbers can be
+  recovered from that host, add them as generation 4 (see the runbook's step 5).
 - The fork's `benchmark.py` hardcodes `cpu` → `duckdb-mcp.nrp-nautilus.io`, which is why
   the cirrus CPU deploy added in #291 (explicitly "the CPU baseline … same node, same
   MinIO … for a fair head-to-head") never produced one. Any port under #227 must make
