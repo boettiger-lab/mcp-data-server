@@ -1953,3 +1953,90 @@ class TestPeriodicRefresh:
         with patch.object(stac, "_STAC_REFRESH_INTERVAL", 0):
             assert stac.start_periodic_refresh() is None
 
+
+
+class TestDeploymentCatalogScope:
+    """#420: the catalog and its credential come from the environment.
+
+    `catalog_token` left the tool schema, so a private deployment needs an
+    env-side channel for the same thing — the move S3 credentials already made.
+    """
+
+    def test_token_read_from_env(self, monkeypatch):
+        monkeypatch.delenv("STAC_CATALOG_TOKEN", raising=False)
+        assert stac.default_catalog_token() is None
+        monkeypatch.setenv("STAC_CATALOG_TOKEN", "  ")
+        assert stac.default_catalog_token() is None, "blank is not a token"
+        monkeypatch.setenv("STAC_CATALOG_TOKEN", " deployment-secret ")
+        assert stac.default_catalog_token() == "deployment-secret"
+
+    def test_default_catalog_fetch_uses_the_env_token(self, monkeypatch):
+        """The startup pre-warm and the periodic refresh both go through here, so
+        a private deployment catalog loads without any per-call argument."""
+        monkeypatch.setenv("STAC_CATALOG_TOKEN", "deployment-secret")
+        cat = MagicMock()
+        cat.links = []
+        with patch("stac.pystac.Catalog.from_file", return_value=cat) as from_file:
+            fetch_stac_catalog()
+        _, kwargs = from_file.call_args
+        assert kwargs["stac_io"]._token == "deployment-secret"
+
+    def test_env_token_does_not_leak_into_an_explicit_catalog_url(self, monkeypatch):
+        """A library call naming another catalog must not hand it our credential."""
+        monkeypatch.setenv("STAC_CATALOG_TOKEN", "deployment-secret")
+        cat = MagicMock()
+        cat.links = []
+        with patch("stac.pystac.Catalog.from_file", return_value=cat) as from_file:
+            fetch_stac_catalog("https://elsewhere.example.org/catalog.json")
+        _, kwargs = from_file.call_args
+        assert kwargs["stac_io"]._token is None
+
+
+class TestDiscoveryFlag:
+    """#420 proposal 2: whole-catalog discovery is a per-deployment switch."""
+
+    def test_defaults_on(self, monkeypatch):
+        monkeypatch.delenv("STAC_DISCOVERY", raising=False)
+        assert stac.discovery_enabled() is True
+
+    def test_opt_out_values(self, monkeypatch):
+        for val in ("0", "false", "FALSE", "no", "off", " off "):
+            monkeypatch.setenv("STAC_DISCOVERY", val)
+            assert stac.discovery_enabled() is False, val
+        for val in ("1", "true", "on", "yes"):
+            monkeypatch.setenv("STAC_DISCOVERY", val)
+            assert stac.discovery_enabled() is True, val
+
+    def test_not_found_names_the_catalog_it_searched(self, monkeypatch):
+        """The one signal a direct consumer gets that its `catalog_url` was dropped.
+
+        Unknown arguments are ignored during validation, so a client that still
+        sends one is answered from *this* deployment's catalog with no error.
+        Naming the catalog in the miss makes that visible instead of silent.
+        """
+        monkeypatch.delenv("STAC_PUBLIC_CATALOG_URL", raising=False)
+        with patch("stac.fetch_stac_catalog"), \
+             patch.dict(stac._STAC_RAW, {}, clear=True), \
+             patch.dict(stac.STAC_DATASETS, {}, clear=True):
+            assert stac.public_catalog_url() in get_collection("no-such-collection")["error"]
+            assert stac.public_catalog_url() in get_dataset("no-such-dataset")
+
+    def test_not_found_names_a_client_reachable_url(self, monkeypatch):
+        """On a mirror head the server reads an address clients can't resolve
+        (#346); the miss must quote the one they can fetch."""
+        monkeypatch.setenv("STAC_PUBLIC_CATALOG_URL", "https://mirror.example/catalog.json")
+        with patch("stac.fetch_stac_catalog"), patch.dict(stac._STAC_RAW, {}, clear=True):
+            err = get_collection("no-such-collection")["error"]
+        assert "https://mirror.example/catalog.json" in err
+        assert stac.STAC_CATALOG_URL not in err
+
+    def test_not_found_message_omits_the_tool_it_does_not_have(self, monkeypatch):
+        """A curated deployment must not point the model at an unregistered tool."""
+        with patch("stac.fetch_stac_catalog"), patch.dict(stac._STAC_RAW, {}, clear=True):
+            monkeypatch.setenv("STAC_DISCOVERY", "0")
+            off = get_collection("no-such-collection")["error"]
+            monkeypatch.setenv("STAC_DISCOVERY", "1")
+            on = get_collection("no-such-collection")["error"]
+        assert "browse_stac_catalog" not in off
+        assert "no-such-collection" in off
+        assert "browse_stac_catalog" in on

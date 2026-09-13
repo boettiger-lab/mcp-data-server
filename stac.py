@@ -24,6 +24,51 @@ STAC_CATALOG_URL = os.environ.get(
 )
 
 
+def default_catalog_token() -> str | None:
+    """Bearer token for *this deployment's* catalog, when that catalog is private.
+
+    The env-side replacement for the old model-supplied `catalog_token` tool
+    argument (#420). Catalog identity and its credential are deployment
+    properties — read from the environment at call time, exactly as S3
+    credentials are — never re-decided per call by the model.
+    """
+    return os.environ.get("STAC_CATALOG_TOKEN", "").strip() or None
+
+
+def discovery_enabled() -> bool:
+    """Whether this deployment exposes whole-catalog discovery (#420).
+
+    `browse_stac_catalog` and the `catalog://list` resource enumerate the whole
+    configured catalog. That is right for the shared public server — where the
+    configured catalog *is* the public catalog — and wrong for a curated app
+    deployment, which wants the model to see only the collections the app
+    configures. Default on (back-compat for clients pinned too old to notice a
+    tool disappearing); a deployment opts out with `STAC_DISCOVERY=0`.
+    """
+    return os.environ.get("STAC_DISCOVERY", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _discovery_hint(noun: str) -> str:
+    """Trailing "use browse_stac_catalog" hint, omitted where it isn't registered."""
+    return f" Use browse_stac_catalog to list available {noun}." if discovery_enabled() else ""
+
+
+def _searched_catalog(catalog_url: str = None) -> str:
+    """Name the catalog a lookup actually consulted, for a not-found message.
+
+    Since #420 a caller cannot retarget the catalog per call, and an argument
+    absent from the schema is dropped during validation rather than rejected —
+    so a direct MCP consumer still sending `catalog_url` is answered from the
+    deployment's catalog with no signal that its own was never consulted. Naming
+    the catalog in the one response such a consumer will actually read turns that
+    silence into something diagnosable. Quote the *client-reachable* URL (#346):
+    on a mirror head the address this process reads may not resolve for them.
+    """
+    return catalog_url or f"this server's catalog ({public_catalog_url()})"
+
+
 def public_catalog_url() -> str:
     """The catalog URL a *client* should put in its own config.
 
@@ -563,6 +608,11 @@ def fetch_stac_catalog(catalog_url: str = None, catalog_token: str = None) -> di
       STAC_LOAD_ERRORS) is replaced after the pool drains.
     """
     url = catalog_url or STAC_CATALOG_URL
+    # The deployment's own catalog carries its credential in the environment
+    # (#420). An explicit catalog_url is a library call and keeps whatever token
+    # it was handed.
+    if not catalog_url:
+        catalog_token = catalog_token or default_catalog_token()
 
     # --- Phase 1: root fetch (must succeed) ---
     root_io = _TimeoutStacIO(token=catalog_token, timeout=_STAC_ROOT_TIMEOUT)
@@ -831,6 +881,15 @@ def _render_inline_catalog(catalog: dict) -> dict[str, str]:
     return datasets
 
 
+# ---------------------------------------------------------------------------
+# Library entry points.
+#
+# The `catalog_url` / `catalog_token` parameters below are a *library* affordance
+# — for tests and for in-process callers that already know which catalog they
+# mean. They are deliberately NOT exposed in the MCP tool schemas: catalog scope
+# is ambient deployment config (`STAC_CATALOG_URL` + `STAC_CATALOG_TOKEN`), never
+# an argument the model supplies per call (#420). Do not plumb them back out.
+# ---------------------------------------------------------------------------
 def list_datasets(
     catalog_url: str = None,
     catalog_token: str = None,
@@ -933,7 +992,10 @@ def get_dataset(
             result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
         if result is not None:
             return result
-    return f"Dataset '{dataset_id}' not found. Use list_datasets to see available datasets."
+    return (
+        f"Dataset '{dataset_id}' not found in {_searched_catalog(catalog_url)}."
+        f"{_discovery_hint('datasets')}"
+    )
 
 
 def _coerce_inline_collection(d: dict):
@@ -1028,7 +1090,7 @@ def get_collection(
                 return substring_hit
         except Exception as e:
             return {"error": f"Failed to fetch catalog: {e}"}
-        return {"error": f"Collection '{collection_id}' not found. Use browse_stac_catalog to list available collections."}
+        return {"error": f"Collection '{collection_id}' not found in {_searched_catalog(catalog_url)}."}
 
     # Default catalog: look up from pre-populated cache (read under the lock so a
     # concurrent background refresh #337 can't mutate _STAC_RAW mid-lookup).
@@ -1045,4 +1107,7 @@ def get_collection(
     if result is not None:
         return result
 
-    return {"error": f"Collection '{collection_id}' not found. Use browse_stac_catalog to list available collections."}
+    return {"error": (
+        f"Collection '{collection_id}' not found in {_searched_catalog()}."
+        f"{_discovery_hint('collections')}"
+    )}

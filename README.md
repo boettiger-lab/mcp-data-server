@@ -204,8 +204,8 @@ If every pod's imageID matches the pinned digest, prod is current and consistent
 
 ### Tools
 
-- `browse_stac_catalog(catalog_url?, catalog_token?)` - List available datasets from the STAC catalog
-- `get_stac_details(dataset_id, catalog_url?, catalog_token?)` - Get S3 paths and schema for a dataset
+- `browse_stac_catalog(catalog?)` - List available datasets from the deployment's STAC catalog (registered only when discovery is enabled; see `STAC_DISCOVERY`)
+- `get_stac_details(dataset_id, collection?)` - Get S3 paths and schema for a dataset
 - `query(sql_query, s3_key?, s3_secret?, s3_endpoint?, s3_scope?)` - Execute DuckDB SQL against S3 parquet files
 
 ### Resources
@@ -264,20 +264,22 @@ Required settings are documented in [query-setup.md](query-setup.md) and automat
 
 ## Private Data Access
 
-The server supports private STAC catalogs and private S3 buckets. Credentials are supplied per-call by the client and are scoped to that request only — they are never logged, cached, or shared between clients.
+The server supports private STAC catalogs and private S3 buckets. Query credentials are supplied per-call by the client and are scoped to that request only — they are never logged, cached, or shared between clients. Catalog scope is *not*: which catalog this server reads is a property of the deployment.
 
 ### Private STAC catalog
 
-If your STAC catalog requires authentication, pass a bearer token alongside the catalog URL:
+Point the deployment at its own catalog and give it the bearer token in the environment:
 
-```json
-{ "tool": "list_datasets", "arguments": {
-    "catalog_url": "https://your-app.example.org/stac/catalog.json",
-    "catalog_token": "YOUR_BEARER_TOKEN"
-}}
+```yaml
+env:
+  - name: STAC_CATALOG_URL
+    value: https://your-app.example.org/stac/catalog.json
+  - name: STAC_CATALOG_TOKEN
+    valueFrom:
+      secretKeyRef: { name: stac-catalog, key: token }
 ```
 
-The token is forwarded as `Authorization: Bearer <token>` when fetching catalog JSON. Pass the same `catalog_url` and `catalog_token` to `get_dataset` as well.
+The token is forwarded as `Authorization: Bearer <token>` when fetching catalog JSON, and never appears in a JSON-RPC body. The tools take no `catalog_url` / `catalog_token` arguments — an app's data universe is configured once, not re-decided by the model on every call (#420). A client that already holds the STAC JSON can still pass it inline as `collection` / `catalog` to skip the fetch.
 
 > **Serving a private catalog**: The catalog endpoint needs to accept bearer token authentication for machine-to-machine access. If you are using oauth2-proxy for human (browser) access, add a parallel nginx `auth_request` bypass for the `/stac/` path that accepts a static shared token via the `Authorization` header. This allows the MCP server to fetch catalog metadata without requiring a browser OAuth session.
 

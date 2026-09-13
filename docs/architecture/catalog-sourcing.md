@@ -23,13 +23,51 @@ primary contract; keep the whole-catalog optional.
 | Surface | Whole-catalog reliance | Notes |
 |---|---|---|
 | MCP `query` | **None** | No catalog references in the query path; runs SQL on whatever paths it's given. ~85% of MCP calls. |
-| MCP `get_stac_details` / `get_collection` | **Fallback only** | Resolution is inline `collection` → `catalog_url` → default cache. In production ~always inline (via `get_schema` + the `injectInlineStac` wrapper), bypassing the pre-warm. |
-| MCP `browse_stac_catalog`, `catalog://list/{id}` | **Full** | Served from the pre-warmed `STAC_DATASETS`; Ceph-bound and Ceph-pointing. ~1.4% of calls, optional discovery. |
+| MCP `get_stac_details` / `get_collection` | **Fallback only** | Resolution is inline `collection` → the deployment's own catalog. In production ~always inline (via `get_schema` + the `injectInlineStac` wrapper), bypassing the pre-warm. |
+| MCP `browse_stac_catalog`, `catalog://list` | **Full** | Served from the pre-warmed `STAC_DATASETS`; Ceph-bound and Ceph-pointing. ~1.4% of calls, optional discovery — and since #420, registered only where `STAC_DISCOVERY` allows it. |
+| MCP `catalog://{id}` | **Fallback only** | Same resolution as `get_stac_details`, scoped to the deployment's catalog. |
 | MCP startup | **Soft** | Pre-warm + fail-fast; `STAC_ALLOW_DEGRADED_START` (#262) removed the hard dependency. |
 | geo-agent CDN lib | **~None for its own data** | Builds its own `DatasetCatalog` from config (`collection_url`s + `catalog`, fetched client-side from any host) and forwards them inline to MCP. Touches the server's whole-catalog only via optional `browse_stac_catalog`. |
 
 So the Ceph-root pre-warm is load-bearing for only `browse_stac_catalog` + the
 `catalog://` resources + the default-resolution fallback — a thin slice.
+
+## The settled rule: scope is ambient, never an argument
+
+**Which catalog a deployment reads — and the credential for it — is deployment
+config, never a tool argument.** `STAC_CATALOG_URL` and `STAC_CATALOG_TOKEN` say
+it once; nothing in a JSON-RPC body can change it. This is the same move
+credentials already made (per-request `s3_*` injection → a scoped DuckDB secret
+from the replica's own `S3_SOURCES` env), and for the same reason: an argument
+the model supplies is an argument the model can change, so the data universe was
+being re-decided on every call. A geo-agent app configured with a handful of
+collections could still be talked into reporting on anything in any catalog
+([#420](https://github.com/boettiger-lab/mcp-data-server/issues/420),
+client-side counterpart boettiger-lab/geo-agent#354).
+
+Concretely, since #420:
+
+- `get_stac_details`, `get_collection` and `browse_stac_catalog` take **no**
+  `catalog_url` / `catalog_token`. A client that still sends them is not broken —
+  arguments absent from the schema are dropped during validation — but the value
+  is ignored and resolution happens against the deployment's catalog.
+- A private catalog is reached by pointing `STAC_CATALOG_URL` at it and putting
+  its token in `STAC_CATALOG_TOKEN`, exactly as a private bucket is reached by a
+  scoped secret in the replica's env.
+- Whole-catalog **discovery** is opt-out per deployment (`STAC_DISCOVERY=0`).
+  Default on, because the shared public server's configured catalog *is* the
+  public catalog and at least one third-party app is pinned too old to stop
+  advertising a tool that vanished; every private app runs its own replica and
+  turns it off.
+
+Inline `collection` / `catalog` is untouched — it is the primary contract, and
+it is what production actually uses. The corollary for anyone adding a tool: a
+`catalog_url` parameter is always convenient and always wrong. Put the scope in
+the deployment.
+
+Out of scope, deliberately: the `query` path. Path-scoping for SQL is a larger
+question, with `s3config.py`'s source registry as its natural deployment-level
+analog.
 
 ## Key operational consequence for app resilience
 
@@ -55,7 +93,10 @@ Therefore:
   client-side, no server change). Server: swap `STAC_CATALOG_URL` to a backup
   root to restore `browse`/resources/default-resolution (the hot path doesn't
   need it). Because there is no top-level catalog on source.coop, the source.coop
-  case is handled per-collection; a minio backup can provide a real root.
+  case is handled per-collection; a minio backup can provide a real root. Since
+  #420 this env var is the *only* way to move a deployment's catalog, which is
+  the point: the swap is one deliberate change, not something a caller can do
+  per request.
 - **Mix sources.** Natural *at the link level* — each dataset carries its own
   `collection_url` from any host, and MCP `get_stac_details` renders whatever
   inline STAC it's given. The two chokepoints that tripped up *novel* sources
