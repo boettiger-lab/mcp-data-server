@@ -12,7 +12,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.session import BaseSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from stac import STAC_DATASETS, STAC_LOAD_ERRORS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection, public_catalog_url as _stac_public_catalog_url, start_periodic_refresh as _stac_start_periodic_refresh
+from stac import STAC_DATASETS, STAC_LOAD_ERRORS, STAC_CATALOG_URL, list_datasets as _stac_list, get_dataset as _stac_get, get_collection as _stac_get_collection, public_catalog_url as _stac_public_catalog_url, start_periodic_refresh as _stac_start_periodic_refresh, discovery_enabled as _stac_discovery_enabled, default_catalog_token as _stac_default_catalog_token
 
 # Workaround for https://github.com/boettiger-lab/mcp-data-server/issues/5
 # send_notification crashes with ClosedResourceError when the client disconnects
@@ -165,12 +165,31 @@ EXTRAS_RAW = load_text_file("experimental-extensions.md") if EXTRA_EXTENSIONS el
 # -------------------------------------------------------------------------
 # 3. CONTEXT INJECTION (PROMPT ENGINEERING)
 # -------------------------------------------------------------------------
+# The discovery step is named only where the tool exists. A deployment with
+# STAC_DISCOVERY=0 (#420) does not register `browse_stac_catalog`, and guidance
+# that still told the model to call it would burn a turn on `Unknown tool`. With
+# discovery on — every deployment today — both strings below are byte-identical
+# to what shipped before, so the assembled description does not move.
+_DISCOVER_STEP = (
+    "Call `browse_stac_catalog` then `get_stac_details`"
+    if _stac_discovery_enabled()
+    else "Call `get_stac_details`"
+)
+_QUERY_DISCOVER_STEPS = (
+    """1. Call `browse_stac_catalog` to see all available dataset IDs and titles.
+2. Call `get_stac_details` with the relevant dataset ID to get exact S3 paths and column schemas.
+3. Use ONLY paths returned by those tools — never guess or hardcode any S3 URLs."""
+    if _stac_discovery_enabled()
+    else """1. Call `get_stac_details` with the relevant dataset ID to get exact S3 paths and column schemas.
+2. Use ONLY paths returned by that tool — never guess or hardcode any S3 URLs."""
+)
+
 TOOL_INJECTED_CONTEXT = f"""
 ---
 ### ⚠️ CRITICAL SQL RULES (MUST FOLLOW)
 1. **NO TABLES EXIST:** The database is empty. You CANNOT write `FROM table_name`.
 2. **USE PARQUET PATHS:** You MUST use `FROM read_parquet('s3://...')` for ALL queries.
-3. **DISCOVER PATHS — TRUST STAC PATHS EXACTLY:** Call `browse_stac_catalog` then `get_stac_details` to get exact S3 paths — then use them **verbatim**. NEVER guess, modify, or "fix" a path. Both path depth and glob pattern vary across datasets — there is no single convention. Examples:
+3. **DISCOVER PATHS — TRUST STAC PATHS EXACTLY:** {_DISCOVER_STEP} to get exact S3 paths — then use them **verbatim**. NEVER guess, modify, or "fix" a path. Both path depth and glob pattern vary across datasets — there is no single convention. Examples:
    - `read_parquet('s3://public-wdpa/wdpa-december-2025/hex/h0=*/data_0.parquet')` — versioned collection, partition glob
    - `read_parquet('s3://public-padus/padus-4-1/fee/hex/h0=*/data_0.parquet')` — nested path, partition glob
 
@@ -335,7 +354,8 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
 # -------------------------------------------------------------------------
 # 5. MCP RESOURCES (Schema Browsing)
 # -------------------------------------------------------------------------
-@mcp.resource("catalog://list")
+# `catalog://list` enumerates the whole configured catalog, so it is part of the
+# discovery surface and registered with it (below), not unconditionally.
 def catalog_list() -> str:
     return _stac_list()
 
@@ -346,40 +366,38 @@ def catalog_dataset(dataset_id: str) -> str:
 # -------------------------------------------------------------------------
 # 6. MCP TOOLS — Dataset Discovery
 # -------------------------------------------------------------------------
-@mcp.tool()
+# Catalog scope is a deployment property, not a tool argument (#420). None of
+# these tools take `catalog_url` / `catalog_token`: which catalog this server
+# serves is `STAC_CATALOG_URL` (+ `STAC_CATALOG_TOKEN` when it is private), set
+# once per deployment, exactly as S3 credentials are. A client that still sends
+# the old arguments is not broken — MCP argument validation drops fields that are
+# not in the schema — but the value is ignored and resolution happens against the
+# deployment's own catalog. Inline `collection` / `catalog` remain the primary
+# contract ("carry the links"); see docs/architecture/catalog-sourcing.md.
 def browse_stac_catalog(
-    catalog_url: str = None,
-    catalog_token: str = None,
     catalog: dict = None,
 ) -> str:
     """Browse the full public STAC catalog to discover datasets not already loaded in your app.
     Use when the user asks about data outside your pre-configured layers.
-    Optionally provide catalog_url to use a custom STAC catalog instead of the server default.
-    Optionally provide catalog_token (Bearer token) if the catalog requires authentication.
     Optionally provide catalog inline (a Catalog dict with nested `children: [<collection dict>, ...]`)
     to skip the HTTP fetch entirely — useful for OAuth-walled deployments where the
     client already has the catalog content cached."""
-    return _stac_list(catalog_url, catalog_token, catalog=catalog)
+    return _stac_list(catalog=catalog)
 
 @mcp.tool()
 def get_stac_details(
     dataset_id: str,
-    catalog_url: str = None,
-    catalog_token: str = None,
     collection: dict = None,
 ) -> str:
     """Fetch metadata (parquet paths, column schemas) for any STAC collection by ID.
     Returns markdown formatted for LLM consumption (use get_collection for structured JSON).
-    Optionally provide catalog_url and catalog_token if using a private STAC catalog.
     Optionally provide collection inline (a Collection dict, optionally with embedded
     `children: [<sub-collection dict>, ...]`) to skip the HTTP fetch entirely."""
-    return _stac_get(dataset_id, catalog_url, catalog_token, collection=collection)
+    return _stac_get(dataset_id, collection=collection)
 
 @mcp.tool()
 def get_collection(
     collection_id: str,
-    catalog_url: str = None,
-    catalog_token: str = None,
     collection: dict = None,
 ) -> dict:
     """Return structured STAC collection metadata as JSON for programmatic use.
@@ -394,7 +412,26 @@ def get_collection(
     back into the same parameter.
 
     Intended for app code that builds map layers and system prompts programmatically."""
-    return _stac_get_collection(collection_id, catalog_url, catalog_token, collection=collection)
+    return _stac_get_collection(collection_id, collection=collection)
+
+
+def _register_stac_discovery(server) -> bool:
+    """Register the whole-catalog discovery surface if this deployment enables it.
+
+    `browse_stac_catalog` and `catalog://list` are the only surfaces whose purpose
+    is to enumerate everything the configured catalog holds. A curated app
+    deployment sets `STAC_DISCOVERY=0` and they simply never appear in
+    `tools/list` — the client reads the live registry, so the model is never told
+    about a tool it cannot call. Returns whether they were registered.
+    """
+    if not _stac_discovery_enabled():
+        return False
+    server.resource("catalog://list")(catalog_list)
+    server.tool()(browse_stac_catalog)
+    return True
+
+
+DISCOVERY_ENABLED = _register_stac_discovery(mcp)
 
 # -------------------------------------------------------------------------
 # 7. MCP PROMPTS (Personas for Smart Clients)
@@ -510,9 +547,7 @@ query.__doc__ = f"""
 Executes optimized DuckDB SQL against S3 parquet files.
 
 BEFORE writing any SQL:
-1. Call `browse_stac_catalog` to see all available dataset IDs and titles.
-2. Call `get_stac_details` with the relevant dataset ID to get exact S3 paths and column schemas.
-3. Use ONLY paths returned by those tools — never guess or hardcode any S3 URLs.
+{_QUERY_DISCOVER_STEPS}
 
 For private data, pass s3_key, s3_secret, and optionally s3_endpoint and s3_scope alongside the SQL query.
 For an anonymous public source (e.g. a read-only mirror), pass s3_endpoint alone (no key/secret) with s3_scope — useful to read a mirror like s3://public-* from a backup endpoint when the primary is unavailable.
@@ -1235,6 +1270,18 @@ if __name__ == "__main__":
         # catalog they can't reach (#346).
         print(f"🌐 STAC catalog (advertised to clients): {_stac_public_catalog_url()}", file=sys.stderr)
     print(f"📊 Datasets loaded: {len(STAC_DATASETS)}", file=sys.stderr)
+    # Catalog scope is deployment config now (#420), so say what this deployment
+    # resolved it to — an operator reading only the tool schemas can no longer
+    # tell, and a private catalog silently fetched without its token looks
+    # exactly like an empty one.
+    if _stac_default_catalog_token():
+        print("🔑 STAC catalog token configured (STAC_CATALOG_TOKEN)", file=sys.stderr)
+    print(
+        f"🧭 Catalog discovery: {'enabled' if DISCOVERY_ENABLED else 'disabled'} "
+        f"(browse_stac_catalog / catalog://list "
+        f"{'registered' if DISCOVERY_ENABLED else 'not registered — STAC_DISCOVERY=0'})",
+        file=sys.stderr,
+    )
     # Keep every replica's STAC snapshot fresh without a rollout — a publish to S3
     # (new dataset OR new asset on an existing collection) becomes visible within
     # one refresh interval instead of the pod's lifetime (#337).

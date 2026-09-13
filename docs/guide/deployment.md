@@ -46,5 +46,7 @@ See [`AGENTS.md` → Rollout workflow](https://github.com/boettiger-lab/mcp-data
 |---|---|---|
 | `STAC_CATALOG_URL` | NRP public catalog | URL of the STAC catalog to serve (the address *this server* reads) |
 | `STAC_PUBLIC_CATALOG_URL` | `STAC_CATALOG_URL` | The same catalog's client-reachable URL. Set it only when the server reads the catalog over an address clients can't resolve (e.g. an in-cluster mirror); this is what `browse_stac_catalog` and `GET /version` advertise |
+| `STAC_CATALOG_TOKEN` | *(unset)* | Bearer token for `STAC_CATALOG_URL`, when the deployment's catalog is private. Sent as `Authorization: Bearer <token>` on catalog fetches; never travels in a JSON-RPC body. The env-side replacement for the removed `catalog_token` tool argument (#420) |
+| `STAC_DISCOVERY` | `1` (on) | Whether to register the whole-catalog discovery surface — `browse_stac_catalog` and the `catalog://list` resource. `0`/`false`/`off` leaves them out of `tools/list` entirely, so a curated app's model sees only what the app configures. Per-dataset lookup (`get_stac_details`, `get_collection`, `catalog://{id}`) is unaffected |
 | `THREADS` | 100 | DuckDB thread count (S3 workloads are I/O-bound) |
 | `PORT` | 8000 | HTTP server port |

@@ -1,22 +1,39 @@
 # Private Data Access
 
-The server supports private STAC catalogs and private S3 buckets. Credentials are supplied per-call and scoped to that request only — they are never logged, cached, or shared between clients.
+The server supports private STAC catalogs and private S3 buckets. Query credentials are supplied per-call and scoped to that request only — they are never logged, cached, or shared between clients. Catalog scope is different: it is a property of the deployment, not an argument.
 
 ## Private STAC catalog
 
-Pass a bearer token alongside the catalog URL:
+Point the deployment at its own catalog and supply the bearer token through the environment:
 
-```json
-{
-  "tool": "browse_stac_catalog",
-  "arguments": {
-    "catalog_url": "https://your-app.example.org/stac/catalog.json",
-    "catalog_token": "YOUR_BEARER_TOKEN"
-  }
-}
+```yaml
+env:
+  - name: STAC_CATALOG_URL
+    value: https://your-app.example.org/stac/catalog.json
+  - name: STAC_CATALOG_TOKEN
+    valueFrom:
+      secretKeyRef: { name: stac-catalog, key: token }
 ```
 
-Pass the same `catalog_url` and `catalog_token` to `get_stac_details` as well.
+The token is forwarded as `Authorization: Bearer <token>` when fetching catalog JSON, and never travels in a JSON-RPC body.
+
+::: warning Catalog scope is not a tool argument
+`get_stac_details`, `get_collection` and `browse_stac_catalog` took `catalog_url` and
+`catalog_token` until [#420](https://github.com/boettiger-lab/mcp-data-server/issues/420).
+They do not any more: an argument the model supplies is an argument the model can change,
+which let an agent reach datasets outside the ones its app configures. A client that still
+sends them is not broken — unknown arguments are dropped during validation — but the value
+is ignored and lookups resolve against the deployment's own catalog.
+
+A client that already holds the STAC JSON can still skip the fetch entirely by passing it
+inline as `collection` (or `catalog` for `browse_stac_catalog`). That remains the primary
+contract; see [catalog sourcing](https://github.com/boettiger-lab/mcp-data-server/blob/main/docs/architecture/catalog-sourcing.md).
+:::
+
+Running a private app and want the model to see *only* the collections you configure? Set
+`STAC_DISCOVERY=0` and `browse_stac_catalog` / `catalog://list` are not registered at all —
+they never appear in `tools/list`, so the model is not told about a tool it cannot call.
+Per-dataset lookup (`get_stac_details`, `get_collection`, `catalog://{id}`) is unaffected.
 
 ::: tip Serving a private catalog
 If you use oauth2-proxy for browser access, add a parallel nginx `auth_request` bypass for the `/stac/` path that accepts a static shared token via the `Authorization` header. This allows the MCP server to fetch catalog metadata without a browser OAuth session.

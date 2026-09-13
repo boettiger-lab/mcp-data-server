@@ -1630,5 +1630,130 @@ class TestStacStartupGate:
             server._enforce_stac_startup_gate()
 
 
+class TestCatalogScopeIsNotAToolArgument:
+    """#420: catalog scope is a deployment property, not a model-supplied argument.
+
+    The model must not be able to re-decide, per call, which catalog (and whose
+    credential) the server reads. `STAC_CATALOG_URL` / `STAC_CATALOG_TOKEN` say it
+    once per deployment, exactly as the S3 source registry does for credentials.
+    """
+
+    SCOPED_TOOLS = ("browse_stac_catalog", "get_stac_details", "get_collection")
+
+    def test_signatures_carry_no_catalog_scope(self):
+        import inspect
+        import server
+        for name in self.SCOPED_TOOLS:
+            params = inspect.signature(getattr(server, name)).parameters
+            assert "catalog_url" not in params, f"{name} still takes catalog_url"
+            assert "catalog_token" not in params, f"{name} still takes catalog_token"
+
+    def test_tools_list_does_not_advertise_catalog_scope(self):
+        """Verification 1: `tools/list` no longer offers the parameters."""
+        import server
+        registered = server.mcp._tool_manager._tools
+        for name in self.SCOPED_TOOLS:
+            if name not in registered:  # browse is discovery-gated
+                continue
+            props = registered[name].parameters.get("properties", {})
+            assert "catalog_url" not in props, f"{name} schema still advertises catalog_url"
+            assert "catalog_token" not in props, f"{name} schema still advertises catalog_token"
+
+    def test_inline_collection_still_resolves_unchanged(self):
+        """Verification 2: inline `collection` — the production path — is untouched."""
+        import server
+        out = server.get_stac_details(
+            "anything",
+            collection={"id": "inline-demo", "title": "Inline Demo",
+                        "description": "from the client"},
+        )
+        assert "inline-demo" in out or "Inline Demo" in out
+
+    @pytest.mark.parametrize("legacy", ["catalog_url", "catalog_token"])
+    def test_legacy_argument_is_ignored_not_rejected(self, legacy):
+        """Verification 4, plus the migration claim.
+
+        A client still sending the old arguments (the wyoming sidecar injects
+        `catalog_url`) must not get an error — MCP argument validation drops
+        fields absent from the schema — and the value must not be honoured: no
+        fetch of the foreign catalog is attempted.
+        """
+        import asyncio
+        import stac
+        import server
+
+        tool = server.mcp._tool_manager._tools["get_stac_details"]
+        with patch("stac.pystac.Catalog.from_file",
+                   side_effect=AssertionError("foreign catalog was fetched")), \
+             patch("stac.fetch_stac_catalog",
+                   side_effect=AssertionError("foreign catalog was fetched")):
+            result = asyncio.run(tool.run({
+                "dataset_id": "anything",
+                legacy: "https://not-ours.example.org/catalog.json",
+                "collection": {"id": "inline-demo", "title": "Inline Demo",
+                               "description": "from the client"},
+            }))
+        assert "inline-demo" in str(result) or "Inline Demo" in str(result)
+
+
+class TestDiscoveryIsOptOutPerDeployment:
+    """#420 proposal 2: whole-catalog discovery is registered only where wanted."""
+
+    def _fresh_server(self):
+        from mcp.server.fastmcp import FastMCP
+        return FastMCP("discovery-test")
+
+    def test_registered_by_default(self, monkeypatch):
+        """Default on: the shared public server keeps the tool for clients pinned
+        too old to notice it disappearing (utah-public-lands sits at v3.24.0)."""
+        import server
+        monkeypatch.delenv("STAC_DISCOVERY", raising=False)
+        fresh = self._fresh_server()
+        assert server._register_stac_discovery(fresh) is True
+        assert "browse_stac_catalog" in {t.name for t in fresh._tool_manager.list_tools()}
+
+    def test_absent_when_deployment_opts_out(self, monkeypatch):
+        """Verification 3: with discovery disabled the tool is not in `tools/list`.
+
+        It is not registered at all — a curated app's model is never told about a
+        tool it would only get `Unknown tool` from.
+        """
+        import server
+        for val in ("0", "false", "off", "no", "FALSE"):
+            monkeypatch.setenv("STAC_DISCOVERY", val)
+            fresh = self._fresh_server()
+            assert server._register_stac_discovery(fresh) is False, val
+            assert "browse_stac_catalog" not in {
+                t.name for t in fresh._tool_manager.list_tools()
+            }, val
+
+    def test_catalog_list_resource_follows_the_same_gate(self, monkeypatch):
+        """`catalog://list` enumerates the whole catalog too, so it goes with it."""
+        import asyncio
+        import server
+
+        monkeypatch.setenv("STAC_DISCOVERY", "0")
+        off = self._fresh_server()
+        server._register_stac_discovery(off)
+        assert not [r for r in asyncio.run(off.list_resources())
+                    if str(r.uri).startswith("catalog://list")]
+
+        monkeypatch.setenv("STAC_DISCOVERY", "1")
+        on = self._fresh_server()
+        server._register_stac_discovery(on)
+        assert [r for r in asyncio.run(on.list_resources())
+                if str(r.uri).startswith("catalog://list")]
+
+    def test_per_dataset_lookup_survives_discovery_being_off(self):
+        """Turning discovery off scopes the catalog, it does not remove metadata
+        lookup: `get_stac_details` / `catalog://{id}` still resolve against the
+        deployment's own catalog."""
+        import asyncio
+        import server
+        assert "get_stac_details" in server.mcp._tool_manager._tools
+        templates = asyncio.run(server.mcp.list_resource_templates())
+        assert any("catalog://{dataset_id}" == t.uriTemplate for t in templates)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
