@@ -55,6 +55,20 @@ def _discovery_hint(noun: str) -> str:
     return f" Use browse_stac_catalog to list available {noun}." if discovery_enabled() else ""
 
 
+def _searched_catalog(catalog_url: str = None) -> str:
+    """Name the catalog a lookup actually consulted, for a not-found message.
+
+    Since #420 a caller cannot retarget the catalog per call, and an argument
+    absent from the schema is dropped during validation rather than rejected —
+    so a direct MCP consumer still sending `catalog_url` is answered from the
+    deployment's catalog with no signal that its own was never consulted. Naming
+    the catalog in the one response such a consumer will actually read turns that
+    silence into something diagnosable. Quote the *client-reachable* URL (#346):
+    on a mirror head the address this process reads may not resolve for them.
+    """
+    return catalog_url or f"this server's catalog ({public_catalog_url()})"
+
+
 def public_catalog_url() -> str:
     """The catalog URL a *client* should put in its own config.
 
@@ -978,7 +992,10 @@ def get_dataset(
             result = _fuzzy_lookup(STAC_DATASETS, dataset_id)
         if result is not None:
             return result
-    return f"Dataset '{dataset_id}' not found.{_discovery_hint('datasets')}"
+    return (
+        f"Dataset '{dataset_id}' not found in {_searched_catalog(catalog_url)}."
+        f"{_discovery_hint('datasets')}"
+    )
 
 
 def _coerce_inline_collection(d: dict):
@@ -1073,7 +1090,7 @@ def get_collection(
                 return substring_hit
         except Exception as e:
             return {"error": f"Failed to fetch catalog: {e}"}
-        return {"error": f"Collection '{collection_id}' not found.{_discovery_hint('collections')}"}
+        return {"error": f"Collection '{collection_id}' not found in {_searched_catalog(catalog_url)}."}
 
     # Default catalog: look up from pre-populated cache (read under the lock so a
     # concurrent background refresh #337 can't mutate _STAC_RAW mid-lookup).
@@ -1090,4 +1107,7 @@ def get_collection(
     if result is not None:
         return result
 
-    return {"error": f"Collection '{collection_id}' not found.{_discovery_hint('collections')}"}
+    return {"error": (
+        f"Collection '{collection_id}' not found in {_searched_catalog()}."
+        f"{_discovery_hint('collections')}"
+    )}
