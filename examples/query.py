@@ -13,7 +13,7 @@ Run:
 import asyncio
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 MCP_URL = "https://duckdb-mcp.nrp-nautilus.io/mcp"
 
@@ -27,7 +27,9 @@ LIMIT 10
 
 
 async def main() -> None:
-    async with streamablehttp_client(MCP_URL) as (read, write, _):
+    # mcp >= 2.0. On the 1.x SDK this is `streamablehttp_client`, and it
+    # yields a third element (the session id).
+    async with streamable_http_client(MCP_URL) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
