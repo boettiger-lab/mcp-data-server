@@ -2,10 +2,14 @@
 
 The MCP server speaks [streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http), so you can call its tools from any language — no LLM client required. You can also wire the tools into an LLM agent so the model writes and runs queries on its own.
 
-Most of this page is one worked example, carried through four times: in `dplyr`
-and in ibis, each run first against a DuckDB on your own machine and then
-against the MCP server. You never have to write SQL — `dbplyr` and ibis compile
-it for you, and the server will happily run what they produce.
+This page works one real example three ways, in both R and Python:
+
+1. **[Local compute](#_1-local-compute)** — a DuckDB on your own machine, no server involved.
+2. **[The MCP server](#_2-the-mcp-server)** — the same pipeline, executed next to the data.
+3. **[MCP and a chat model](#_3-mcp-and-a-chat-model)** — hand the question to an LLM and let it work.
+
+You never have to write SQL: `dbplyr` and ibis compile it for you, and the
+server will happily run what they produce.
 
 Full runnable scripts are in the [`examples/`](https://github.com/boettiger-lab/mcp-data-server/tree/main/examples) folder.
 
@@ -40,14 +44,32 @@ The S3 paths below are copied from `get_stac_details`. Always do that rather
 than typing paths from memory — see [Available Datasets](/guide/datasets).
 :::
 
-### R — dplyr against a local DuckDB
+The answer looks like this:
 
-Nothing here is specific to this server: a DuckDB on your own machine reads
-Parquet straight out of the [source.coop](https://source.coop) mirror, and
-[`duckdbfs`](https://cboettig.github.io/duckdbfs/) handles the connection.
+![Bird observations against median household income for the 32 census tracts of New Haven CT, showing a wide scatter with a weak upward tilt](/img/new-haven-birds.png)
+
+Across New Haven's 32 tracts, observation counts span more than three orders of
+magnitude (26 to 169,062) against a sixfold income range ($21k–$136k). The tilt
+is upward but weak — Pearson *r* = 0.33 against log counts, Spearman ρ = 0.23 —
+and a handful of hotspots dominate everything: the top tract is East Rock Park.
+So there is a hint of the "luxury effect" reported in the urban-ecology
+literature, but on this evidence recorded birds mostly track **birders**, not
+income and not people (population does even worse, *r* = 0.20). Sampling bias
+like that is the first thing to reckon with in any analysis built on
+opportunistic occurrence data.
+
+## 1. Local compute
+
+No server involved. A DuckDB running on your own machine reads Parquet straight
+out of the [source.coop](https://source.coop) mirror, and your `dplyr` or ibis
+code is compiled to SQL and executed inside that engine. Only the final 32-row
+answer is ever materialised.
+
+### R — dplyr and duckdbfs
+
+[`duckdbfs`](https://cboettig.github.io/duckdbfs/) handles the connection and
 [`dbplyr`](https://dbplyr.tidyverse.org) compiles your `dplyr` verbs into DuckDB
-SQL, so filters, joins and aggregations run inside the engine. Only the final
-32-row answer is ever materialised in R.
+SQL, so filters, joins and aggregations all run inside the engine.
 
 ```r
 library(duckdbfs)
@@ -148,91 +170,7 @@ ggplot(tracts, aes(median_income, bird_observations)) +
   theme_minimal(base_size = 12)
 ```
 
-![Bird observations against median household income for the 32 census tracts of New Haven CT, showing a wide scatter with a weak upward tilt](/img/new-haven-birds.png)
-
-Across New Haven's 32 tracts, observation counts span more than three orders of
-magnitude (26 to 169,062) against a sixfold income range ($21k–$136k). The tilt
-is upward but weak — Pearson *r* = 0.33 against log counts, Spearman ρ = 0.23 —
-and a handful of hotspots dominate everything: the top tract is East Rock Park.
-So there is a hint of the "luxury effect" reported in the urban-ecology
-literature, but on this evidence recorded birds mostly track **birders**, not
-income and not people (population does even worse, *r* = 0.20). Sampling bias
-like that is the first thing to reckon with in any analysis built on
-opportunistic occurrence data.
-
-### R — the same pipeline, on the MCP server
-
-Your machine just pulled 169 MiB across the network to answer with 32 rows. The
-MCP server sits next to the data, so it can do that scan locally and send back
-only the answer.
-
-You do not have to write SQL to use it. `dbplyr` already compiled your `dplyr`
-pipeline into DuckDB SQL — `sql_render()` hands you that string, and the
-server's `query` tool runs it.
-
-Only two things change. First, build the tables from `read_parquet()` rather
-than `open_dataset()`. `open_dataset()` registers a DuckDB view, so `dbplyr`
-renders `FROM <view name>` — which means nothing to a server that has no such
-view. Keeping the path inline makes the generated SQL portable:
-
-```r
-# The server reads the NRP copy, so these are the NRP paths the catalog
-# publishes. dbplyr only needs column NAMES to compile the query, and gets them
-# by reading Parquet footers -- a fraction of a second, not a scan.
-duckdb_s3_config(s3_endpoint = "s3-west.nrp-nautilus.io",
-                 s3_url_style = "path", s3_use_ssl = TRUE, anonymous = TRUE)
-con <- cached_connection()
-
-hex <- function(path) {
-  tbl(con, sql(paste0("SELECT * FROM read_parquet('s3://public", path, "')")))
-}
-
-places      <- hex("-census/census-2024/place/hex/h0=*/data_0.parquet")
-blockgroups <- hex("-census/acs-2020-2024/blockgroup/hex/h0=*/data_0.parquet")
-gbif        <- hex("-gbif/2026-06/hex/h0=*/data_0.parquet")
-```
-
-**The `dplyr` pipeline itself is byte-for-byte identical** — steps 1–5 above,
-unchanged. Only the last line differs: render instead of collect, and post.
-
-```r
-library(httr2)
-library(jsonlite)
-
-mcp_url <- "https://duckdb-mcp.nrp-nautilus.io/mcp"
-
-mcp_call <- function(name, arguments) {
-  resp <- request(mcp_url) |>
-    req_headers(Accept = "application/json, text/event-stream",
-                `Content-Type` = "application/json") |>
-    req_body_json(list(jsonrpc = "2.0", id = 1L, method = "tools/call",
-                       params = list(name = name, arguments = arguments))) |>
-    req_timeout(600) |>
-    req_perform()
-
-  body <- resp_body_string(resp)
-  if (grepl("event-stream", resp_content_type(resp), fixed = TRUE)) {
-    data <- sub("^data: ", "", grep("^data: ", strsplit(body, "\n")[[1]], value = TRUE))
-    out <- fromJSON(data[length(data)], simplifyVector = FALSE)
-  } else {
-    out <- fromJSON(body, simplifyVector = FALSE)
-  }
-  if (!is.null(out$error)) stop(out$error$message)
-  out$result$content[[1]]$text
-}
-
-sql <- as.character(sql_render(result))   # <- dplyr, compiled to DuckDB SQL
-tracts <- mcp_call("query", list(sql_query = sql)) |>
-  parse_md_table() |>
-  mutate(across(c(population, median_income, bird_observations), as.numeric))
-```
-
-`query` answers with a markdown table; `parse_md_table()` (in
-[the full script](https://github.com/boettiger-lab/mcp-data-server/blob/main/examples/new_haven_birds_mcp.R))
-is a dozen lines of `strsplit`. Keep every column character on the way back —
-tract ids are FIPS codes, and `as.numeric()` would eat their leading zero.
-
-### Python — ibis against a local DuckDB
+### Python — ibis
 
 [ibis](https://ibis-project.org) is the Python counterpart to `dbplyr`: deferred
 expressions that compile to DuckDB SQL, with nothing executed until
@@ -317,10 +255,84 @@ print(ibis.to_sql(result))   # inspect the DuckDB SQL ibis wrote for you
 tracts = result.execute()    # ~9 s; only these 32 rows come back to Python
 ```
 
-### Python — the same pipeline, on the MCP server
 
-Same trade as in R, and the same two changes: repoint the tables at NRP, then
-render instead of execute.
+## 2. The MCP server
+
+The local route pulled 169 MiB across the network to answer with 32 rows. The
+MCP server sits next to the data, so it can run the same scan there and send
+back only the answer — and you need nothing installed but an HTTP client.
+
+You still do not write SQL. `dbplyr` and ibis already compiled your pipeline;
+`sql_render()` and `ibis.to_sql()` hand you that string, and the server's
+`query` tool runs it.
+
+### R — dplyr, executed on the server
+
+Only two things change from the local version. First, build the tables from `read_parquet()` rather
+than `open_dataset()`. `open_dataset()` registers a DuckDB view, so `dbplyr`
+renders `FROM <view name>` — which means nothing to a server that has no such
+view. Keeping the path inline makes the generated SQL portable:
+
+```r
+# The server reads the NRP copy, so these are the NRP paths the catalog
+# publishes. dbplyr only needs column NAMES to compile the query, and gets them
+# by reading Parquet footers -- a fraction of a second, not a scan.
+duckdb_s3_config(s3_endpoint = "s3-west.nrp-nautilus.io",
+                 s3_url_style = "path", s3_use_ssl = TRUE, anonymous = TRUE)
+con <- cached_connection()
+
+hex <- function(path) {
+  tbl(con, sql(paste0("SELECT * FROM read_parquet('s3://public", path, "')")))
+}
+
+places      <- hex("-census/census-2024/place/hex/h0=*/data_0.parquet")
+blockgroups <- hex("-census/acs-2020-2024/blockgroup/hex/h0=*/data_0.parquet")
+gbif        <- hex("-gbif/2026-06/hex/h0=*/data_0.parquet")
+```
+
+**The `dplyr` pipeline itself is byte-for-byte identical** — steps 1–5 above,
+unchanged. Only the last line differs: render instead of collect, and post.
+
+```r
+library(httr2)
+library(jsonlite)
+
+mcp_url <- "https://duckdb-mcp.nrp-nautilus.io/mcp"
+
+mcp_call <- function(name, arguments) {
+  resp <- request(mcp_url) |>
+    req_headers(Accept = "application/json, text/event-stream",
+                `Content-Type` = "application/json") |>
+    req_body_json(list(jsonrpc = "2.0", id = 1L, method = "tools/call",
+                       params = list(name = name, arguments = arguments))) |>
+    req_timeout(600) |>
+    req_perform()
+
+  body <- resp_body_string(resp)
+  if (grepl("event-stream", resp_content_type(resp), fixed = TRUE)) {
+    data <- sub("^data: ", "", grep("^data: ", strsplit(body, "\n")[[1]], value = TRUE))
+    out <- fromJSON(data[length(data)], simplifyVector = FALSE)
+  } else {
+    out <- fromJSON(body, simplifyVector = FALSE)
+  }
+  if (!is.null(out$error)) stop(out$error$message)
+  out$result$content[[1]]$text
+}
+
+sql <- as.character(sql_render(result))   # <- dplyr, compiled to DuckDB SQL
+tracts <- mcp_call("query", list(sql_query = sql)) |>
+  parse_md_table() |>
+  mutate(across(c(population, median_income, bird_observations), as.numeric))
+```
+
+`query` answers with a markdown table; `parse_md_table()` (in
+[the full script](https://github.com/boettiger-lab/mcp-data-server/blob/main/examples/new_haven_birds_mcp.R))
+is a dozen lines of `strsplit`. Keep every column character on the way back —
+tract ids are FIPS codes, and `as.numeric()` would eat their leading zero.
+
+### Python — ibis, executed on the server
+
+The same two changes: repoint the tables at NRP, then render instead of execute.
 
 ```python
 from mcp import ClientSession
@@ -347,69 +359,12 @@ async def main():
 1.x SDK it is `streamablehttp_client` and yields a third element, the session id.
 :::
 
-### Local or server?
-
-Both routes ran the identical query and returned the identical 32 rows.
-
-| | Local DuckDB (source.coop) | MCP server (NRP) |
-|---|---|---|
-| Wall clock | 9–13 s | 13–15 s |
-| Bytes over your network | 169 MiB | ~3 MiB |
-| Local RAM | capped at 3 GB, spills to disk | none |
-| Needs | `duckdbfs`/`ibis` + S3 config | an HTTP POST |
-| Private data | your own credentials, never leave the machine | not available on the public server |
-
-On a query this well-pruned the two are neck and neck, and these timings come
-from a well-connected host — the local route is bandwidth-bound, so on a home
-connection its 169 MiB is what widens the gap, not the compute. Reach for the
-local route when you want to iterate interactively, join against files on disk,
-or keep credentials on your own machine; reach for the server when the scan is
-large relative to your bandwidth, when you would rather not install a stack at
-all — or when you want an LLM to do the work, as in the next section.
-
-## Calling the MCP tools directly
+### Without dplyr or ibis
 
 If you just want to run SQL and skip the `dplyr`/ibis layer, the `query` tool is
 one HTTP POST.
-### Python
 
-The official `mcp` SDK speaks streamable HTTP natively.
-
-```bash
-pip install mcp
-```
-
-```python
-import asyncio
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-
-MCP_URL = "https://duckdb-mcp.nrp-nautilus.io/mcp"
-
-SQL = """
-SELECT country, name_en, subtype
-FROM read_parquet('s3://public-overturemaps/2026-02-18.0/countries.parquet')
-WHERE subtype = 'country' AND is_land
-ORDER BY name_en
-LIMIT 10
-"""
-
-async def main():
-    async with streamable_http_client(MCP_URL) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            tools = await session.list_tools()
-            print("Available tools:", [t.name for t in tools.tools])
-
-            result = await session.call_tool("query", {"sql_query": SQL})
-            for block in result.content:
-                print(block.text)
-
-asyncio.run(main())
-```
-
-### R
+#### R
 
 The same call in R. No R MCP client speaks HTTP directly ([`mcptools`](https://posit-dev.github.io/mcptools/) is stdio-only — see the [ellmer + mcptools](#r-—-ellmer-mcptools) section below). The server runs in stateless mode, so you can hit the JSON-RPC endpoint directly with `httr2`. Responses arrive as server-sent events (SSE).
 
@@ -467,50 +422,71 @@ for (block in resp$result$content) {
 }
 ```
 
-## LLM tool use
 
-Let the model discover datasets, write SQL, and interpret results autonomously. The MCP tools (`browse_stac_catalog`, `get_stac_details`, `query`) are registered as callable tools so the model decides when and how to use them.
+#### Python
 
-Both examples below use `ChatOpenAI` / `chat_openai()` and work with any OpenAI-compatible endpoint. Set `OPENAI_API_KEY` and optionally `OPENAI_BASE_URL` in your environment.
-
-### Python — LangChain + LangGraph
+The official `mcp` SDK speaks streamable HTTP natively.
 
 ```bash
-pip install langchain-mcp-adapters langchain-openai langgraph
+pip install mcp
 ```
 
 ```python
 import asyncio
-import os
-from langchain_openai import ChatOpenAI
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.prebuilt import create_react_agent
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 MCP_URL = "https://duckdb-mcp.nrp-nautilus.io/mcp"
 
+SQL = """
+SELECT country, name_en, subtype
+FROM read_parquet('s3://public-overturemaps/2026-02-18.0/countries.parquet')
+WHERE subtype = 'country' AND is_land
+ORDER BY name_en
+LIMIT 10
+"""
+
 async def main():
-    client = MultiServerMCPClient({
-        "duckdb-geo": {
-            "url": MCP_URL,
-            "transport": "streamable_http",
-        }
-    })
-    tools = await client.get_tools()
+    async with streamable_http_client(MCP_URL) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
 
-    model = ChatOpenAI(
-        model=os.environ.get("MODEL", "gpt-4o"),
-        max_tokens=4096,
-    )
-    agent = create_react_agent(model, tools)
+            tools = await session.list_tools()
+            print("Available tools:", [t.name for t in tools.tools])
 
-    result = await agent.ainvoke(
-        {"messages": [{"role": "user",
-                       "content": "What fraction of Australia is protected area?"}]}
-    )
-    print(result["messages"][-1].content)
+            result = await session.call_tool("query", {"sql_query": SQL})
+            for block in result.content:
+                print(block.text)
 
 asyncio.run(main())
 ```
+
+### Local or server?
+
+Both routes ran the identical query and returned the identical 32 rows.
+
+| | Local DuckDB (source.coop) | MCP server (NRP) |
+|---|---|---|
+| Wall clock | 9–13 s | 13–15 s |
+| Bytes over your network | 169 MiB | ~3 MiB |
+| Local RAM | capped at 3 GB, spills to disk | none |
+| Needs | `duckdbfs`/`ibis` + S3 config | an HTTP POST |
+| Private data | your own credentials, never leave the machine | not available on the public server |
+
+On a query this well-pruned the two are neck and neck, and these timings come
+from a well-connected host — the local route is bandwidth-bound, so on a home
+connection its 169 MiB is what widens the gap, not the compute. Reach for the
+local route when you want to iterate interactively, join against files on disk,
+or keep credentials on your own machine; reach for the server when the scan is
+large relative to your bandwidth, when you would rather not install a stack at
+all — or when you want an LLM to do the work, as in the next section.
+
+
+## 3. MCP and a chat model
+
+Let the model discover datasets, write SQL, and interpret results autonomously. The MCP tools (`browse_stac_catalog`, `get_stac_details`, `query`) are registered as callable tools so the model decides when and how to use them.
+
+Both examples below use `ChatOpenAI` / `chat_openai()` and work with any OpenAI-compatible endpoint. Set `OPENAI_API_KEY` and optionally `OPENAI_BASE_URL` in your environment.
 
 ### R — ellmer + mcptools
 
@@ -552,3 +528,43 @@ chat$chat("What fraction of Australia is protected area?")
 ::: tip
 You can use the same pattern to talk to a local dev server at `http://localhost:8000/mcp` — just change the URL.
 :::
+
+
+### Python — LangChain + LangGraph
+
+```bash
+pip install langchain-mcp-adapters langchain-openai langgraph
+```
+
+```python
+import asyncio
+import os
+from langchain_openai import ChatOpenAI
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import create_react_agent
+
+MCP_URL = "https://duckdb-mcp.nrp-nautilus.io/mcp"
+
+async def main():
+    client = MultiServerMCPClient({
+        "duckdb-geo": {
+            "url": MCP_URL,
+            "transport": "streamable_http",
+        }
+    })
+    tools = await client.get_tools()
+
+    model = ChatOpenAI(
+        model=os.environ.get("MODEL", "gpt-4o"),
+        max_tokens=4096,
+    )
+    agent = create_react_agent(model, tools)
+
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user",
+                       "content": "What fraction of Australia is protected area?"}]}
+    )
+    print(result["messages"][-1].content)
+
+asyncio.run(main())
+```
