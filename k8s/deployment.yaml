@@ -23,7 +23,7 @@ spec:
                     values: ["us-west"]
       containers:
       - name: server
-        image: ghcr.io/boettiger-lab/mcp-data-server:v0.9.0@sha256:84c62dab4064b881be2c3020ca5045ff516231b015f3dedf0ad7cb3e9e140beb
+        image: ghcr.io/boettiger-lab/mcp-data-server:v0.9.1@sha256:1dd614eba3e85ee3dfc96fea7bc7757ab690651833cc7caf474e516aabc7f5c6
         imagePullPolicy: IfNotPresent
         env:
         # Release identity is supplied HERE, not baked into the image (#413). The
@@ -34,7 +34,7 @@ spec:
         # the image's own value is the commit it was built from, which stays correct
         # through a retag.
         - name: APP_VERSION
-          value: "v0.9.0"
+          value: "v0.9.1"
         - name: STAC_CATALOG_URL
           value: "https://s3-west.nrp-nautilus.io/public-data/stac/catalog.json"
         - name: MCP_PUBLIC_BASE_URL
