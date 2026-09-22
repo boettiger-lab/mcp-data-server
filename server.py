@@ -228,7 +228,12 @@ from s3config import (
     source_secret_sql,
     sql_quote as _sql_quote,
 )
-from dbconfig import duckdb_memory_limit, memory_limit_sql
+from dbconfig import (
+    duckdb_max_temp_directory_size,
+    duckdb_memory_limit,
+    memory_limit_sql,
+    spill_sql,
+)
 
 # Cap DuckDB's memory at ~80% of the pod's limit so an oversized query spills
 # instead of OOM-killing the pod (#270); no-op unless POD_MEMORY_LIMIT /
@@ -236,6 +241,12 @@ from dbconfig import duckdb_memory_limit, memory_limit_sql
 _MEMORY_LIMIT = duckdb_memory_limit()
 if _MEMORY_LIMIT:
     print(f"DuckDB memory_limit = {_MEMORY_LIMIT} (spill before cgroup OOM)", file=sys.stderr)
+# Likewise cap each connection's spill below the ephemeral-storage limit, so an
+# oversized spill fails its own query instead of getting the pod evicted (#423).
+_TEMP_CAP = duckdb_max_temp_directory_size()
+if _TEMP_CAP:
+    print(f"DuckDB max_temp_directory_size = {_TEMP_CAP} per connection "
+          f"(fail before ephemeral-storage eviction)", file=sys.stderr)
 
 
 @contextmanager
@@ -292,6 +303,14 @@ def get_isolated_db(s3_key: str = None, s3_secret: str = None, s3_endpoint: str 
                 conn.sql(mem_sql)
             except Exception as e:
                 print(f"⚠️ memory_limit setup skipped: {mem_sql!r}: {e}", file=sys.stderr)
+        # A private, bounded spill directory for this connection (#423). After
+        # SETUP_SQL so it replaces the shared '/tmp' there — concurrent spills
+        # into one directory segfault the process.
+        for stmt in spill_sql():
+            try:
+                conn.sql(stmt)
+            except Exception as e:
+                print(f"⚠️ spill setup skipped: {stmt!r}: {e}", file=sys.stderr)
         # Prefix-scoped secrets for every registry source (#264) — e.g. the
         # anonymous source.coop mirror. Scoped, so they coexist deterministically
         # with both the default `s3` secret and any client_s3 below (longest-
