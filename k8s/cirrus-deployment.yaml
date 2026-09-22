@@ -65,6 +65,16 @@ spec:
             resourceFieldRef:
               containerName: server
               resource: limits.memory
+        # Container's ephemeral-storage limit → DuckDB max_temp_directory_size
+        # (~50% per connection), so an oversized spill fails its query instead of
+        # filling the disk (#423). With no limit set (and no LimitRange on this
+        # cluster) the Downward API reports node-allocatable storage — still a
+        # tighter bound than DuckDB's own 90%-of-free-disk default.
+        - name: POD_EPHEMERAL_LIMIT
+          valueFrom:
+            resourceFieldRef:
+              containerName: server
+              resource: limits.ephemeral-storage
         resources:
           # Small requests so the pod schedules easily on the shared cirrus node;
           # limits stay generous so large DuckDB queries can still burst. cirrus

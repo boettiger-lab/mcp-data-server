@@ -63,6 +63,15 @@ spec:
             resourceFieldRef:
               containerName: server
               resource: limits.memory
+        # Container's ephemeral-storage limit (unset here, so the namespace
+        # LimitRange default — 50Gi on NRP) → DuckDB max_temp_directory_size (~50%
+        # per connection), so an oversized spill fails its query instead of the
+        # kubelet evicting the pod (#423).
+        - name: POD_EPHEMERAL_LIMIT
+          valueFrom:
+            resourceFieldRef:
+              containerName: server
+              resource: limits.ephemeral-storage
         resources:
           # Requests intentionally kept small (≤2 GiB memory, ≤1 CPU) to land in
           # NRP's "Ignored" bucket for utilization violations. Limits stay high so
