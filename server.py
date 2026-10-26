@@ -789,9 +789,8 @@ def register_hex_tiles(
     """Aggregate an H3 hex visualization to public object storage and return a
     paste-ready MapLibre render recipe.
 
-    The server picks the rendering automatically — a single GeoJSON file for
-    small/bounded results, a vector tile pyramid for large ones — and hands back
-    a ready `source` and `layer`. You render those verbatim; you never choose.
+    The server always builds a vector tile pyramid and hands back a ready
+    `source` and `layer`. You render those verbatim.
 
     WHEN TO USE — only when the user explicitly asks for an aggregate
     density / heatmap / hex-grid visualization over a region. Trigger phrases:

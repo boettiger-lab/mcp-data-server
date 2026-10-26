@@ -604,8 +604,7 @@ def build_hex_tiles(con: duckdb.DuckDBPyConnection, plan: dict) -> dict:
     build_t0 = time.perf_counter()
     copy_seconds = 0.0
 
-    # Phase 1 always: materialize the finest resolution. This is both the
-    # pyramid's base level and the source set for the GeoJSON fast path.
+    # Phase 1 always: materialize the finest resolution (the pyramid's base level).
     s0 = time.perf_counter()
     con.sql(statements[0])
     dt = time.perf_counter() - s0
